@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: ownerslocal-demo
+    runtime: static
+    buildCommand: ""
+    staticPublishPath: ./demo
+    pullRequestPreviewsEnabled: false
+    headers:
+      - path: /*
+        name: X-Robots-Tag
+        value: noindex
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
