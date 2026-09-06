@@ -184,83 +184,111 @@ Check your Browserslist config to be sure that your targets are set up correctly
 
       <!-- ================= DASHBOARD ================= -->
       <div class="page active" id="page-dashboard">
-        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5 mb-4">
-          <div class="bg-[#C7E3FA] rounded-2xl p-4 border border-[#9EC8EF] shadow-sm">
-            <div class="flex justify-between items-start"><span class="text-[10.5px] font-bold text-[#5E7393] uppercase tracking-wide">Revenue (MTD)</span><div class="p-1.5 rounded-lg bg-emerald-500/10 text-emerald-600"><i data-lucide="dollar-sign" class="w-3.5 h-3.5"></i></div></div>
-            <p class="text-xl font-black text-[#1F3557] mt-2">$34,900</p>
-            <p class="text-[10px] font-bold text-emerald-600 mt-1">▲ 8% vs last month</p>
+        <div class="flex justify-end mb-3">
+          <span class="px-3 py-1.5 bg-white border border-[#9EC8EF] text-[#315C9F] font-bold rounded-xl text-[10px] uppercase tracking-wider flex items-center gap-1.5"><i data-lucide="landmark" class="w-3.5 h-3.5"></i> Connect Bank Account</span>
+        </div>
+
+        <!-- TEAM DASHBOARD welcome banner -->
+        <div class="w-full bg-[#C7E3FA] border border-[#9EC8EF] p-5 rounded-[24px] shadow-sm flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-4">
+          <div class="text-left space-y-1">
+            <div class="flex items-center gap-1.5 text-[10px] font-black text-[#1F3557] uppercase tracking-wider">
+              <i data-lucide="laptop" class="w-3.5 h-3.5 text-[#315C9F]"></i>
+              <span>TEAM DASHBOARD</span>
+            </div>
+            <h2 class="text-lg font-display font-black tracking-tight text-[#1F3557] flex items-center gap-2">
+              Welcome, Mike!
+              <span class="w-2.5 h-2.5 bg-emerald-500 rounded-full animate-pulse border-2 border-white"></span>
+            </h2>
+            <p class="text-[11px] font-bold text-[#5E7393]">
+              Role: <span class="text-[#1F3557] uppercase font-mono">Owner</span> &middot; Hours Clocked This Session: <strong class="text-[#1F3557]">3.2 hours</strong>
+            </p>
           </div>
-          <div class="bg-[#C7E3FA] rounded-2xl p-4 border border-[#9EC8EF] shadow-sm">
-            <div class="flex justify-between items-start"><span class="text-[10.5px] font-bold text-[#5E7393] uppercase tracking-wide">Active Leads</span><div class="p-1.5 rounded-lg bg-blue-500/10 text-blue-600"><i data-lucide="target" class="w-3.5 h-3.5"></i></div></div>
-            <p class="text-xl font-black text-[#1F3557] mt-2">21</p>
-            <p class="text-[10px] font-bold text-emerald-600 mt-1">▲ 3 new this week</p>
-          </div>
-          <div class="bg-[#C7E3FA] rounded-2xl p-4 border border-[#9EC8EF] shadow-sm">
-            <div class="flex justify-between items-start"><span class="text-[10.5px] font-bold text-[#5E7393] uppercase tracking-wide">Jobs Today</span><div class="p-1.5 rounded-lg bg-purple-500/10 text-purple-600"><i data-lucide="briefcase" class="w-3.5 h-3.5"></i></div></div>
-            <p class="text-xl font-black text-[#1F3557] mt-2">7</p>
-            <p class="text-[10px] font-semibold text-[#5E7393] mt-1">3 crews dispatched</p>
-          </div>
-          <div class="bg-[#C7E3FA] rounded-2xl p-4 border border-[#9EC8EF] shadow-sm">
-            <div class="flex justify-between items-start"><span class="text-[10.5px] font-bold text-[#5E7393] uppercase tracking-wide">Outstanding Invoices</span><div class="p-1.5 rounded-lg bg-rose-500/10 text-rose-600"><i data-lucide="receipt" class="w-3.5 h-3.5"></i></div></div>
-            <p class="text-xl font-black text-[#1F3557] mt-2">$13,665</p>
-            <p class="text-[10px] font-bold text-rose-600 mt-1">▼ 2 overdue</p>
+          <div class="flex flex-col sm:flex-row md:flex-col items-stretch md:items-end gap-2 shrink-0 w-full md:w-auto">
+            <div class="bg-[#4A86F7] text-white p-3 px-4 rounded-2xl flex flex-col items-center justify-center min-w-[170px] shadow-md border border-[#9EC8EF]/40 text-center">
+              <span class="text-[9px] font-black tracking-widest text-blue-100 uppercase leading-none mb-1.5">WEDNESDAY, SEP 3</span>
+              <span class="text-base font-mono font-black tracking-wider leading-none text-white">9:41:07 AM</span>
+              <span class="text-[8px] font-bold text-blue-200 font-mono mt-1 uppercase tracking-widest leading-none">Secure Workspace</span>
+            </div>
+            <div class="flex gap-2 w-full">
+              <button class="flex-1 px-3 py-1.5 bg-[#EAF5FF] border border-[#9EC8EF] text-[#1F3557] font-bold rounded-xl text-[10px] uppercase tracking-wider flex items-center justify-center gap-1 shadow-sm"><i data-lucide="camera" class="w-3.5 h-3.5 text-[#315C9F]"></i>Snapshot</button>
+              <button class="flex-1 px-3 py-1.5 bg-[#EAF5FF] border border-[#9EC8EF] text-[#1F3557] font-bold rounded-xl text-[10px] uppercase tracking-wider flex items-center justify-center gap-1 shadow-sm"><i data-lucide="sparkles" class="w-3.5 h-3.5 text-amber-500"></i>AI Option</button>
+            </div>
           </div>
         </div>
 
-        <div class="grid grid-cols-1 lg:grid-cols-2 gap-3.5 mb-4 items-start">
-          <div class="bg-[#C7E3FA] rounded-2xl p-4 border border-[#9EC8EF] shadow-sm">
-            <div class="flex justify-between items-center mb-2"><h3 class="font-display font-extrabold text-[13px] text-[#1F3557]">Company Revenue</h3><span class="text-[10px] text-[#5E7393] font-semibold">Last 8 months</span></div>
-            <svg viewBox="0 0 340 150" class="w-full h-[150px]">
-              <defs><linearGradient id="revFill" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stop-color="#315C9F" stop-opacity="0.28"/><stop offset="100%" stop-color="#315C9F" stop-opacity="0"/>
-              </linearGradient></defs>
-              <g stroke="#9EC8EF" stroke-opacity=".4" stroke-width="1">
-                <line x1="0" y1="30" x2="340" y2="30"/><line x1="0" y1="70" x2="340" y2="70"/><line x1="0" y1="110" x2="340" y2="110"/>
-              </g>
-              <polygon points="10,113 58,102 106,93 154,80 202,68 250,58 298,49 330,42 330,140 10,140" fill="url(#revFill)"/>
-              <polyline points="10,113 58,102 106,93 154,80 202,68 250,58 298,49 330,42" fill="none" stroke="#315C9F" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
-              <g fill="#315C9F"><circle cx="10" cy="113" r="2.5"/><circle cx="58" cy="102" r="2.5"/><circle cx="106" cy="93" r="2.5"/><circle cx="154" cy="80" r="2.5"/><circle cx="202" cy="68" r="2.5"/><circle cx="250" cy="58" r="2.5"/><circle cx="298" cy="49" r="2.5"/></g>
-              <circle cx="330" cy="42" r="4.5" fill="#4A86F7" stroke="#fff" stroke-width="2"/>
-              <g font-size="8" fill="#5E7393" font-family="Inter,sans-serif"><text x="4" y="148">Jan</text><text x="50" y="148">Feb</text><text x="98" y="148">Mar</text><text x="146" y="148">Apr</text><text x="194" y="148">May</text><text x="242" y="148">Jun</text><text x="288" y="148">Jul</text><text x="312" y="148">Aug</text></g>
+        <!-- 4 widget cards: Revenue, Leads, Scheduling + Customize tile -->
+        <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4 mb-4">
+          <div class="bg-[#C7E3FA] border border-[#9EC8EF] p-4 rounded-[24px] shadow-sm flex flex-col justify-between h-[240px] text-left">
+            <div class="flex items-center justify-between">
+              <div class="flex items-center gap-1.5 text-[#1F3557]"><i data-lucide="trending-up" class="w-4 h-4 text-[#315C9F]"></i><span class="text-[10px] font-black tracking-wider uppercase">Company Revenue</span></div>
+              <span class="text-[8px] bg-[#315C9F]/10 text-[#315C9F] px-1.5 py-0.5 rounded font-bold uppercase tracking-wider">Month</span>
+            </div>
+            <div class="my-1">
+              <p class="text-lg font-display font-black text-[#1F3557] tracking-tight leading-none">$15,050.00</p>
+              <p class="text-[9px] text-[#5E7393] font-bold mt-0.5">Live Income vs Expenses &amp; Taxes</p>
+            </div>
+            <svg viewBox="0 0 240 70" class="w-full h-[70px]">
+              <polyline points="4,58 34,52 64,48 94,40 124,32 154,26 184,20 210,14" fill="none" stroke="#4A86F7" stroke-width="1.5"/>
+              <polyline points="4,50 34,48 64,44 94,46 124,42 154,44 184,40 210,38" fill="none" stroke="#F43F5E" stroke-width="1.5"/>
+              <polyline points="4,66 34,60 64,58 94,50 124,44 154,38 184,32 210,26" fill="none" stroke="#22C55E" stroke-width="1.5"/>
             </svg>
           </div>
-          <div class="bg-[#C7E3FA] rounded-2xl p-4 border border-[#9EC8EF] shadow-sm">
-            <div class="flex justify-between items-center mb-1.5"><h3 class="font-display font-extrabold text-[13px] text-[#1F3557]">Today's Schedule</h3><span class="text-[10px] text-[#5E7393] font-semibold">7 jobs</span></div>
-            <div class="divide-y divide-[#9EC8EF]/40">
-              <div class="flex items-center gap-3 py-2.5"><span class="w-2 h-2 rounded-full bg-amber-500 shrink-0"></span><div class="min-w-0"><p class="text-xs font-bold text-[#1F3557] truncate">Carla Jennings — Weekly Mow &amp; Trim</p><p class="text-[10.5px] text-[#5E7393]">Crew 2 · J. Alvarez</p></div><div class="ml-auto text-right shrink-0"><p class="text-[10.5px] text-[#5E7393] font-semibold">8:00 AM</p><span class="inline-block px-2 py-0.5 rounded text-[9px] font-extrabold uppercase bg-blue-100 text-blue-800 border border-blue-200 mt-0.5">In Progress</span></div></div>
-              <div class="flex items-center gap-3 py-2.5"><span class="w-2 h-2 rounded-full bg-[#9EC8EF] shrink-0"></span><div class="min-w-0"><p class="text-xs font-bold text-[#1F3557] truncate">Ridgeview HOA — Irrigation Repair</p><p class="text-[10.5px] text-[#5E7393]">Crew 1 · Danny Reyes</p></div><div class="ml-auto text-right shrink-0"><p class="text-[10.5px] text-[#5E7393] font-semibold">9:30 AM</p><span class="inline-block px-2 py-0.5 rounded text-[9px] font-extrabold uppercase bg-indigo-100 text-indigo-800 border border-indigo-200 mt-0.5">Scheduled</span></div></div>
-              <div class="flex items-center gap-3 py-2.5"><span class="w-2 h-2 rounded-full bg-[#9EC8EF] shrink-0"></span><div class="min-w-0"><p class="text-xs font-bold text-[#1F3557] truncate">Marcus Webb — Install Consult</p><p class="text-[10.5px] text-[#5E7393]">Crew 3 · Priya Nair</p></div><div class="ml-auto text-right shrink-0"><p class="text-[10.5px] text-[#5E7393] font-semibold">11:00 AM</p><span class="inline-block px-2 py-0.5 rounded text-[9px] font-extrabold uppercase bg-indigo-100 text-indigo-800 border border-indigo-200 mt-0.5">Scheduled</span></div></div>
-              <div class="flex items-center gap-3 py-2.5"><span class="w-2 h-2 rounded-full bg-[#9EC8EF] shrink-0"></span><div class="min-w-0"><p class="text-xs font-bold text-[#1F3557] truncate">First Baptist Church — Mulch Install</p><p class="text-[10.5px] text-[#5E7393]">Crew 1 · Danny Reyes</p></div><div class="ml-auto text-right shrink-0"><p class="text-[10.5px] text-[#5E7393] font-semibold">1:00 PM</p><span class="inline-block px-2 py-0.5 rounded text-[9px] font-extrabold uppercase bg-indigo-100 text-indigo-800 border border-indigo-200 mt-0.5">Scheduled</span></div></div>
-              <div class="flex items-center gap-3 py-2.5"><span class="w-2 h-2 rounded-full bg-[#9EC8EF] shrink-0"></span><div class="min-w-0"><p class="text-xs font-bold text-[#1F3557] truncate">Diane Ortiz — Weekly Mow &amp; Trim</p><p class="text-[10.5px] text-[#5E7393]">Crew 2 · J. Alvarez</p></div><div class="ml-auto text-right shrink-0"><p class="text-[10.5px] text-[#5E7393] font-semibold">3:30 PM</p><span class="inline-block px-2 py-0.5 rounded text-[9px] font-extrabold uppercase bg-indigo-100 text-indigo-800 border border-indigo-200 mt-0.5">Scheduled</span></div></div>
+          <div class="bg-[#C7E3FA] border border-[#9EC8EF] p-4 rounded-[24px] shadow-sm flex flex-col justify-between h-[240px] text-left">
+            <div class="flex items-center gap-1.5 text-[#1F3557]"><i data-lucide="target" class="w-4 h-4 text-[#315C9F]"></i><span class="text-[10px] font-black tracking-wider uppercase">Active Leads</span></div>
+            <div class="my-1.5 flex-1 flex flex-col justify-between">
+              <div>
+                <p class="text-xl font-display font-black text-[#1F3557] tracking-tight leading-none">21 Leads</p>
+                <p class="text-[9px] text-[#5E7393] font-bold mt-1">Adjusted from connected sources</p>
+              </div>
+              <div class="space-y-1 my-2 text-[10px] text-[#1F3557]/85 font-semibold">
+                <div class="flex items-center justify-between border-b border-blue-200/40 pb-1"><span class="truncate">👤 Tom Reilly</span><span class="bg-[#315C9F]/10 text-[#315C9F] px-1.5 py-0.5 rounded text-[8px] font-bold shrink-0">Google LSA</span></div>
+                <div class="flex items-center justify-between border-b border-blue-200/40 pb-1"><span class="truncate">👤 Brookstone Apartments</span><span class="bg-[#315C9F]/10 text-[#315C9F] px-1.5 py-0.5 rounded text-[8px] font-bold shrink-0">Referral</span></div>
+                <div class="flex items-center justify-between"><span class="truncate">👤 Sandra Kim</span><span class="bg-[#315C9F]/10 text-[#315C9F] px-1.5 py-0.5 rounded text-[8px] font-bold shrink-0">Website</span></div>
+              </div>
+              <span class="text-[8.5px] uppercase tracking-wider font-black text-[#315C9F] flex items-center gap-1"><span class="w-1.5 h-1.5 bg-red-500 rounded-full animate-pulse"></span>Active Live CRM Sync OK</span>
             </div>
+          </div>
+          <div class="bg-[#C7E3FA] border border-[#9EC8EF] p-4 rounded-[24px] shadow-sm flex flex-col justify-between h-[240px] text-left">
+            <div class="flex items-center gap-1.5 text-[#1F3557]"><i data-lucide="calendar" class="w-4 h-4 text-[#315C9F]"></i><span class="text-[10px] font-black tracking-wider uppercase">Active Jobs Today</span></div>
+            <div class="my-1.5 flex-1 flex flex-col justify-between">
+              <div>
+                <p class="text-xl font-display font-black text-[#1F3557] tracking-tight leading-none">7 Jobs Scheduled</p>
+                <p class="text-[9px] text-[#5E7393] font-bold mt-1">Populated from monthly calendar</p>
+              </div>
+              <div class="space-y-1.5 my-2 text-[9.5px] font-semibold text-[#1F3557]/85">
+                <div class="flex items-center gap-1.5 truncate"><span class="w-1.5 h-1.5 bg-[#315C9F]/40 rounded-full shrink-0"></span><span class="font-mono text-[8px] text-[#5E7393]">8:00</span><span class="truncate font-bold">Mow &amp; Trim - Carla Jennings</span></div>
+                <div class="flex items-center gap-1.5 truncate"><span class="w-1.5 h-1.5 bg-[#315C9F]/40 rounded-full shrink-0"></span><span class="font-mono text-[8px] text-[#5E7393]">9:30</span><span class="truncate font-bold">Irrigation Repair - Ridgeview HOA</span></div>
+                <div class="flex items-center gap-1.5 truncate"><span class="w-1.5 h-1.5 bg-[#315C9F]/40 rounded-full shrink-0"></span><span class="font-mono text-[8px] text-[#5E7393]">11:00</span><span class="truncate font-bold">Install Consult - Marcus Webb</span></div>
+              </div>
+              <span class="text-[8.5px] uppercase tracking-wider font-black text-[#315C9F]">View Interactive Calendar ➔</span>
+            </div>
+          </div>
+          <div class="bg-[#C7E3FA] border border-[#9EC8EF] p-4 rounded-[24px] shadow-sm flex flex-col justify-between h-[240px] text-left">
+            <div class="flex items-center gap-1.5 text-[#1F3557]"><i data-lucide="settings" class="w-4 h-4 text-[#315C9F]"></i><span class="text-[10px] font-black tracking-wider uppercase">Customize Daily View</span></div>
+            <div class="my-1 flex-1 flex flex-col justify-center">
+              <p class="text-xs font-black text-[#1F3557] leading-relaxed">Rearrange dashboard panel metrics instantly.</p>
+              <p class="text-[10.5px] text-[#5E7393] leading-normal font-medium mt-1">Choose which metrics you want displayed on your primary three operational panels.</p>
+            </div>
+            <span class="w-full py-2 rounded-xl text-[9.5px] font-black uppercase tracking-wider flex items-center justify-center gap-1.5 bg-[#4A86F7] text-white shadow-sm"><i data-lucide="sliders-horizontal" class="w-3.5 h-3.5"></i>Configure Slots ➔</span>
           </div>
         </div>
 
-        <div class="grid grid-cols-1 lg:grid-cols-3 gap-3.5">
-          <div class="bg-[#C7E3FA] rounded-2xl p-4 border border-[#9EC8EF] shadow-sm">
-            <h3 class="font-display font-extrabold text-[13px] text-[#1F3557] mb-1.5">Active Leads</h3>
-            <div class="divide-y divide-[#9EC8EF]/40">
-              <div class="flex items-center py-2"><div><p class="text-xs font-bold text-[#1F3557]">Tom Reilly</p><p class="text-[10.5px] text-[#5E7393]">Google LSA</p></div><span class="ml-auto inline-block px-2 py-0.5 rounded text-[9px] font-extrabold uppercase bg-amber-100 text-amber-800 border border-amber-200">Quoted</span></div>
-              <div class="flex items-center py-2"><div><p class="text-xs font-bold text-[#1F3557]">Brookstone Apartments</p><p class="text-[10.5px] text-[#5E7393]">Referral</p></div><span class="ml-auto inline-block px-2 py-0.5 rounded text-[9px] font-extrabold uppercase bg-blue-100 text-blue-800 border border-blue-200">New</span></div>
-              <div class="flex items-center py-2"><div><p class="text-xs font-bold text-[#1F3557]">Sandra Kim</p><p class="text-[10.5px] text-[#5E7393]">Website Form</p></div><span class="ml-auto inline-block px-2 py-0.5 rounded text-[9px] font-extrabold uppercase bg-indigo-100 text-indigo-800 border border-indigo-200">Contacted</span></div>
-              <div class="flex items-center py-2"><div><p class="text-xs font-bold text-[#1F3557]">Pineview Golf Club</p><p class="text-[10.5px] text-[#5E7393]">Cold Call</p></div><span class="ml-auto inline-block px-2 py-0.5 rounded text-[9px] font-extrabold uppercase bg-amber-100 text-amber-800 border border-amber-200">Quoted</span></div>
-            </div>
+        <!-- COMPANY BULLETIN BOARD -->
+        <div class="w-full bg-[#C7E3FA] border border-[#9EC8EF] p-5 rounded-[24px] shadow-sm flex flex-col gap-3 text-left">
+          <div class="flex items-center justify-between border-b border-[#9EC8EF]/30 pb-2">
+            <div class="flex items-center gap-1.5 text-[#1F3557] text-[10px] font-black tracking-wider uppercase"><i data-lucide="megaphone" class="w-4 h-4 text-[#315C9F]"></i>Company Bulletin Board</div>
+            <span class="text-[9.5px] font-black text-[#315C9F]">View Bulletin Board ➔</span>
           </div>
-          <div class="bg-[#C7E3FA] rounded-2xl p-4 border border-[#9EC8EF] shadow-sm">
-            <h3 class="font-display font-extrabold text-[13px] text-[#1F3557] mb-1.5">Crew &amp; Fleet Status</h3>
-            <div class="divide-y divide-[#9EC8EF]/40">
-              <div class="flex items-center gap-2.5 py-2"><span class="w-2 h-2 rounded-full bg-emerald-500"></span><div><p class="text-xs font-bold text-[#1F3557]">Crew 1 · Danny Reyes</p><p class="text-[10.5px] text-[#5E7393]">Truck #4</p></div><span class="ml-auto text-[10.5px] text-[#5E7393] font-semibold">En Route</span></div>
-              <div class="flex items-center gap-2.5 py-2"><span class="w-2 h-2 rounded-full bg-amber-500"></span><div><p class="text-xs font-bold text-[#1F3557]">Crew 2 · J. Alvarez</p><p class="text-[10.5px] text-[#5E7393]">Truck #2</p></div><span class="ml-auto text-[10.5px] text-[#5E7393] font-semibold">On Site</span></div>
-              <div class="flex items-center gap-2.5 py-2"><span class="w-2 h-2 rounded-full bg-[#9EC8EF]"></span><div><p class="text-xs font-bold text-[#1F3557]">Crew 3 · Priya Nair</p><p class="text-[10.5px] text-[#5E7393]">Truck #7</p></div><span class="ml-auto text-[10.5px] text-[#5E7393] font-semibold">Available</span></div>
-              <div class="flex items-center gap-2.5 py-2"><span class="w-2 h-2 rounded-full bg-[#9EC8EF]"></span><div><p class="text-xs font-bold text-[#1F3557]">Crew 4 · T. Ostrowski</p><p class="text-[10.5px] text-[#5E7393]">Truck #1</p></div><span class="ml-auto text-[10.5px] text-[#5E7393] font-semibold">Off Today</span></div>
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-1">
+            <div class="p-4 bg-[#EAF5FF] border border-[#9EC8EF]/60 rounded-2xl flex flex-col gap-1.5 shadow-sm">
+              <div class="flex items-center justify-between text-[9px] font-bold text-[#1F3557]"><span class="uppercase tracking-wider text-[#5E7393]">Mike Donovan (Owner)</span><span class="font-mono text-[#5E7393]">Aug 28</span></div>
+              <h4 class="text-xs font-black text-[#1F3557] uppercase tracking-wider">Holiday Schedule – Labor Day</h4>
+              <p class="text-[10.5px] text-[#5E7393] leading-relaxed font-medium">Office closed Monday 9/1. Crews on normal schedule Tue–Fri.</p>
             </div>
-          </div>
-          <div class="bg-[#C7E3FA] rounded-2xl p-4 border border-[#9EC8EF] shadow-sm">
-            <h3 class="font-display font-extrabold text-[13px] text-[#1F3557] mb-1.5">Messages Feed</h3>
-            <div class="divide-y divide-[#9EC8EF]/40">
-              <div class="py-2"><p class="text-xs font-bold text-[#1F3557]">Carla Jennings</p><p class="text-[10.5px] text-[#5E7393] truncate">"Thanks for the quick turnaround today!"</p></div>
-              <div class="py-2"><p class="text-xs font-bold text-[#1F3557]">Diane Ortiz</p><p class="text-[10.5px] text-[#5E7393] truncate">"Can we push tomorrow's mow to Thursday?"</p></div>
-              <div class="py-2"><p class="text-xs font-bold text-[#1F3557]">J. Alvarez (crew)</p><p class="text-[10.5px] text-[#5E7393] truncate">"Low on trimmer line, restocking after this job."</p></div>
+            <div class="p-4 bg-[#EAF5FF] border border-[#9EC8EF]/60 rounded-2xl flex flex-col gap-1.5 shadow-sm">
+              <div class="flex items-center justify-between text-[9px] font-bold text-[#1F3557]"><span class="uppercase tracking-wider text-[#5E7393]">Sarah Mitchell (Office Manager)</span><span class="font-mono text-[#5E7393]">Aug 25</span></div>
+              <h4 class="text-xs font-black text-[#1F3557] uppercase tracking-wider">New Safety Vests In</h4>
+              <p class="text-[10.5px] text-[#5E7393] leading-relaxed font-medium">Pick up your new hi-vis vests from the warehouse before your next job.</p>
             </div>
           </div>
         </div>
