@@ -1,0 +1,887 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Space+Grotesk:wght@400;500;600;700&family=Pacifico&family=Caveat:wght@400;700&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+  --font-display: "Space Grotesk", sans-serif;
+}
+
+/* Money Tracker's upcoming-jobs/bills ticker: the content is rendered twice
+   back to back and this scrolls the wrapper up by exactly one copy's height,
+   which loops seamlessly since the second copy is identical to the first. */
+@keyframes ticker-scroll {
+  from { transform: translateY(0); }
+  to { transform: translateY(-50%); }
+}
+
+/* Money Tracker's HUD panel: a faint light sweeps down the whole card,
+   the way a cockpit display idles. Applied to a full-height translucent
+   bar inside an overflow-hidden wrapper so it loops seamlessly. */
+@keyframes hud-scan {
+  0% { transform: translateY(-120%); }
+  100% { transform: translateY(120%); }
+}
+
+/* LIGHT MODE BASIC — no animation added. */
+
+/* ==========================================================================
+   WORKSPACE THEME OVERRIDES (EXCLUDING LOGIN)
+   This block perfectly implements the exact color specifications and design
+   rules requested by the user, without affecting the finalized Login page.
+   ========================================================================== */
+
+/* 1. Global Workspace Background and Font Colors */
+.workspace-theme {
+  background-color: #E5F1FF !important;
+  background-image: linear-gradient(145deg, #EAF6FF 0%, #D8ECFC 48%, #E5F3FF 100%) !important;
+  color: #1F3557 !important;
+  color-scheme: light !important;
+}
+
+/* 2. All Primary Content Cards, Sub-Cards, and Containers forced to match exact user specifications (#EAF5FF) */
+.workspace-theme .bg-white,
+.workspace-theme .bg-slate-50,
+.workspace-theme .bg-slate-100,
+.workspace-theme .bg-slate-200,
+.workspace-theme .bg-slate-300,
+.workspace-theme .bg-slate-400,
+.workspace-theme .bg-gray-50,
+.workspace-theme .bg-gray-100,
+.workspace-theme .bg-gray-200,
+.workspace-theme .bg-zinc-50,
+.workspace-theme .bg-zinc-100,
+.workspace-theme .bg-\[\#F5FAFF\],
+.workspace-theme .bg-\[\#EAF5FF\],
+.workspace-theme .bg-\[\#E3F3FF\],
+.workspace-theme .bg-\[\#A9CDEE\],
+.workspace-theme .bg-\[\#A9CDEF\],
+.workspace-theme .bg-\[\#E1EFFD\],
+.workspace-theme .bg-\[\#BDDDF8\],
+.workspace-theme .bg-\[\#BCD8F0\],
+.workspace-theme .bg-blue-50,
+.workspace-theme .bg-blue-100,
+.workspace-theme .bg-blue-200,
+.workspace-theme .bg-blue-300,
+.workspace-theme .bg-indigo-50,
+.workspace-theme .bg-indigo-100,
+.workspace-theme [class*="bg-gradient-to-"]:not(button):not(.text-white),
+.workspace-theme [class*="from-"]:not(button):not(.text-white),
+.workspace-theme [class*="to-"]:not(button):not(.text-white) {
+  background-color: rgba(207, 233, 252, 0.92) !important;
+  background-image: linear-gradient(145deg, rgba(225, 243, 255, 0.96), rgba(194, 227, 251, 0.96)) !important;
+  border-color: rgba(255, 255, 255, 0.96) !important;
+  box-shadow: 0 0 15px rgba(56, 189, 248, 0.30), inset 0 0 18px rgba(255, 255, 255, 0.82) !important;
+  -webkit-backdrop-filter: blur(10px) saturate(118%) !important;
+  backdrop-filter: blur(10px) saturate(118%) !important;
+}
+
+/* Ensure any ghost white transparencies become fully transparent or match the theme card blue */
+.workspace-theme .bg-white\/10,
+.workspace-theme .bg-white\/20,
+.workspace-theme .bg-white\/30,
+.workspace-theme .bg-white\/40,
+.workspace-theme .bg-white\/50,
+.workspace-theme .bg-white\/60,
+.workspace-theme .bg-white\/70,
+.workspace-theme .bg-white\/80,
+.workspace-theme .bg-white\/90,
+.workspace-theme .bg-slate-50\/50,
+.workspace-theme .bg-slate-100\/50,
+.workspace-theme .bg-blue-50\/50 {
+  background-color: rgba(224, 242, 255, 0.46) !important;
+  background-image: linear-gradient(145deg, rgba(255, 255, 255, 0.50), rgba(190, 225, 251, 0.34)) !important;
+  box-shadow: inset 0 0 14px rgba(255, 255, 255, 0.60) !important;
+  -webkit-backdrop-filter: blur(8px) !important;
+  backdrop-filter: blur(8px) !important;
+}
+
+/* 3. Sub-Containers, Spacers, Inputs, and Inner Slots (Must NOT be white; must be #EAF5FF - lighter workspace bg) */
+/* Specific styling for inputs, textareas, and active filter containers to have the lighter workspace background (#EAF5FF) */
+.workspace-theme .search-container,
+.workspace-theme .input-container,
+.workspace-theme .filter-container,
+.workspace-theme .date-picker-button,
+.workspace-theme .filter-button-group {
+  background-color: rgba(229, 244, 255, 0.88) !important;
+  background-image: linear-gradient(145deg, rgba(239, 249, 255, 0.96), rgba(207, 234, 253, 0.90)) !important;
+  border-color: rgba(255, 255, 255, 0.96) !important;
+  box-shadow: 0 0 10px rgba(56, 189, 248, 0.24), inset 0 0 10px rgba(255, 255, 255, 0.88) !important;
+  -webkit-backdrop-filter: blur(8px) !important;
+  backdrop-filter: blur(8px) !important;
+}
+
+/* Nested lists or table items must be styled to match card/subcard rules */
+.workspace-theme tr.bg-white,
+.workspace-theme tr.bg-slate-50,
+.workspace-theme tr:nth-child(even) {
+  background-color: rgba(221, 240, 254, 0.76) !important; /* Alternating table row color using spacing/divider bg */
+  background-image: linear-gradient(90deg, rgba(235, 247, 255, 0.82), rgba(207, 233, 252, 0.72)) !important;
+}
+.workspace-theme tr:nth-child(odd) {
+  background-color: rgba(206, 233, 253, 0.82) !important; /* Main content card blue */
+  background-image: linear-gradient(90deg, rgba(222, 241, 255, 0.88), rgba(194, 227, 251, 0.76)) !important;
+}
+
+/* 4. Inputs, Textareas, Selects (EAF5FF Background, 1F3557 Text, 9EC8EF Border) */
+.workspace-theme input,
+.workspace-theme select,
+.workspace-theme textarea {
+  background-color: rgba(232, 246, 255, 0.94) !important;
+  background-image: linear-gradient(145deg, rgba(242, 251, 255, 0.98), rgba(213, 237, 254, 0.92)) !important;
+  color: #1F3557 !important;
+  border-color: rgba(255, 255, 255, 0.96) !important;
+  box-shadow: 0 0 9px rgba(56, 189, 248, 0.23), inset 0 0 9px rgba(255, 255, 255, 0.88) !important;
+  -webkit-backdrop-filter: blur(8px) !important;
+  backdrop-filter: blur(8px) !important;
+}
+
+.workspace-theme select option,
+select,
+option,
+select option {
+  background-color: #EAF6FF !important;
+  color: #1F3557 !important;
+  color-scheme: light !important;
+}
+
+/* Custom Dropdown popovers and options styled to stay bright white and legible */
+.custom-dropdown-popover {
+  background-color: rgba(232, 246, 255, 0.98) !important;
+  background-image: linear-gradient(145deg, #F1FAFF, #D8EEFF) !important;
+  color: #1F3557 !important;
+  border-color: rgba(255, 255, 255, 0.98) !important;
+  box-shadow: 0 0 18px rgba(56, 189, 248, 0.38), inset 0 0 12px rgba(255, 255, 255, 0.78) !important;
+  -webkit-backdrop-filter: blur(12px) !important;
+  backdrop-filter: blur(12px) !important;
+  color-scheme: light !important;
+}
+
+.custom-dropdown-item {
+  background-color: rgba(232, 246, 255, 0.90) !important;
+  background-image: linear-gradient(90deg, rgba(242, 250, 255, 0.94), rgba(216, 238, 255, 0.88)) !important;
+  color: #1F3557 !important;
+}
+
+.custom-dropdown-item:hover {
+  background-color: #C7E8FF !important;
+  background-image: linear-gradient(90deg, #DDF3FF, #B9DFFF) !important;
+  color: #07599A !important;
+  box-shadow: inset 0 0 10px rgba(255, 255, 255, 0.86), 0 0 10px rgba(56, 189, 248, 0.28) !important;
+}
+
+.custom-dropdown-item-active {
+  background-color: #B9DFFF !important;
+  background-image: linear-gradient(90deg, #D9F2FF, #ADD8FA) !important;
+  color: #07599A !important;
+  box-shadow: inset 0 0 12px rgba(255, 255, 255, 0.88), 0 0 12px rgba(56, 189, 248, 0.38) !important;
+}
+
+/* Force light color scheme on date inputs and browser select dropdown lists */
+.workspace-theme select,
+.workspace-theme option,
+.workspace-theme input[type="date"] {
+  color-scheme: light !important;
+}
+
+.workspace-theme input::placeholder,
+.workspace-theme textarea::placeholder {
+  color: #5E7393 !important;
+  opacity: 0.84;
+}
+
+/* 5. Precise Border Color Override System (#9EC8EF) */
+.workspace-theme,
+.workspace-theme *,
+.workspace-theme ::before,
+.workspace-theme ::after {
+  border-color: rgba(255, 255, 255, 0.94) !important;
+}
+
+/* 6. Typography & Text Colors */
+/* Primary Text (#1F3557). Excludes the Money Tracker card (.mt-card) --
+   that card sets its own deliberate per-element text colors (headings,
+   glowing stat values, breakdown labels) via Tailwind arbitrary-value
+   classes, which these blanket tag selectors would otherwise stomp flat
+   since a stylesheet !important always beats a plain utility class or an
+   inline style regardless of the color it was actually given. */
+.workspace-theme text:not(.mt-card *),
+.workspace-theme h1:not(.mt-card *),
+.workspace-theme h2:not(.mt-card *),
+.workspace-theme h3:not(.mt-card *),
+.workspace-theme h4:not(.mt-card *),
+.workspace-theme h5:not(.mt-card *),
+.workspace-theme h6:not(.mt-card *),
+.workspace-theme th:not(.mt-card *),
+.workspace-theme .text-slate-900:not(.mt-card *),
+.workspace-theme .text-slate-800:not(.mt-card *),
+.workspace-theme .text-slate-700:not(.mt-card *),
+.workspace-theme .text-gray-900:not(.mt-card *),
+.workspace-theme .text-\[\#342D7E\]:not(.mt-card *),
+.workspace-theme .text-blue-900:not(.mt-card *),
+.workspace-theme .text-indigo-900:not(.mt-card *) {
+  color: #1F3557 !important;
+}
+
+/* Secondary Text (#5E7393) -- same .mt-card exclusion as above. */
+.workspace-theme p:not(.mt-card *),
+.workspace-theme span:not(.mt-card *),
+.workspace-theme label:not(.mt-card *),
+.workspace-theme td:not(.mt-card *),
+.workspace-theme .text-slate-500:not(.mt-card *),
+.workspace-theme .text-slate-400:not(.mt-card *),
+.workspace-theme .text-slate-600:not(.mt-card *),
+.workspace-theme .text-gray-500:not(.mt-card *),
+.workspace-theme .text-gray-400:not(.mt-card *),
+.workspace-theme .text-\[\#342D7E\]\/75:not(.mt-card *),
+.workspace-theme .text-\[\#342D7E\]\/60:not(.mt-card *),
+.workspace-theme .text-\[\#342D7E\]\/50:not(.mt-card *) {
+  color: #5E7393 !important;
+}
+
+/* Exceptions: White text on dark buttons or badges */
+.workspace-theme .text-white,
+.workspace-theme .text-slate-50,
+.workspace-theme button.bg-\[\#4A9BFF\] *,
+.workspace-theme button.bg-blue-600 *,
+.workspace-theme button.bg-indigo-600 *,
+.workspace-theme .bg-\[\#4A86F7\] *,
+.workspace-theme .bg-\[\#3977EE\] * {
+  color: #ffffff !important;
+}
+
+/* 7. Icon Colors (No longer forced to #315C9F, they now respect their parent colors or Tailwind text classes, defaulting to the deep slate #1F3557) */
+.workspace-theme .text-\[\#315C9F\] {
+  color: #07599A !important;
+}
+
+/* 8. Primary Buttons (#4A86F7 with hover #3977EE). Excludes .mt-card --
+   the Money Tracker card's own buttons (Log Income/Log Expense/Run
+   Payroll, series toggles) are deliberately color-coded per action and
+   none of them match this rule's exclusion classes (which are old plain
+   Tailwind names, not MT's arbitrary hex classes), so without this
+   exclusion every one of them would get forced to the same flat blue. */
+.workspace-theme button:not(.bg-rose-50):not(.bg-emerald-500):not(.bg-rose-500):not(.text-red-500):not(.bg-transparent):not(.border-transparent):not(.mt-card *),
+.workspace-theme .bg-\[\#4A9BFF\]:not(.mt-card *),
+.workspace-theme .bg-\[\#4A86F7\]:not(.mt-card *),
+.workspace-theme .bg-blue-600:not(.mt-card *),
+.workspace-theme .bg-indigo-600:not(.mt-card *),
+.workspace-theme button.bg-\[\#4A9BFF\]:not(.mt-card *) {
+  background-color: #158CEB !important;
+  color: #ffffff !important;
+  border-color: rgba(255, 255, 255, 0.96) !important;
+  background-image: linear-gradient(135deg, #29B7F6 0%, #1485F4 58%, #3977EE 100%) !important;
+  box-shadow: 0 0 18px rgba(14, 165, 233, 0.66), inset 0 0 8px rgba(255, 255, 255, 0.44) !important;
+  -webkit-backdrop-filter: blur(8px) !important;
+  backdrop-filter: blur(8px) !important;
+}
+
+.workspace-theme button:not(.bg-rose-50):not(.bg-emerald-500):not(.bg-rose-500):not(.text-red-500):not(.bg-transparent):not(.border-transparent):not(.mt-card *):hover,
+.workspace-theme .bg-\[\#4A9BFF\]:not(.mt-card *):hover,
+.workspace-theme .bg-\[\#4A86F7\]:not(.mt-card *):hover,
+.workspace-theme .bg-blue-600:not(.mt-card *):hover,
+.workspace-theme .bg-indigo-600:not(.mt-card *):hover,
+.workspace-theme button.bg-\[\#4A9BFF\]:not(.mt-card *):hover {
+  background-color: #0D7DE0 !important;
+  border-color: #ffffff !important;
+  background-image: linear-gradient(135deg, #35C5FF 0%, #0D8CF2 55%, #2E6DE3 100%) !important;
+  box-shadow: 0 0 23px rgba(14, 165, 233, 0.78), inset 0 0 10px rgba(255, 255, 255, 0.54) !important;
+}
+
+/* Reset for transparent buttons or active tabs */
+.workspace-theme button.bg-transparent,
+.workspace-theme button.border-transparent {
+  background-color: rgba(222, 241, 255, 0.72) !important;
+  background-image: linear-gradient(145deg, rgba(241, 250, 255, 0.88), rgba(197, 228, 250, 0.76)) !important;
+  border-color: rgba(255, 255, 255, 0.90) !important;
+  color: #5E7393 !important;
+  box-shadow: inset 0 0 9px rgba(255, 255, 255, 0.72), 0 0 8px rgba(56, 189, 248, 0.18) !important;
+}
+.workspace-theme button.bg-transparent:hover {
+  background-color: #C5E5FB !important;
+  background-image: linear-gradient(145deg, #E4F5FF, #B9DFFA) !important;
+  color: #1F3557 !important;
+  box-shadow: 0 0 14px rgba(56, 189, 248, 0.38), inset 0 0 10px rgba(255, 255, 255, 0.82) !important;
+}
+
+/* 9. Card Hovers (#BDDDF8) */
+.workspace-theme .hover\:bg-slate-50:hover,
+.workspace-theme .hover\:bg-slate-100:hover,
+.workspace-theme .hover\:bg-\[\#E3F3FF\]\/80:hover,
+.workspace-theme .hover\:bg-\[\#E3F3FF\]\/50:hover,
+.workspace-theme .hover\:bg-\[\#C7E3FA\]:hover,
+.workspace-theme .group:hover {
+  background-color: #C5E5FB !important;
+  background-image: linear-gradient(145deg, rgba(232, 247, 255, 0.98), rgba(183, 220, 248, 0.94)) !important;
+  box-shadow: 0 0 17px rgba(56, 189, 248, 0.42), inset 0 0 13px rgba(255, 255, 255, 0.84) !important;
+}
+
+/* Selected/Active Item (#A9CEF5) */
+.workspace-theme .bg-\[\#A9CEF5\],
+.workspace-theme .bg-\[\#342D7E\]\/10 {
+  background-color: #B7DEFB !important;
+  background-image: linear-gradient(145deg, #DDF3FF, #A9D5F7) !important;
+  box-shadow: 0 0 16px rgba(56, 189, 248, 0.48), inset 0 0 12px rgba(255, 255, 255, 0.86) !important;
+}
+
+/* 10. Semantic Alert/State Colors */
+/* Success (#22C55E) */
+.workspace-theme .text-emerald-500,
+.workspace-theme .text-emerald-600,
+.workspace-theme .text-green-600,
+.workspace-theme .text-emerald-400 {
+  color: #16A968 !important;
+}
+.workspace-theme .bg-emerald-500,
+.workspace-theme .bg-emerald-600,
+.workspace-theme .bg-green-600 {
+  background-color: #22C55E !important;
+  background-image: linear-gradient(135deg, #43DD7B, #16B95A) !important;
+  border-color: rgba(255, 255, 255, 0.94) !important;
+  box-shadow: 0 0 15px rgba(34, 197, 94, 0.48), inset 0 0 7px rgba(255, 255, 255, 0.36) !important;
+}
+
+/* Warning (#F59E0B) */
+.workspace-theme .text-amber-500,
+.workspace-theme .text-amber-600,
+.workspace-theme .text-amber-800,
+.workspace-theme .text-amber-400 {
+  color: #E68A00 !important;
+}
+.workspace-theme .bg-amber-500,
+.workspace-theme .bg-amber-600 {
+  background-color: #F59E0B !important;
+  background-image: linear-gradient(135deg, #FFC54A, #F08A00) !important;
+  border-color: rgba(255, 255, 255, 0.92) !important;
+  box-shadow: 0 0 14px rgba(245, 158, 11, 0.44), inset 0 0 7px rgba(255, 255, 255, 0.32) !important;
+}
+
+/* Error (#EF4444) */
+.workspace-theme .text-rose-500,
+.workspace-theme .text-rose-600,
+.workspace-theme .text-red-500,
+.workspace-theme .text-red-600 {
+  color: #E84862 !important;
+}
+.workspace-theme .bg-rose-500,
+.workspace-theme .bg-rose-600,
+.workspace-theme .bg-red-500,
+.workspace-theme .bg-red-600 {
+  background-color: #EF4444 !important;
+  background-image: linear-gradient(135deg, #FF7086, #E83E58) !important;
+  border-color: rgba(255, 255, 255, 0.92) !important;
+  box-shadow: 0 0 14px rgba(239, 68, 68, 0.44), inset 0 0 7px rgba(255, 255, 255, 0.32) !important;
+}
+
+/* Chart customizations to prevent white/light backgrounds in tooltip */
+.workspace-theme .recharts-tooltip-wrapper,
+.workspace-theme .recharts-default-tooltip,
+.workspace-theme .recharts-tooltip-wrapper *,
+.workspace-theme .recharts-default-tooltip * {
+  background-color: rgba(220, 240, 255, 0.96) !important;
+  background-image: linear-gradient(145deg, rgba(236, 248, 255, 0.98), rgba(199, 229, 251, 0.96)) !important;
+  border-color: rgba(255, 255, 255, 0.96) !important;
+  color: #1F3557 !important;
+  box-shadow: 0 0 18px rgba(56, 189, 248, 0.40), inset 0 0 10px rgba(255, 255, 255, 0.76) !important;
+  -webkit-backdrop-filter: blur(10px) !important;
+  backdrop-filter: blur(10px) !important;
+}
+
+/* Increase spacing between sections/panels inside workspace to match user rules */
+.workspace-theme .space-y-4 {
+  --spacing-y: 1.5rem !important;
+  margin-top: calc(var(--spacing-y) * calc(1 - var(--tw-space-y-reverse))) !important;
+}
+.workspace-theme .space-y-6 {
+  --spacing-y: 2.25rem !important;
+}
+.workspace-theme .space-y-8 {
+  --spacing-y: 2.75rem !important;
+}
+/* Shared compact form control used by Jobs' Event Engine record editor. */
+.input {
+  width: 100%;
+  border: 1px solid rgba(255, 255, 255, 0.96);
+  border-radius: 0.75rem;
+  background-color: rgba(232, 246, 255, 0.94);
+  background-image: linear-gradient(145deg, rgba(242, 251, 255, 0.98), rgba(213, 237, 254, 0.92));
+  box-shadow: 0 0 9px rgba(56, 189, 248, 0.23), inset 0 0 9px rgba(255, 255, 255, 0.88);
+  padding: 0.625rem 0.75rem;
+  color: #1f3557;
+  font-size: 0.75rem;
+  outline: none;
+}
+.input:focus { border-color: #ffffff; box-shadow: 0 0 0 3px rgba(56,189,248,.16), 0 0 15px rgba(56,189,248,.38), inset 0 0 9px rgba(255,255,255,.90); }
+
+/* ==========================================================================
+   DARK MODE BASIC
+   Light Mode Basic is intentionally the untouched stylesheet above. This
+   section is fully scoped so selecting dark mode cannot alter the login page
+   or the original workspace preset.
+   ========================================================================== */
+
+.workspace-theme.theme-dark-basic {
+  --dark-canvas: #050f1a;
+  --dark-sidebar: #071522;
+  --dark-surface: #091827;
+  --dark-surface-raised: #0c1d2e;
+  --dark-input: #081522;
+  --dark-border: #1c3042;
+  --dark-border-strong: #29445e;
+  --dark-text: #f4f7fb;
+  --dark-muted: #98a7b9;
+  --dark-accent: #145dff;
+  --dark-accent-hover: #2870ff;
+  background: var(--dark-canvas) !important;
+  border-color: var(--dark-border) !important;
+  color: var(--dark-text) !important;
+  color-scheme: dark !important;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, .38) !important;
+}
+
+/* Navigation and solid content surfaces. */
+.workspace-theme.theme-dark-basic > div:first-child {
+  background-color: var(--dark-sidebar) !important;
+}
+.workspace-theme.theme-dark-basic [class~="bg-white"],
+.workspace-theme.theme-dark-basic [class~="bg-slate-50"],
+.workspace-theme.theme-dark-basic [class~="bg-slate-100"],
+.workspace-theme.theme-dark-basic [class~="bg-gray-50"],
+.workspace-theme.theme-dark-basic [class~="bg-gray-100"],
+.workspace-theme.theme-dark-basic [class~="bg-[#F5FAFF]"],
+.workspace-theme.theme-dark-basic [class~="bg-[#EAF5FF]"],
+.workspace-theme.theme-dark-basic [class~="bg-[#E3F3FF]"],
+.workspace-theme.theme-dark-basic [class~="bg-[#C7E3FA]"],
+.workspace-theme.theme-dark-basic [class*="bg-[#C7E3FB]"],
+.workspace-theme.theme-dark-basic [class~="bg-[#BDDDF8]"],
+.workspace-theme.theme-dark-basic [class~="bg-[#BCD8F0]"],
+.workspace-theme.theme-dark-basic [class~="bg-[#E1EFFD]"],
+.workspace-theme.theme-dark-basic [class*="bg-[#F5FAFF]"],
+.workspace-theme.theme-dark-basic [class*="bg-[#EAF5FF]"],
+.workspace-theme.theme-dark-basic [class*="bg-[#E3F3FF]"],
+.workspace-theme.theme-dark-basic [class*="bg-[#C7E3FA]"],
+.workspace-theme.theme-dark-basic [class*="bg-[#BDDDF8]"],
+.workspace-theme.theme-dark-basic [class*="bg-[#D5EAFF]"],
+.workspace-theme.theme-dark-basic [class*="bg-[#D5EAFD]"],
+.workspace-theme.theme-dark-basic [class*="bg-[#D5EAFE]"],
+.workspace-theme.theme-dark-basic [class*="bg-[#EBF5FF]"],
+.workspace-theme.theme-dark-basic [class*="bg-[#F8FBFF]"],
+.workspace-theme.theme-dark-basic [class*="bg-[#F9FAFB]"],
+.workspace-theme.theme-dark-basic [class*="bg-[#f0f6ff]"],
+.workspace-theme.theme-dark-basic [class*="bg-[#f5f8ff]"] {
+  background-color: var(--dark-surface) !important;
+  background-image: none !important;
+}
+.workspace-theme.theme-dark-basic [class~="bg-slate-200"],
+.workspace-theme.theme-dark-basic [class~="bg-blue-50"],
+.workspace-theme.theme-dark-basic [class~="bg-blue-100"],
+.workspace-theme.theme-dark-basic [class~="bg-[#A9CDEE]"],
+.workspace-theme.theme-dark-basic [class~="bg-[#A9CDEF]"],
+.workspace-theme.theme-dark-basic [class*="bg-[#A1CEF4]"] {
+  background-color: var(--dark-surface-raised) !important;
+  background-image: none !important;
+}
+.workspace-theme.theme-dark-basic [class*="bg-gradient-to-"]:not(button) {
+  background-color: var(--dark-surface) !important;
+  background-image: none !important;
+}
+
+/* Components were built over time with dozens of one-off light hex values.
+   Treat every structural element carrying an arbitrary background as a dark
+   surface, regardless of its original shade or opacity suffix. Status badges
+   and primary controls are spans/buttons and keep their semantic colors. */
+.workspace-theme.theme-dark-basic :is(div, section, article, main, aside, header, footer, form, table, thead, tbody)[class*="bg-[#"]:not([class*="text-white"]) {
+  background-color: var(--dark-surface) !important;
+  background-image: none !important;
+}
+.workspace-theme.theme-dark-basic :is(div, section, article, main, aside, header, footer, form)[class~="bg-blue-50"],
+.workspace-theme.theme-dark-basic :is(div, section, article, main, aside, header, footer, form)[class~="bg-blue-100"],
+.workspace-theme.theme-dark-basic :is(div, section, article, main, aside, header, footer, form)[class~="bg-indigo-50"],
+.workspace-theme.theme-dark-basic :is(div, section, article, main, aside, header, footer, form)[class~="bg-slate-50"],
+.workspace-theme.theme-dark-basic :is(div, section, article, main, aside, header, footer, form)[class~="bg-slate-100"],
+.workspace-theme.theme-dark-basic :is(div, section, article, main, aside, header, footer, form)[class~="bg-gray-50"],
+.workspace-theme.theme-dark-basic :is(div, section, article, main, aside, header, footer, form)[class~="bg-gray-100"] {
+  background-color: var(--dark-surface) !important;
+  background-image: none !important;
+}
+
+/* Borders remain quiet and structural instead of glowing. */
+.workspace-theme.theme-dark-basic,
+.workspace-theme.theme-dark-basic *,
+.workspace-theme.theme-dark-basic ::before,
+.workspace-theme.theme-dark-basic ::after {
+  border-color: var(--dark-border) !important;
+}
+
+/* Primary and secondary typography. */
+.workspace-theme.theme-dark-basic text,
+.workspace-theme.theme-dark-basic h1,
+.workspace-theme.theme-dark-basic h2,
+.workspace-theme.theme-dark-basic h3,
+.workspace-theme.theme-dark-basic h4,
+.workspace-theme.theme-dark-basic h5,
+.workspace-theme.theme-dark-basic h6,
+.workspace-theme.theme-dark-basic th,
+.workspace-theme.theme-dark-basic [class~="text-slate-900"],
+.workspace-theme.theme-dark-basic [class~="text-slate-800"],
+.workspace-theme.theme-dark-basic [class~="text-slate-700"],
+.workspace-theme.theme-dark-basic [class~="text-gray-900"],
+.workspace-theme.theme-dark-basic [class~="text-[#1F3557]"],
+.workspace-theme.theme-dark-basic [class~="text-[#342D7E]"] {
+  color: var(--dark-text) !important;
+}
+.workspace-theme.theme-dark-basic p,
+.workspace-theme.theme-dark-basic span,
+.workspace-theme.theme-dark-basic label,
+.workspace-theme.theme-dark-basic td,
+.workspace-theme.theme-dark-basic [class~="text-slate-400"],
+.workspace-theme.theme-dark-basic [class~="text-slate-500"],
+.workspace-theme.theme-dark-basic [class~="text-slate-600"],
+.workspace-theme.theme-dark-basic [class~="text-gray-400"],
+.workspace-theme.theme-dark-basic [class~="text-gray-500"],
+.workspace-theme.theme-dark-basic [class~="text-[#5E7393]"] {
+  color: var(--dark-muted) !important;
+}
+.workspace-theme.theme-dark-basic [class~="text-[#315C9F]"],
+.workspace-theme.theme-dark-basic [class~="text-blue-600"],
+.workspace-theme.theme-dark-basic [class~="text-blue-700"] {
+  color: #62a0ff !important;
+}
+
+/* Fields, filters, menus, and table rows. */
+.workspace-theme.theme-dark-basic input,
+.workspace-theme.theme-dark-basic textarea,
+.workspace-theme.theme-dark-basic select,
+.workspace-theme.theme-dark-basic option,
+.workspace-theme.theme-dark-basic .input,
+.workspace-theme.theme-dark-basic .search-container,
+.workspace-theme.theme-dark-basic .input-container,
+.workspace-theme.theme-dark-basic .filter-container,
+.workspace-theme.theme-dark-basic .date-picker-button,
+.workspace-theme.theme-dark-basic .filter-button-group,
+.workspace-theme.theme-dark-basic .custom-dropdown-popover,
+.workspace-theme.theme-dark-basic .custom-dropdown-item {
+  background-color: var(--dark-input) !important;
+  background-image: none !important;
+  border-color: var(--dark-border-strong) !important;
+  color: var(--dark-text) !important;
+  color-scheme: dark !important;
+}
+.workspace-theme.theme-dark-basic input::placeholder,
+.workspace-theme.theme-dark-basic textarea::placeholder {
+  color: #728297 !important;
+}
+.workspace-theme.theme-dark-basic tr,
+.workspace-theme.theme-dark-basic tr:nth-child(odd),
+.workspace-theme.theme-dark-basic tr:nth-child(even) {
+  background-color: var(--dark-surface) !important;
+}
+
+/* Neutral controls stay dark. Only explicitly primary controls turn blue. */
+.workspace-theme.theme-dark-basic button {
+  background-color: var(--dark-surface-raised) !important;
+  background-image: none !important;
+  border-color: var(--dark-border-strong) !important;
+  color: var(--dark-text) !important;
+  box-shadow: none !important;
+}
+.workspace-theme.theme-dark-basic button:hover {
+  background-color: #10253a !important;
+  border-color: #376084 !important;
+}
+.workspace-theme.theme-dark-basic button[class~="bg-[#4A86F7]"],
+.workspace-theme.theme-dark-basic button[class~="bg-[#4A9BFF]"],
+.workspace-theme.theme-dark-basic button[class~="bg-blue-600"],
+.workspace-theme.theme-dark-basic button[class~="bg-indigo-600"],
+.workspace-theme.theme-dark-basic button[class~="bg-[#A9CEF5]"] {
+  background-color: var(--dark-accent) !important;
+  border-color: #3678ff !important;
+  color: #ffffff !important;
+}
+.workspace-theme.theme-dark-basic button[class~="bg-[#4A86F7]"]:hover,
+.workspace-theme.theme-dark-basic button[class~="bg-[#4A9BFF]"]:hover,
+.workspace-theme.theme-dark-basic button[class~="bg-blue-600"]:hover,
+.workspace-theme.theme-dark-basic button[class~="bg-indigo-600"]:hover,
+.workspace-theme.theme-dark-basic button[class~="bg-[#A9CEF5]"]:hover {
+  background-color: var(--dark-accent-hover) !important;
+}
+.workspace-theme.theme-dark-basic button[class~="bg-emerald-500"],
+.workspace-theme.theme-dark-basic button[class~="bg-emerald-600"],
+.workspace-theme.theme-dark-basic button[class~="bg-green-600"] {
+  background-color: #15803d !important;
+  border-color: #22c55e !important;
+}
+.workspace-theme.theme-dark-basic button[class~="bg-rose-500"],
+.workspace-theme.theme-dark-basic button[class~="bg-rose-600"],
+.workspace-theme.theme-dark-basic button[class~="bg-red-500"],
+.workspace-theme.theme-dark-basic button[class~="bg-red-600"] {
+  background-color: #b91c1c !important;
+  border-color: #ef4444 !important;
+}
+.workspace-theme.theme-dark-basic button .text-white,
+.workspace-theme.theme-dark-basic button[class~="bg-[#4A86F7]"] *,
+.workspace-theme.theme-dark-basic button[class~="bg-[#4A9BFF]"] *,
+.workspace-theme.theme-dark-basic button[class~="bg-blue-600"] *,
+.workspace-theme.theme-dark-basic button[class~="bg-indigo-600"] *,
+.workspace-theme.theme-dark-basic button[class~="bg-[#A9CEF5]"] * {
+  color: #ffffff !important;
+}
+
+/* Selected navigation, hovers, charts, and overlays. */
+.workspace-theme.theme-dark-basic [class~="bg-[#A9CEF5]"]:not(button),
+.workspace-theme.theme-dark-basic .custom-dropdown-item-active {
+  background-color: rgba(20, 93, 255, .22) !important;
+  color: #dbeafe !important;
+}
+.workspace-theme.theme-dark-basic .group:hover,
+.workspace-theme.theme-dark-basic .custom-dropdown-item:hover {
+  background-color: var(--dark-surface-raised) !important;
+}
+.workspace-theme.theme-dark-basic .recharts-tooltip-wrapper,
+.workspace-theme.theme-dark-basic .recharts-default-tooltip,
+.workspace-theme.theme-dark-basic .recharts-tooltip-wrapper *,
+.workspace-theme.theme-dark-basic .recharts-default-tooltip * {
+  background-color: var(--dark-surface-raised) !important;
+  border-color: var(--dark-border-strong) !important;
+  color: var(--dark-text) !important;
+}
+
+/* Light Mode Basic login page background. `background-attachment: fixed`
+   sizes the cover against the viewport itself instead of the page's full
+   scrollable content height (which is taller than one screen once the AI
+   button below the card is included) -- without this, cover was scaling
+   against that taller box and zooming the art in far more than a single
+   screen actually needs. */
+.login-theme-light-basic {
+  background-color: #edf4fa !important;
+  background-position: center !important;
+  background-repeat: no-repeat !important;
+  background-size: cover !important;
+  background-attachment: fixed !important;
+}
+
+/* Dark Mode Basic login. Uses the existing dark login assets; the light logo
+   is deliberately omitted in App.tsx until the dedicated dark logo arrives. */
+.login-theme-dark-basic {
+  background-color: #020a13 !important;
+  background-position: center !important;
+  background-repeat: no-repeat !important;
+  background-size: cover !important;
+  background-attachment: fixed !important;
+  color: #f4f7fb !important;
+  color-scheme: dark !important;
+}
+.login-theme-dark-basic > header {
+  background-color: rgba(3, 15, 28, .74) !important;
+  border-color: rgba(57, 115, 170, .42) !important;
+  color: #dbeafe !important;
+}
+.login-theme-dark-basic #login-card-container {
+  border-color: rgba(65, 153, 255, .72) !important;
+  box-shadow: 0 0 20px rgba(34, 139, 255, .42), 0 24px 60px rgba(0, 0, 0, .58) !important;
+}
+.login-theme-dark-basic #login-card-container h1,
+.login-theme-dark-basic #login-card-container h2,
+.login-theme-dark-basic #login-card-container h3,
+.login-theme-dark-basic #login-card-container h4,
+.login-theme-dark-basic #login-card-container label,
+.login-theme-dark-basic #login-card-container [class~="text-slate-900"],
+.login-theme-dark-basic #login-card-container [class~="text-slate-800"],
+.login-theme-dark-basic #login-card-container [class~="text-slate-700"],
+.login-theme-dark-basic #login-card-container [class~="text-[#342D7E]"] {
+  color: #f4f7fb !important;
+}
+.login-theme-dark-basic #login-card-container p,
+.login-theme-dark-basic #login-card-container span,
+.login-theme-dark-basic #login-card-container [class~="text-slate-400"],
+.login-theme-dark-basic #login-card-container [class~="text-slate-500"],
+.login-theme-dark-basic #login-card-container [class~="text-slate-600"] {
+  color: #b6c7da !important;
+}
+.login-theme-dark-basic #login-card-container input,
+.login-theme-dark-basic #login-card-container textarea,
+.login-theme-dark-basic #login-card-container select,
+.login-theme-dark-basic #login-card-container option {
+  background-color: rgba(3, 17, 33, .78) !important;
+  border-color: rgba(65, 119, 168, .62) !important;
+  color: #f4f7fb !important;
+  color-scheme: dark !important;
+}
+.login-theme-dark-basic #login-card-container input::placeholder,
+.login-theme-dark-basic #login-card-container textarea::placeholder {
+  color: #7489a0 !important;
+}
+.login-theme-dark-basic #login-card-container button:not([class~="bg-blue-600"]):not([class~="bg-indigo-600"]) {
+  background-color: rgba(5, 23, 43, .82) !important;
+  border-color: rgba(65, 119, 168, .58) !important;
+  color: #e5effa !important;
+}
+.login-theme-dark-basic #login-card-container button[class~="bg-blue-600"],
+.login-theme-dark-basic #login-card-container button[class~="bg-indigo-600"] {
+  background-color: #145dff !important;
+  border-color: #3c7dff !important;
+  color: #ffffff !important;
+}
+
+/* Onboarding card (Create Your Business step 1) -- matches the workspace
+   dashboard's own dark-basic card palette. The generic input/label/button
+   rules above already cover most of this form's fields; these fill the
+   remaining gaps (the card's own background, badges, dividers, and the
+   white icon tile) that those rules don't touch. */
+.login-theme-dark-basic .login-onboarding-card {
+  background-color: #0c1d2e !important;
+}
+.login-theme-dark-basic .login-onboarding-card [class~="bg-white"] {
+  background-color: #081522 !important;
+}
+.login-theme-dark-basic .login-onboarding-card [class~="bg-blue-50"] {
+  background-color: rgba(20, 93, 255, 0.16) !important;
+}
+.login-theme-dark-basic .login-onboarding-card [class~="border-blue-100"],
+.login-theme-dark-basic .login-onboarding-card [class~="border-blue-200"] {
+  border-color: rgba(65, 119, 168, .58) !important;
+}
+.login-theme-dark-basic .login-onboarding-card [class~="border-slate-200/50"],
+.login-theme-dark-basic .login-onboarding-card [class~="border-slate-200"] {
+  border-color: #1c3042 !important;
+}
+.login-theme-dark-basic .login-onboarding-card [class~="text-blue-700"] {
+  color: #7cc2ff !important;
+}
+
+/* Dark Mode Dynamic
+   The real starscape photo (same asset as the dynamic login screens) sits
+   behind everything -- set as an inline style in App.tsx since a CSS
+   background-image can't reference a bundled/hashed asset path. This block
+   turns the menu and every card/panel into illuminated glass tiles that let
+   that starscape show through, matching the approved reference. */
+.workspace-theme.theme-dark-dynamic {
+  --dynamic-surface: rgba(4, 13, 28, .74);
+  --dynamic-surface-raised: rgba(7, 21, 42, .8);
+  --dynamic-border: rgba(56, 145, 255, .85);
+  --dynamic-border-soft: rgba(56, 145, 255, .55);
+  --dynamic-cyan: #18c8ff;
+  --dynamic-blue: #145dff;
+  background-color: #010713 !important;
+  background-repeat: no-repeat !important;
+  background-attachment: fixed !important;
+}
+
+/* Main shell and navigation -- the menu is a glass tile over the starscape
+   too, not a solid strip, so the background reads through it exactly like
+   every other pane. */
+.workspace-theme.theme-dark-dynamic > div,
+.workspace-theme.theme-dark-dynamic > aside,
+.workspace-theme.theme-dark-dynamic > main {
+  background-color: var(--dynamic-surface) !important;
+  background-image: none !important;
+  -webkit-backdrop-filter: blur(18px) saturate(130%);
+  backdrop-filter: blur(18px) saturate(130%);
+  border-color: var(--dynamic-border-soft) !important;
+  box-shadow: inset -1px 0 0 rgba(56, 145, 255, .3) !important;
+}
+
+/* Cards and panels become translucent navy glass with a crisp glowing edge,
+   matching the reference tiles: a near-solid dark fill (the starscape shows
+   through faintly, not a wash of extra gradients) and a bright blue outline. */
+.workspace-theme.theme-dark-dynamic :is(div, section, article, main, aside, header, footer, form)[class*="rounded"][class*="border"],
+.workspace-theme.theme-dark-dynamic :is(div, section, article, main, aside, header, footer, form)[class*="shadow"] {
+  background-color: var(--dynamic-surface) !important;
+  background-image: none !important;
+  border-width: 1.5px !important;
+  border-color: var(--dynamic-border) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(140, 210, 255, .12),
+    0 0 0 1px rgba(24, 200, 255, .1),
+    0 0 22px rgba(20, 93, 255, .22),
+    0 8px 28px rgba(0, 10, 30, .5) !important;
+  -webkit-backdrop-filter: blur(16px) saturate(130%);
+  backdrop-filter: blur(16px) saturate(130%);
+}
+
+/* Keep nested table rows clean while preserving the blue linework. */
+.workspace-theme.theme-dark-dynamic tr,
+.workspace-theme.theme-dark-dynamic tr:nth-child(odd),
+.workspace-theme.theme-dark-dynamic tr:nth-child(even) {
+  background-color: rgba(3, 16, 35, .66) !important;
+  border-color: rgba(27, 103, 216, .35) !important;
+}
+
+.workspace-theme.theme-dark-dynamic input,
+.workspace-theme.theme-dark-dynamic textarea,
+.workspace-theme.theme-dark-dynamic select,
+.workspace-theme.theme-dark-dynamic option,
+.workspace-theme.theme-dark-dynamic .input,
+.workspace-theme.theme-dark-dynamic .search-container,
+.workspace-theme.theme-dark-dynamic .input-container,
+.workspace-theme.theme-dark-dynamic .filter-container,
+.workspace-theme.theme-dark-dynamic .date-picker-button,
+.workspace-theme.theme-dark-dynamic .filter-button-group,
+.workspace-theme.theme-dark-dynamic .custom-dropdown-popover,
+.workspace-theme.theme-dark-dynamic .custom-dropdown-item {
+  background-color: rgba(2, 15, 33, .88) !important;
+  border-color: rgba(41, 126, 237, .58) !important;
+  box-shadow: inset 0 1px 0 rgba(91, 178, 255, .06) !important;
+}
+.workspace-theme.theme-dark-dynamic input:focus,
+.workspace-theme.theme-dark-dynamic textarea:focus,
+.workspace-theme.theme-dark-dynamic select:focus {
+  border-color: var(--dynamic-cyan) !important;
+  box-shadow: 0 0 0 2px rgba(24, 200, 255, .14), 0 0 16px rgba(20, 93, 255, .22) !important;
+  outline: none !important;
+}
+
+/* Neutral controls remain readable; primary and selected controls glow. */
+.workspace-theme.theme-dark-dynamic button {
+  background-color: var(--dynamic-surface-raised) !important;
+  border-color: rgba(43, 115, 209, .58) !important;
+}
+.workspace-theme.theme-dark-dynamic button:hover {
+  background-color: rgba(11, 42, 82, .94) !important;
+  border-color: rgba(41, 156, 255, .9) !important;
+  box-shadow: 0 0 14px rgba(20, 93, 255, .2) !important;
+}
+.workspace-theme.theme-dark-dynamic button[class~="bg-[#4A86F7]"],
+.workspace-theme.theme-dark-dynamic button[class~="bg-[#4A9BFF]"],
+.workspace-theme.theme-dark-dynamic button[class~="bg-blue-600"],
+.workspace-theme.theme-dark-dynamic button[class~="bg-indigo-600"],
+.workspace-theme.theme-dark-dynamic button[class~="bg-[#A9CEF5]"] {
+  background-color: var(--dynamic-blue) !important;
+  background-image: linear-gradient(110deg, #168dff 0%, #123cff 62%, #075cff 100%) !important;
+  border-color: #20c9ff !important;
+  box-shadow: 0 0 10px rgba(0, 193, 255, .52), 0 0 24px rgba(20, 93, 255, .34) !important;
+}
+.workspace-theme.theme-dark-dynamic [class~="bg-[#A9CEF5]"]:not(button),
+.workspace-theme.theme-dark-dynamic .custom-dropdown-item-active {
+  background-color: rgba(17, 78, 218, .56) !important;
+  background-image: linear-gradient(100deg, rgba(20, 141, 255, .86), rgba(22, 53, 235, .92)) !important;
+  border-color: var(--dynamic-cyan) !important;
+  box-shadow: inset 0 0 14px rgba(91, 220, 255, .18), 0 0 16px rgba(0, 123, 255, .38) !important;
+  color: #ffffff !important;
+}
+.workspace-theme.theme-dark-dynamic [class~="bg-[#A9CEF5]"]:not(button) * {
+  color: #ffffff !important;
+}
+
+/* Electric accents without repainting semantic success/warning/error states. */
+.workspace-theme.theme-dark-dynamic [class~="text-[#315C9F]"],
+.workspace-theme.theme-dark-dynamic [class~="text-blue-600"],
+.workspace-theme.theme-dark-dynamic [class~="text-blue-700"] {
+  color: #59c7ff !important;
+  text-shadow: 0 0 12px rgba(36, 157, 255, .24);
+}
+/* Primary + muted brand text (headings, table cells, Quick Actions buttons,
+   etc.) is hardcoded navy everywhere in the app. theme-dark-basic already
+   remaps these same two classes to a light color; dynamic never got the
+   same treatment, so this text stayed navy-on-near-black against the forced
+   -dark surfaces/buttons above -- unreadable. */
+.workspace-theme.theme-dark-dynamic [class~="text-[#1F3557]"],
+.workspace-theme.theme-dark-dynamic [class~="text-[#342D7E]"] {
+  color: #eaf6ff !important;
+}
+.workspace-theme.theme-dark-dynamic [class~="text-[#5E7393]"] {
+  color: rgba(205, 226, 255, .72) !important;
+}
+.workspace-theme.theme-dark-dynamic svg:not([class*="text-green"]):not([class*="text-emerald"]):not([class*="text-red"]):not([class*="text-rose"]):not([class*="text-yellow"]):not([class*="text-amber"]) {
+  filter: drop-shadow(0 0 5px rgba(32, 145, 255, .18));
+}

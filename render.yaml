@@ -1,14 +1,9 @@
 services:
   - type: web
-    name: ownerslocal-demo
+    name: ownersdemo
     runtime: static
-    buildCommand: ""
-    staticPublishPath: ./demo
-    pullRequestPreviewsEnabled: false
-    headers:
-      - path: /*
-        name: X-Robots-Tag
-        value: noindex
+    buildCommand: npm install && npm run build
+    staticPublishPath: dist
     routes:
       - type: rewrite
         source: /*

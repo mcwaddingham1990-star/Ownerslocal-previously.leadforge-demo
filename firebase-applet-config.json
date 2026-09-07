@@ -1,0 +1,10 @@
+{
+  "projectId": "ownerslocal-demo-disconnected",
+  "appId": "1:0000000000:web:0000000000000000000000",
+  "apiKey": "demo-disconnected-no-real-key",
+  "authDomain": "ownerslocal-demo-disconnected.firebaseapp.com",
+  "firestoreDatabaseId": "(default)",
+  "storageBucket": "ownerslocal-demo-disconnected.firebasestorage.app",
+  "messagingSenderId": "0000000000",
+  "measurementId": ""
+}

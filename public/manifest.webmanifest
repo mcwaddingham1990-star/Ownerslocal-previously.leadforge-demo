@@ -1,0 +1,17 @@
+{
+  "name": "OwnersLOCAL",
+  "short_name": "Owner's Local",
+  "description": "The AI-powered operating system for local businesses.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#0f1c33",
+  "theme_color": "#1F3557",
+  "orientation": "portrait-primary",
+  "icons": [
+    { "src": "/branding/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/branding/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/branding/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "maskable" },
+    { "src": "/branding/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
