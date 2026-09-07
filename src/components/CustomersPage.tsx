@@ -185,6 +185,8 @@ export const CustomersPage: React.FC<CustomersPageProps> = ({
       sourceType: "Customer",
       sourceId: customer.id,
       customerName: customer.contact || customer.company,
+      customerPhone: customer.phone,
+      customerEmail: customer.email,
       representativeName: loggedInUser?.name || "Company Representative",
       lines: [],
       pdfBase64
@@ -221,7 +223,7 @@ export const CustomersPage: React.FC<CustomersPageProps> = ({
   }, [preSelectedCustomerId, customers, setPreSelectedCustomerId]);
 
   const openCollectSignatures = (customer: Customer) => {
-    setPendingSignatureCapture({ customerName: customer.contact || customer.company });
+    setPendingSignatureCapture({ customerName: customer.contact || customer.company, customerPhone: customer.phone, customerEmail: customer.email });
     onNavigateToScreen("documents");
   };
 
@@ -468,6 +470,8 @@ export const CustomersPage: React.FC<CustomersPageProps> = ({
       sourceType: "Customer",
       sourceId: cust.id,
       customerName: cust.contact || cust.company,
+      customerPhone: cust.phone,
+      customerEmail: cust.email,
       representativeName: loggedInUser?.name || "Company Representative",
       lines: [],
       pdfBase64

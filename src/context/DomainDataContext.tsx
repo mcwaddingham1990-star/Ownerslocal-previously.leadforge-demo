@@ -80,8 +80,8 @@ export interface DomainDataContextValue {
   estimatePrefill: EstimatePrefill | null;
   setEstimatePrefill: Dispatch<SetStateAction<EstimatePrefill | null>>;
   /** Queued "Collect Signatures" request (e.g. from a customer card) -- consumed by DocumentsPage to open the PDF Editor straight to its file picker, ready to capture signatures on whatever real document gets opened. */
-  pendingSignatureCapture: { customerName?: string } | null;
-  setPendingSignatureCapture: Dispatch<SetStateAction<{ customerName?: string } | null>>;
+  pendingSignatureCapture: { customerName?: string; customerPhone?: string; customerEmail?: string } | null;
+  setPendingSignatureCapture: Dispatch<SetStateAction<{ customerName?: string; customerPhone?: string; customerEmail?: string } | null>>;
   /** Real business profile (Settings -> Business Info), used to head every generated PDF and to place the HQ pin on the map. First location only -- multi-location businesses print/pin their primary address. */
   businessProfile: { name: string; phone: string; address: string; email: string; logo: string };
   /** The real, persisted global AI on/off + mode -- Owner Console's Pause/Resume AI button and the AI Assistant/Settings dropdowns all read and write this same value. */

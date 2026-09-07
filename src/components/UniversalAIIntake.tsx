@@ -31,6 +31,16 @@ const id = (prefix: string) => `${prefix}_${Date.now()}_${Math.random().toString
 const today = () => new Date().toISOString().slice(0, 10);
 const labels: Record<RecordType, string> = { bill: "Bill / Invoice", customer: "Customer", lead: "Lead", estimate: "Estimate", inventory: "Inventory", address: "Address", onboarding: "Onboarding", material_expense: "Material / Operational Expense", payroll: "Payroll Record", financial: "Other Financial Record", unknown: "Auto-detect" };
 const asBoolean = (value: unknown) => value === true || String(value).trim().toLowerCase() === "true" || String(value).trim().toLowerCase() === "yes";
+// "Fuel" is its own recognized Material Expenses category everywhere this
+// app rolls up reporting (see the materialCategories set in App.tsx and
+// AccountingPage.tsx) -- a gas/diesel receipt gets that specific label
+// instead of the generic "Material Expenses" bucket every other scanned
+// material_expense record gets, purely from what the AI/reviewer actually
+// typed into the category or description field.
+const isFuelExpense = (scanFields: Fields) => {
+  const haystack = `${scanFields.category || ""} ${scanFields.description || ""} ${scanFields.company || scanFields.payee || ""}`.toLowerCase();
+  return /\bfuel\b|\bgas(oline)?\b|\bdiesel\b/.test(haystack);
+};
 const canonicalFinancialCategory = (value: unknown): "Bills" | "Material Expenses" | "Payroll" | "Other Expenses" | null => {
   const category = String(value || "").trim().toLowerCase();
   if (["bill", "bills", "vendor bill", "service provider"].includes(category)) return "Bills";
@@ -53,7 +63,16 @@ const presetFields: Record<RecordType, Fields> = {
   unknown: { name: "", phone: "", email: "", address: "", description: "", amount: "" }
 };
 
-export function UniversalAIIntake() {
+export interface UniversalAIIntakeProps {
+  /** Set only for an employee using their own granted Snapshot permission --
+   * files their scanned photos under Documents > Employee Snapshot (scoped
+   * to them via the employee field) instead of the owner's general
+   * Snapshots folder. Undefined for the owner/managers, who keep the
+   * original Snapshots folder. */
+  snapshotFolder?: string;
+}
+
+export function UniversalAIIntake({ snapshotFolder }: UniversalAIIntakeProps = {}) {
   const data = useDomainData();
   const { triggerNotification, logOperationalEvent } = useNavTelemetry();
   const { loggedInUser, businessId } = useAuth();
@@ -98,7 +117,8 @@ export function UniversalAIIntake() {
       vendor: params.vendor,
       date: params.date,
       docType,
-      uploadedBy: loggedInUser?.name
+      uploadedBy: loggedInUser?.name,
+      folder: snapshotFolder
     }), ...prev]);
   };
   const scan = async (file?: File) => {
@@ -316,7 +336,9 @@ export function UniversalAIIntake() {
     } else if (recordType === "financial" || recordType === "material_expense" || recordType === "payroll") {
       const amount = Number(fields.amount || fields.totalCost || 0);
       if (!Number.isFinite(amount) || amount <= 0) return triggerNotification("Review requires a valid financial amount before saving.");
-      const category = recordType === "material_expense" ? "Material Expenses" : recordType === "payroll" ? "Payroll" : canonicalFinancialCategory(fields.category);
+      const category = recordType === "material_expense"
+        ? (isFuelExpense(fields) ? "Fuel" : "Material Expenses")
+        : recordType === "payroll" ? "Payroll" : canonicalFinancialCategory(fields.category);
       if (category === "Bills") return triggerNotification("Service/provider obligations must be saved as a Bill so they remain linked to the provider.");
       if (!category) return triggerNotification("Choose Material / Operational Expense, Payroll Record, or enter a recognized category before saving.");
       // Goes through saveTransaction (not a raw setTransactions push) so a
@@ -360,8 +382,15 @@ export function UniversalAIIntake() {
     {stage === "choose" && <div className="mt-5 space-y-4"><label className="block text-[10px] font-black uppercase text-slate-500">Record destination<select value={recordType} onChange={e => setRecordType(e.target.value as RecordType)} className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-xs normal-case"><option value="unknown">Auto-detect from document</option>{Object.entries(labels).filter(([key]) => key !== "unknown").map(([key, label]) => <option key={key} value={key}>{label}</option>)}</select></label><input ref={inputRef} type="file" accept="image/*,application/pdf" className="hidden" onChange={e => scan(e.target.files?.[0])} /><button onClick={() => inputRef.current?.click()} className="w-full rounded-2xl border-2 border-dashed border-violet-300 bg-violet-50 p-7 text-violet-700"><FileUp className="mx-auto mb-2 w-7 h-7" /><span className="text-xs font-black">Photograph or upload completed form</span></button><button onClick={() => { setFields({ ...presetFields[recordType] }); setStage("review"); }} className="w-full rounded-xl border border-[#9EC8EF] bg-[#EAF5FF] px-3 py-2.5 text-xs font-bold text-[#315C9F] flex justify-center gap-2"><PencilLine className="w-4 h-4" /> Use editable preset form</button><p className="text-center text-[9px] text-slate-500">Manual entry inside every module remains available.</p></div>}
     {stage === "scanning" && <div className="py-14 text-center"><Loader2 className="mx-auto h-8 w-8 animate-spin text-violet-600" /><p className="mt-3 text-xs font-bold text-[#1F3557]">Reading and classifying the form…</p></div>}
     {stage === "review" && <div className="mt-4 space-y-3"><div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-[10px] text-amber-900"><strong>Owner review required.</strong> Correct every field below before saving. AI confidence: {Math.round(confidence * 100)}%.</div><label className="block text-[9px] font-black uppercase text-slate-500">Save to<select value={recordType} onChange={e => setRecordType(e.target.value as RecordType)} className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-xs normal-case">{Object.entries(labels).map(([key, label]) => <option key={key} value={key}>{label}</option>)}</select></label>{Object.entries(fields).map(([key, value]) => <label key={key} className="block"><span className="text-[9px] font-bold uppercase text-slate-500">{key.replace(/([A-Z])/g, " $1")}</span><input value={String(value ?? "")} onChange={e => setFields(prev => ({ ...prev, [key]: typeof value === "number" ? Number(e.target.value) : typeof value === "boolean" ? e.target.value === "true" : e.target.value }))} className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-xs" /></label>)}<button onClick={() => setFields(prev => ({ ...prev, [`field${Object.keys(prev).length + 1}`]: "" }))} className="text-[10px] font-bold text-[#315C9F]">+ Add missing field</button><div className="flex gap-2 pt-2"><button onClick={() => setStage("choose")} className="flex-1 rounded-xl bg-slate-100 py-2.5 text-xs font-bold text-slate-600">Back</button><button onClick={save} className="flex-1 rounded-xl bg-emerald-600 py-2.5 text-xs font-black text-white flex justify-center gap-2"><Check className="w-4 h-4" /> Review Complete — Save</button></div></div>}
-    {stage === "review_items" && <div className="mt-4 space-y-3 text-xs">
-      <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-[10px] text-amber-900"><strong>Owner review required.</strong> {scannedItems.length} item{scannedItems.length === 1 ? "" : "s"} found — {scanVendor || "vendor not detected"}{scanDate ? ` · ${scanDate}` : ""}. AI confidence: {Math.round(confidence * 100)}%.</div>
+    {stage === "review_items" && (() => {
+      // No vendor/cost/sku on any item -- there's no receipt or label at all,
+      // so these came from the AI visually counting physical stock in the
+      // photo rather than reading text. Quantities there are estimates, not
+      // reads, so let the owner correct the count before it hits inventory.
+      const isVisualScan = !scanVendor && scannedItems.length > 0
+        && scannedItems.every(item => item.unitCost == null && !item.sku && !item.barcode);
+      return <div className="mt-4 space-y-3 text-xs">
+      <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-[10px] text-amber-900"><strong>Owner review required.</strong> {scannedItems.length} item{scannedItems.length === 1 ? "" : "s"} found{isVisualScan ? " — visually estimated from the photo, check the counts below" : ` — ${scanVendor || "vendor not detected"}${scanDate ? ` · ${scanDate}` : ""}`}. AI confidence: {Math.round(confidence * 100)}%.</div>
       <div className="rounded-xl border border-slate-200 overflow-hidden">
         <label className="flex items-center gap-2.5 p-3 border-b border-slate-200 bg-slate-50 cursor-pointer">
           <input type="checkbox" checked={scannedItems.length > 0 && selectedItems.every(Boolean)} onChange={e => setSelectedItems(scannedItems.map(() => e.target.checked))} className="w-4 h-4 accent-violet-600" />
@@ -371,19 +400,32 @@ export function UniversalAIIntake() {
           {scannedItems.map((item, index) => {
             const match = findInventoryMatch(item);
             return (
-              <label key={index} className="flex items-start gap-2.5 p-3 cursor-pointer hover:bg-slate-50">
+              <div key={index} className="flex items-start gap-2.5 p-3 hover:bg-slate-50">
                 <input type="checkbox" checked={!!selectedItems[index]} onChange={e => setSelectedItems(prev => prev.map((v, i) => i === index ? e.target.checked : v))} className="w-4 h-4 mt-0.5 accent-violet-600 shrink-0" />
                 <div className="flex-1 min-w-0">
-                  <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
-                    <span className="text-slate-800 font-black">{item.quantity != null ? `${item.quantity} × ` : ""}{item.name || "Unnamed item"}</span>
-                    <span className="font-mono text-slate-800 font-black">{item.unitCost != null ? `$${item.unitCost.toFixed(2)} ea` : "Cost not detected"}</span>
+                  <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
+                    {isVisualScan ? (
+                      <span className="flex items-center gap-1.5 text-slate-800 font-black">
+                        <input
+                          type="number"
+                          min={0}
+                          value={item.quantity ?? 0}
+                          onChange={e => setScannedItems(prev => prev.map((it, i) => i === index ? { ...it, quantity: Number(e.target.value) } : it))}
+                          onClick={e => e.stopPropagation()}
+                          className="w-14 rounded-lg border border-slate-300 px-1.5 py-1 text-xs font-mono font-black text-center"
+                        /> × {item.name || "Unnamed item"}{item.unit ? ` (${item.unit})` : ""}
+                      </span>
+                    ) : (
+                      <span className="text-slate-800 font-black">{item.quantity != null ? `${item.quantity} × ` : ""}{item.name || "Unnamed item"}</span>
+                    )}
+                    {!isVisualScan && <span className="font-mono text-slate-800 font-black">{item.unitCost != null ? `$${item.unitCost.toFixed(2)} ea` : "Cost not detected"}</span>}
                   </div>
                   <div className="text-[9.5px] text-slate-400 font-medium mt-0.5">
-                    {item.sku ? `SKU ${item.sku}` : "No SKU detected"}
+                    {isVisualScan ? "Visually estimated -- adjust the count if it's off" : (item.sku ? `SKU ${item.sku}` : "No SKU detected")}
                     {match ? ` · Restocks existing "${match.name}" (${match.quantity} on hand)` : " · Will be added as a new item"}
                   </div>
                 </div>
-              </label>
+              </div>
             );
           })}
         </div>
@@ -404,7 +446,8 @@ export function UniversalAIIntake() {
         <button onClick={() => setStage("choose")} className="flex-1 rounded-xl bg-slate-100 py-2.5 text-xs font-bold text-slate-600">Back</button>
         <button onClick={saveItemizedScan} className="flex-1 rounded-xl bg-emerald-600 py-2.5 text-xs font-black text-white flex justify-center gap-2"><Check className="w-4 h-4" /> Confirm & Update Ledger</button>
       </div>
-    </div>}
+    </div>;
+    })()}
   </div></div>,
   document.body
   );

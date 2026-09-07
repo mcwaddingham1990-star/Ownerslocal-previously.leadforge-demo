@@ -2,12 +2,13 @@ import React, { useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle, Briefcase, Calendar, Check, CheckCircle2, ChevronRight,
   ChevronDown, ClipboardCheck, Clock, DollarSign, Edit3, FileText, Filter, MapPin,
-  MessageSquare, Package, Plus, Search, Trash2, Truck, User, Users, X
+  MessageSquare, Package, Plus, Search, Send, Trash2, Truck, User, Users, X
 } from "lucide-react";
 import { useAuth } from "../context/AuthContext";
 import { useDomainData } from "../context/DomainDataContext";
 import { useNavTelemetry } from "../context/NavTelemetryContext";
 import { StructuredAddressFields } from "./StructuredAddressFields";
+import SendChoiceModal from "./SendChoiceModal";
 import type { SchedulingEvent } from "../types/domain";
 import type { ProjectCompletionPlan } from "../types/completion";
 import { useFirestoreCollection } from "../hooks/useFirestoreCollection";
@@ -81,6 +82,7 @@ export const JobsPage: React.FC = () => {
   const [assigneeFilter, setAssigneeFilter] = useState("All");
   const [viewMode, setViewMode] = useState<ViewMode>("board");
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [isSendOpen, setIsSendOpen] = useState(false);
   const [modal, setModal] = useState<"create" | "edit" | null>(null);
   const [form, setForm] = useState(EMPTY_FORM);
   const [newTask, setNewTask] = useState("");
@@ -239,7 +241,7 @@ export const JobsPage: React.FC = () => {
   const laborHours = (job: SchedulingEvent) => timeClockLogs.filter(l => l.jobId === job.id && l.type === "Clock Out").length;
   const materialCost = (job: SchedulingEvent) => (job.materials || []).reduce((s, m) => s + m.quantity * m.unitCost, 0);
   const generateJobPdf = (job: SchedulingEvent) => {
-    setGeneratedPdfDraft({filename:`${displayNumber(job)}.pdf`,title:`Job ${displayNumber(job)}`,sourceType:"Job",sourceId:job.id,customerName:job.customer,representativeName:job.assignedEmployee||actor,lines:[`Customer: ${job.customer}`,`Phone: ${job.customerPhone||"—"}`,`Address: ${job.location||job.customerAddress||"—"}`,`Date: ${job.date} ${job.startTime||""}`,`Status: ${normalizedStatus(job)}`,`Priority: ${job.priority}`,`Estimated value: $${Number(estimatedAmount(job)).toLocaleString()}`,"",`Description: ${job.description||job.notes||"—"}`]});
+    setGeneratedPdfDraft({filename:`${displayNumber(job)}.pdf`,title:`Job ${displayNumber(job)}`,sourceType:"Job",sourceId:job.id,customerName:job.customer,customerPhone:job.customerPhone,customerEmail:job.customerEmail,representativeName:job.assignedEmployee||actor,lines:[`Customer: ${job.customer}`,`Phone: ${job.customerPhone||"—"}`,`Address: ${job.location||job.customerAddress||"—"}`,`Date: ${job.date} ${job.startTime||""}`,`Status: ${normalizedStatus(job)}`,`Priority: ${job.priority}`,`Estimated value: $${Number(estimatedAmount(job)).toLocaleString()}`,"",`Description: ${job.description||job.notes||"—"}`]});
     navigateToScreen("documents");
   };
 
@@ -273,7 +275,7 @@ export const JobsPage: React.FC = () => {
       <div className="overflow-x-auto rounded-2xl border border-[#9EC8EF] bg-white"><table className="w-full min-w-[900px] text-xs"><thead className="bg-[#C7E3FA] text-[9px] uppercase tracking-wide text-[#5E7393]"><tr>{["Job","Customer","Schedule","Assigned","Priority","Status","Value",""] .map(h=><th key={h} className="px-4 py-3 text-left">{h}</th>)}</tr></thead><tbody>{visibleJobs.map(job=><tr key={job.id} className="border-t border-blue-100 hover:bg-blue-50"><td className="px-4 py-3 font-black text-[#1F3557]">{displayNumber(job)}<p className="font-semibold text-[#5E7393]">{job.title||job.customType||"Service Job"}</p></td><td className="px-4 py-3">{job.customer}</td><td className="px-4 py-3">{job.date} {job.startTime}</td><td className="px-4 py-3">{job.assignedEmployee||"Unassigned"}</td><td className="px-4 py-3">{job.priority}</td><td className="px-4 py-3"><StatusBadge status={normalizedStatus(job)}/></td><td className="px-4 py-3 font-bold">${estimatedAmount(job).toLocaleString()}</td><td className="px-4 py-3"><div className="flex gap-3"><button onClick={()=>setSelectedId(job.id)} className="font-bold text-[#315C9F]">Open <ChevronRight className="inline h-4 w-4"/></button><button onClick={()=>openCompletion(job)} className="font-bold text-emerald-700">Completion</button></div></td></tr>)}</tbody></table></div>}
 
     {selected && <div className="fixed inset-0 z-[80] flex justify-end bg-slate-900/50 backdrop-blur-sm" onMouseDown={e=>e.target===e.currentTarget&&setSelectedId(null)}><div className="h-full w-full max-w-2xl overflow-y-auto bg-[#F5FAFF] shadow-2xl">
-      <div className="sticky top-0 z-10 border-b border-[#9EC8EF] bg-[#C7E3FA] p-5"><div className="flex items-start justify-between"><div><p className="text-[10px] font-black uppercase tracking-widest text-[#315C9F]">{displayNumber(selected)}</p><h3 className="text-xl font-black text-[#1F3557]">{selected.title||selected.customType||"Service Job"}</h3><p className="text-xs font-semibold text-[#5E7393]">{selected.customer}</p></div><button onClick={()=>setSelectedId(null)} className="rounded-full p-2 hover:bg-white"><X className="h-5 w-5"/></button></div><div className="mt-4 flex flex-wrap gap-2"><StatusBadge status={normalizedStatus(selected)}/><button onClick={()=>generateJobPdf(selected)} className="rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-bold text-white"><FileText className="mr-1 inline h-3.5 w-3.5"/>Generate PDF</button>{canEdit&&<button onClick={()=>openEdit(selected)} className="rounded-lg bg-white px-3 py-1.5 text-xs font-bold text-[#315C9F]"><Edit3 className="mr-1 inline h-3.5 w-3.5"/>Edit</button>}{canDelete&&<button onClick={()=>deleteJob(selected)} className="rounded-lg bg-rose-50 px-3 py-1.5 text-xs font-bold text-rose-600"><Trash2 className="mr-1 inline h-3.5 w-3.5"/>Delete</button>}</div></div>
+      <div className="sticky top-0 z-10 border-b border-[#9EC8EF] bg-[#C7E3FA] p-5"><div className="flex items-start justify-between"><div><p className="text-[10px] font-black uppercase tracking-widest text-[#315C9F]">{displayNumber(selected)}</p><h3 className="text-xl font-black text-[#1F3557]">{selected.title||selected.customType||"Service Job"}</h3><p className="text-xs font-semibold text-[#5E7393]">{selected.customer}</p></div><button onClick={()=>setSelectedId(null)} className="rounded-full p-2 hover:bg-white"><X className="h-5 w-5"/></button></div><div className="mt-4 flex flex-wrap gap-2"><StatusBadge status={normalizedStatus(selected)}/><button onClick={()=>generateJobPdf(selected)} className="rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-bold text-white"><FileText className="mr-1 inline h-3.5 w-3.5"/>Generate PDF</button><button disabled={!selected.customerPhone&&!selected.customerEmail} onClick={()=>setIsSendOpen(true)} className="rounded-lg bg-white px-3 py-1.5 text-xs font-bold text-[#315C9F] disabled:opacity-40 disabled:cursor-not-allowed"><Send className="mr-1 inline h-3.5 w-3.5"/>Send</button>{canEdit&&<button onClick={()=>openEdit(selected)} className="rounded-lg bg-white px-3 py-1.5 text-xs font-bold text-[#315C9F]"><Edit3 className="mr-1 inline h-3.5 w-3.5"/>Edit</button>}{canDelete&&<button onClick={()=>deleteJob(selected)} className="rounded-lg bg-rose-50 px-3 py-1.5 text-xs font-bold text-rose-600"><Trash2 className="mr-1 inline h-3.5 w-3.5"/>Delete</button>}</div></div>
       <div className="space-y-5 p-5">
         <button onClick={()=>openCompletion(selected)} className="w-full rounded-xl bg-emerald-600 px-4 py-3 text-xs font-black text-white"><ClipboardCheck className="mr-1 inline h-4 w-4"/>Project Completion Tracking</button>
         <section className="grid grid-cols-2 gap-3 sm:grid-cols-4">{[["Date",selected.date,Calendar],["Time",`${selected.startTime}–${selected.endTime}`,Clock],["Technician",selected.assignedEmployee||"Unassigned",User],["Priority",selected.priority,AlertTriangle]].map(([l,v,I]:any)=><div key={l} className="rounded-xl border border-[#9EC8EF] bg-white p-3"><I className="h-4 w-4 text-[#4A86F7]"/><p className="mt-2 text-[9px] font-bold uppercase text-[#5E7393]">{l}</p><p className="truncate text-xs font-black text-[#1F3557]">{v}</p></div>)}</section>
@@ -296,6 +298,7 @@ export const JobsPage: React.FC = () => {
       setPlans={setCompletionPlans} setDocuments={setDocuments} onClose={()=>setCompletionJobId(null)} notify={triggerNotification}
     />}
     {confirmState && <div className="fixed inset-0 z-[120] flex items-center justify-center bg-slate-900/60 p-4" onMouseDown={e=>e.target===e.currentTarget&&setConfirmState(null)}><div className="w-full max-w-sm rounded-2xl bg-white p-5 shadow-2xl"><p className="text-sm font-bold text-[#1F3557]">{confirmState.message}</p><div className="mt-4 flex justify-end gap-2"><button onClick={()=>setConfirmState(null)} className="rounded-xl px-4 py-2 text-xs font-bold text-slate-500 hover:bg-slate-100">Cancel</button><button onClick={()=>{const run=confirmState.onConfirm;setConfirmState(null);run();}} className="rounded-xl bg-[#315C9F] px-4 py-2 text-xs font-black text-white">Confirm</button></div></div></div>}
+    <SendChoiceModal isOpen={isSendOpen} onClose={()=>setIsSendOpen(false)} label={selected?displayNumber(selected):"job"} phone={selected?.customerPhone} email={selected?.customerEmail} />
   </div>;
 };
 

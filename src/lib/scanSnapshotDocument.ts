@@ -23,6 +23,10 @@ export function buildScanSnapshotDocument(params: {
   date?: string | null;
   docType: "Receipts" | "Invoices" | "Bills" | "Checks";
   uploadedBy?: string;
+  /** Defaults to "Snapshots" (the owner's own scans). A permitted employee's
+   * scan files under "Employee Snapshot" instead, scoped to them via the
+   * `employee` field below (already set from uploadedBy). */
+  folder?: string;
 }): DocumentItem {
   const date = params.date || new Date().toISOString().slice(0, 10);
   const vendor = sanitizeFilenamePart(params.vendor?.trim() || "Unknown Vendor");
@@ -36,7 +40,7 @@ export function buildScanSnapshotDocument(params: {
     vendor: params.vendor || "None",
     job: "None",
     type: params.docType,
-    folder: "Snapshots",
+    folder: params.folder || "Snapshots",
     uploadedBy: params.uploadedBy || "AI Scan",
     date,
     size: `${Math.max(1, Math.ceil((params.photoBase64.length * 0.75) / 1024))} KB`,

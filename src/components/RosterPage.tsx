@@ -10,6 +10,8 @@ import { Search, UserPlus, Edit3, X, Copy, Shield, Phone, Mail, MapPin } from "l
 import type { EmployeeRecord } from "../types/domain";
 import { composeEmail, composeSms, callNumber } from "../lib/deviceHandoff";
 import { isManagerRole } from "../lib/notificationsService";
+import { GpsPrivacyNotice } from "./GpsPrivacyNotice";
+import { RecentRoutesSection } from "./RecentRoutesSection";
 
 function genInviteCode(role: string): string {
   const randomStr = Math.random().toString(36).substring(2, 8).toUpperCase();
@@ -67,6 +69,7 @@ export const RosterPage: React.FC = () => {
   const [customRoleName, setCustomRoleName] = useState("");
   const [customRoleReady, setCustomRoleReady] = useState(false);
   const [requireTimeClockVerification, setRequireTimeClockVerification] = useState(false);
+  const [inviteGpsTrackingEnabled, setInviteGpsTrackingEnabled] = useState(false);
   const [generatedInviteCode, setGeneratedInviteCode] = useState<string | null>(null);
   const managerRole = (loggedInUser?.role || "").toLowerCase();
   const canManageRoles = !loggedInUser?.isEmployee || managerRole.includes("owner") || managerRole.includes("manager") || managerRole.includes("admin");
@@ -210,6 +213,7 @@ export const RosterPage: React.FC = () => {
         permissions,
         granularPermissions: invitePermissions,
         requireTimeClockVerification,
+        gpsTrackingEnabled: inviteGpsTrackingEnabled,
         status: "pending",
         createdAt: new Date().toISOString()
       });
@@ -380,6 +384,14 @@ export const RosterPage: React.FC = () => {
               <input type="checkbox" checked={!!editingEmployee.requireTimeClockVerification} onChange={e => setEditingEmployee({ ...editingEmployee, requireTimeClockVerification: e.target.checked })} className="mt-0.5" />
               <span><strong className="block text-[#1F3557]">Require manager approval</strong><span className="text-[9px] text-slate-500">Every clock-in/out is marked pending until a manager reviews and approves it remotely, from their own device -- never by anyone entering credentials on this employee's device.</span></span>
             </label>
+            <label className="flex items-start gap-2 rounded-xl border border-slate-200 p-3">
+              <input type="checkbox" checked={!!editingEmployee.gpsTrackingEnabled} onChange={e => setEditingEmployee({ ...editingEmployee, gpsTrackingEnabled: e.target.checked })} className="mt-0.5" />
+              <span><strong className="block text-[#1F3557]">Enable field GPS tracking</strong><span className="text-[9px] text-slate-500">While clocked in, this employee's real device location reports periodically so their live position and route show on the Interactive Map. Off by default -- turn off any time, right here.</span></span>
+            </label>
+            <GpsPrivacyNotice />
+            {editingEmployee.gpsTrackingEnabled && (
+              <RecentRoutesSection businessId={businessId} employeeEmail={editingEmployee.email} />
+            )}
             {editingEmployee.requireTimeClockVerification && (
               <label className="flex flex-col gap-1 text-[10px] font-bold text-[#5E7393] pl-1">
                 Assigned manager (optional)
@@ -452,6 +464,11 @@ export const RosterPage: React.FC = () => {
                   <input type="checkbox" checked={requireTimeClockVerification} onChange={e => setRequireTimeClockVerification(e.target.checked)} className="mt-0.5" />
                   <span><strong className="block text-[#1F3557]">Require manager approval</strong><span className="text-[9px] text-slate-500">Every clock-in/out is marked pending until a manager reviews and approves it remotely, from their own device -- never by anyone entering credentials on this employee's device.</span></span>
                 </label>
+                <label className="flex items-start gap-2 rounded-xl border border-slate-200 bg-slate-50 p-3">
+                  <input type="checkbox" checked={inviteGpsTrackingEnabled} onChange={e => setInviteGpsTrackingEnabled(e.target.checked)} className="mt-0.5" />
+                  <span><strong className="block text-[#1F3557]">Enable field GPS tracking</strong><span className="text-[9px] text-slate-500">While clocked in, this employee's real device location reports periodically so their live position and route show on the Interactive Map. Off by default -- can be turned on or off any time from Settings or Roster.</span></span>
+                </label>
+                {inviteGpsTrackingEnabled && <GpsPrivacyNotice />}
                 <button disabled={!inviteMode || !inviteRoleId || (inviteMode === "custom" && !customRoleReady)} onClick={handleGenerateInvite} className="w-full py-2 bg-[#315C9F] text-white rounded-xl font-bold mt-2 disabled:opacity-40">Generate Invite Code</button>
               </>
             ) : (

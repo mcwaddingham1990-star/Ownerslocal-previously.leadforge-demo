@@ -29,7 +29,7 @@ import {
 } from "../lib/accountingEngine";
 import { buildInvoicePdf, bytesToBase64 } from "../lib/pdfExport";
 import { MAX_INLINE_BASE64_LENGTH } from "../lib/firestoreDocumentLimits";
-import { composeEmail, composeSms } from "../lib/deviceHandoff";
+import SendChoiceModal from "./SendChoiceModal";
 import type { DocumentItem } from "../types/domain";
 import {
   LayoutDashboard,
@@ -530,6 +530,8 @@ function InvoicesTab({
   const [payingInvoice, setPayingInvoice] = useState<Invoice | null>(null);
   const [paymentAmount, setPaymentAmount] = useState("");
   const [viewingInvoice, setViewingInvoice] = useState<Invoice | null>(null);
+  const [isSendOpen, setIsSendOpen] = useState(false);
+  const [sendMatch, setSendMatch] = useState<{ email?: string; phone?: string } | null>(null);
 
   // Accepted estimates not already linked to another invoice -- the pool
   // Accounting's "Pending Revenue" tile draws from. Without a real link
@@ -599,6 +601,8 @@ function InvoicesTab({
       sourceType: "Invoice",
       sourceId: invoice.id,
       customerName: invoice.customer,
+      customerPhone: matchedCustomer?.phone,
+      customerEmail: matchedCustomer?.email,
       representativeName: loggedInUser?.name || loggedInUser?.email || "Company Representative",
       lines: [],
       pdfBase64
@@ -922,8 +926,7 @@ function InvoicesTab({
                 return (
                   <div className="flex gap-2">
                     <button onClick={() => match ? navigateToScreen("customers", { customerId: match.id }) : triggerNotification("No matching customer record found.")} className="px-4 py-2 bg-white hover:bg-slate-100 border border-slate-300 text-[#1F3557] font-bold rounded-xl text-xs uppercase tracking-wider cursor-pointer">Open Customer</button>
-                    <button disabled={!match?.email} onClick={() => composeEmail({ to: match?.email, subject: `Invoice ${viewingInvoice.invoiceNumber}`, body: `Hi ${viewingInvoice.customer},\n\nPlease find invoice ${viewingInvoice.invoiceNumber} attached (Generate PDF, then attach the download).\n\nTotal: ${fmt(total)}\nDue: ${viewingInvoice.dueDate}` })} className="px-4 py-2 bg-white hover:bg-slate-100 border border-slate-300 text-[#1F3557] font-bold rounded-xl text-xs uppercase tracking-wider cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed">Email</button>
-                    <button disabled={!match?.phone} onClick={() => composeSms({ to: match?.phone, body: `Hi ${viewingInvoice.customer}, invoice ${viewingInvoice.invoiceNumber} total is ${fmt(total)}, due ${viewingInvoice.dueDate}.` })} className="px-4 py-2 bg-white hover:bg-slate-100 border border-slate-300 text-[#1F3557] font-bold rounded-xl text-xs uppercase tracking-wider cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed">Text</button>
+                    <button disabled={!match?.email && !match?.phone} onClick={() => { setSendMatch(match || null); setIsSendOpen(true); }} className="px-4 py-2 bg-white hover:bg-slate-100 border border-slate-300 text-[#1F3557] font-bold rounded-xl text-xs uppercase tracking-wider cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed">Send</button>
                   </div>
                 );
               })()}
@@ -935,6 +938,8 @@ function InvoicesTab({
           </div>
         </div>
       )}
+
+      <SendChoiceModal isOpen={isSendOpen} onClose={() => setIsSendOpen(false)} label={`Invoice ${viewingInvoice?.invoiceNumber || ""}`} phone={sendMatch?.phone} email={sendMatch?.email} />
 
       {payingInvoice && (
         <div className="fixed inset-0 bg-slate-950/50 backdrop-blur-sm flex items-center justify-center p-4 z-50">

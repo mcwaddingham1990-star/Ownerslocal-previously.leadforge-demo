@@ -39,6 +39,8 @@ import {
 import { SchedulingEvent } from "./SchedulingPage";
 import { TimeClockLog } from "../types/domain";
 import { clockInTransaction, clockOutTransaction } from "../lib/timeClockService";
+import { GpsPrivacyNotice } from "./GpsPrivacyNotice";
+import { RecentRoutesSection } from "./RecentRoutesSection";
 
 export interface TimeLog {
   id: string;
@@ -673,6 +675,9 @@ export const TimeClockPage: React.FC<TimeClockPageProps> = ({
   const [reviewingLogId, setReviewingLogId] = useState<string | null>(null);
   const reviewingLog = reviewingLogId ? timeClockLogs.find(l => l.id === reviewingLogId) || null : null;
 
+  // Real GPS route review for one past shift -- see RecentRoutesSection.
+  const [viewingRouteLogId, setViewingRouteLogId] = useState<string | null>(null);
+
   // Action: Edit Time History Entry
   const handleEditTimeEntry = () => {
     if (!editingLogId) return;
@@ -1234,6 +1239,14 @@ export const TimeClockPage: React.FC<TimeClockPageProps> = ({
                             Edit
                           </button>
                         )}
+                        {log.type === "Clock In" && (
+                          <button
+                            onClick={() => setViewingRouteLogId(log.id)}
+                            className="text-[9.5px] font-black text-emerald-600 hover:underline mt-1 ml-2 inline-block uppercase"
+                          >
+                            View Route
+                          </button>
+                        )}
                       </div>
                     </div>
                   ))
@@ -1647,6 +1660,19 @@ export const TimeClockPage: React.FC<TimeClockPageProps> = ({
           notify={triggerLocalNotification}
           onClose={() => setReviewingLogId(null)}
         />
+      )}
+
+      {viewingRouteLogId && (
+        <div className="fixed inset-0 bg-slate-950/50 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-3xl p-5 w-[95%] max-w-[420px] shadow-2xl space-y-3 text-xs">
+            <div className="flex justify-between items-center">
+              <h3 className="text-sm font-black text-[#1F3557] uppercase">Shift Route</h3>
+              <button onClick={() => setViewingRouteLogId(null)}><X className="w-4 h-4 text-slate-400" /></button>
+            </div>
+            <GpsPrivacyNotice />
+            <RecentRoutesSection businessId={businessId} employeeEmail={selectedEmployee.id} onlyClockInLogId={viewingRouteLogId} />
+          </div>
+        </div>
       )}
 
       {/* FRAMEWORK CONNECTIONS (As required by the guideline exactly) */}

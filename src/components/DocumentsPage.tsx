@@ -4,6 +4,8 @@ import { useDomainData } from "../context/DomainDataContext";
 import { useNavTelemetry } from "../context/NavTelemetryContext";
 import { useFirestoreCollection } from "../hooks/useFirestoreCollection";
 import SelfieSaveEditor from "./SelfieSaveEditor";
+import { EmployeeSnapshotFolderBrowser } from "./EmployeeSnapshotFolderBrowser";
+import { EmployeeSnapshotPermissionModal } from "./EmployeeSnapshotPermissionModal";
 import {
   Search,
   Plus,
@@ -69,7 +71,12 @@ export const FOLDER_TAXONOMY: Array<{ id: string; icon: string; subfolders: stri
   { id: "Expenses/Receipts", icon: "🧾", subfolders: ["Expenses", "Receipts"] },
   // Original photos captured by every AI scan flow (receipts, invoices,
   // bills, checks) -- auto-filed here, never manually uploaded.
-  { id: "Snapshots", icon: "📸", subfolders: ["Receipts", "Invoices", "Bills", "Checks"] }
+  { id: "Snapshots", icon: "📸", subfolders: ["Receipts", "Invoices", "Bills", "Checks"] },
+  // Doesn't behave like the folders above -- nothing files here until an
+  // owner/manager grants an employee Snapshot permission (Customize
+  // Employee Folder), at which point that employee gets their own real
+  // folder inside this one. See EmployeeSnapshotFolderBrowser.
+  { id: "Employee Snapshot", icon: "👷", subfolders: [] }
 ];
 
 /**
@@ -99,7 +106,7 @@ const STOCK_TEMPLATES = [
 export const DocumentsPage: React.FC = () => {
   const { loggedInUser, simulatedRole, businessId } = useAuth();
   const activeRole = simulatedRole || loggedInUser?.role || "Owner";
-  const { documents, setDocuments, customers: customersList, recentRoster, schedulingEvents, employees, generatedPdfDraft, setGeneratedPdfDraft, pendingSignatureCapture, setPendingSignatureCapture, preSelectedCustomerId, setPreSelectedCustomerId, businessProfile } = useDomainData();
+  const { documents, setDocuments, customers: customersList, recentRoster, schedulingEvents, employees, setEmployees, generatedPdfDraft, setGeneratedPdfDraft, pendingSignatureCapture, setPendingSignatureCapture, preSelectedCustomerId, setPreSelectedCustomerId, businessProfile } = useDomainData();
   const {
     openPlaceholderPage: onOpenPlaceholder,
     takeSnapshot: onTakeSnapshot,
@@ -188,6 +195,7 @@ export const DocumentsPage: React.FC = () => {
   // Dynamic directory lists for Create Folder action
   // Owner-created folders are tenant-scoped and persist beside documents.
   const [customFolderRecords, setCustomFolderRecords] = useFirestoreCollection<CustomDocumentFolder>("document_folders", businessId);
+  const [showSnapshotPermissionModal, setShowSnapshotPermissionModal] = useState(false);
   const foldersList = useMemo(() => customFolderRecords.map(folder => folder.name), [customFolderRecords]);
 
   // Secondary high-fidelity interactive modals
@@ -416,6 +424,12 @@ export const DocumentsPage: React.FC = () => {
           if (doc.employee !== uName && doc.uploadedBy !== uName) {
             return false;
           }
+        }
+        // Employee Snapshot is every employee's own folder, never a shared
+        // cabinet -- a non-manager only ever sees their own scans in it,
+        // the same restriction "Employee Files" gets above.
+        if ((doc.folder || inferFolderForDoc(doc)) === "Employee Snapshot" && doc.employee !== uName) {
+          return false;
         }
       }
 
@@ -1202,7 +1216,17 @@ export const DocumentsPage: React.FC = () => {
         {FOLDER_TAXONOMY.map(folder => (
           <button
             key={folder.id}
-            onClick={() => { setSelectedFolderFilter(folder.id); setSelectedTypeFilter(null); }}
+            onClick={() => {
+              setSelectedFolderFilter(folder.id);
+              setSelectedTypeFilter(null);
+              if (folder.id === "Employee Snapshot") {
+                // Fresh entry every time -- a non-manager only ever has one
+                // real folder to see (their own), so send them straight
+                // there instead of a one-item picker; a manager lands on
+                // the folder grid.
+                setFilterEmployee(hasManagePermission ? "All" : (loggedInUser?.name || "All"));
+              }
+            }}
             className={`px-3 py-2 rounded-xl text-xs font-black transition-colors flex items-center gap-1.5 ${selectedFolderFilter === folder.id ? "bg-[#315C9F] text-white" : "bg-white text-[#1F3557] hover:bg-[#C7E3FA]"}`}
           >
             <span>{folder.icon}</span>{folder.id}
@@ -1226,6 +1250,31 @@ export const DocumentsPage: React.FC = () => {
           </button>
         )}
       </div>
+
+      {selectedFolderFilter === "Employee Snapshot" && (
+        <EmployeeSnapshotFolderBrowser
+          employees={employees}
+          documents={documents}
+          hasManagePermission={hasManagePermission}
+          activeEmployeeFilter={filterEmployee}
+          onSelectEmployee={(name) => setFilterEmployee(name)}
+          onClearEmployee={() => setFilterEmployee(hasManagePermission ? "All" : (loggedInUser?.name || "All"))}
+          onOpenCustomize={() => setShowSnapshotPermissionModal(true)}
+        />
+      )}
+
+      {showSnapshotPermissionModal && (
+        <EmployeeSnapshotPermissionModal
+          employees={employees}
+          onClose={() => setShowSnapshotPermissionModal(false)}
+          onSave={(grantedEmails) => {
+            const grantedSet = new Set(grantedEmails);
+            setEmployees(prev => prev.map(emp => ({ ...emp, snapshotPermissionEnabled: grantedSet.has(emp.email) })));
+            triggerNotification(`Snapshot permission updated for ${grantedEmails.length} employee${grantedEmails.length === 1 ? "" : "s"}.`);
+            setShowSnapshotPermissionModal(false);
+          }}
+        />
+      )}
 
       {/* TAB BAR */}
       <div className="flex gap-1 bg-[#EAF5FF] border border-[#9EC8EF] rounded-2xl p-1 overflow-x-auto shrink-0">
@@ -1681,6 +1730,8 @@ export const DocumentsPage: React.FC = () => {
           autoOpenPdfPicker={pdfEditorAutoOpenPicker}
           initialDraft={generatedPdfDraft?.pdfBase64 ? null : generatedPdfDraft}
           signerHint={generatedPdfDraft ? { customerName: generatedPdfDraft.customerName, representativeName: generatedPdfDraft.representativeName } : signatureCaptureHint}
+          customerPhone={generatedPdfDraft?.customerPhone || pendingSignatureCapture?.customerPhone}
+          customerEmail={generatedPdfDraft?.customerEmail || pendingSignatureCapture?.customerEmail}
           autoCaptureSignatures={generatedPdfDraft?.autoCaptureSignatures}
           businessProfile={businessProfile}
           onClose={closePDFEditor}

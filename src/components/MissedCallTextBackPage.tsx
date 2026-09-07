@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { doc, getDoc, setDoc } from "firebase/firestore";
+import { doc, onSnapshot, setDoc } from "firebase/firestore";
 import { db } from "../firebase";
 import { useAuth } from "../context/AuthContext";
 import { useNavTelemetry } from "../context/NavTelemetryContext";
@@ -32,32 +32,40 @@ export const MissedCallTextBackPage: React.FC = () => {
   const [watchedKnownApps, setWatchedKnownApps] = useState<Set<string>>(new Set());
   const [customPackages, setCustomPackages] = useState("");
 
+  // A one-time getDoc() here previously meant this screen's local state
+  // could genuinely go stale relative to what's actually saved (any
+  // transient read hiccup silently fell back to the defaults below with no
+  // error shown, which reads exactly like "it says Saved but nothing
+  // actually stuck"). A live onSnapshot listener -- the same pattern every
+  // other Firestore-backed settings page in this app already uses via
+  // useFirestoreCollection -- always reflects the real current document,
+  // including this tab's own write the instant it lands, and surfaces a
+  // real error instead of silently keeping whatever was on screen.
   useEffect(() => {
-    if (!businessId) return;
-    let cancelled = false;
-    (async () => {
-      try {
-        const snap = await getDoc(doc(db, "missed_call_settings", businessId));
-        if (cancelled || !snap.exists()) {
-          setIsLoading(false);
-          return;
+    if (!businessId) { setIsLoading(false); return; }
+    setIsLoading(true);
+    const unsubscribe = onSnapshot(
+      doc(db, "missed_call_settings", businessId),
+      snap => {
+        if (snap.exists()) {
+          const data = snap.data();
+          if (typeof data.enabled === "boolean") setEnabled(data.enabled);
+          if (typeof data.messageTemplate === "string" && data.messageTemplate) setMessageTemplate(data.messageTemplate);
+          const watchedPackages: string[] = Array.isArray(data.watchedPackages) ? data.watchedPackages : [];
+          const knownPackageNames = new Set(KNOWN_APPS.map((a) => a.packageName));
+          setWatchedKnownApps(new Set(watchedPackages.filter((p) => knownPackageNames.has(p))));
+          setCustomPackages(watchedPackages.filter((p) => !knownPackageNames.has(p)).join(", "));
         }
-        const data = snap.data();
-        if (typeof data.enabled === "boolean") setEnabled(data.enabled);
-        if (typeof data.messageTemplate === "string" && data.messageTemplate) setMessageTemplate(data.messageTemplate);
-        const watchedPackages: string[] = Array.isArray(data.watchedPackages) ? data.watchedPackages : [];
-        const knownPackageNames = new Set(KNOWN_APPS.map((a) => a.packageName));
-        setWatchedKnownApps(new Set(watchedPackages.filter((p) => knownPackageNames.has(p))));
-        setCustomPackages(watchedPackages.filter((p) => !knownPackageNames.has(p)).join(", "));
-      } catch (err) {
+        setIsLoading(false);
+      },
+      err => {
         console.error("Error loading missed-call settings:", err);
-      } finally {
-        if (!cancelled) setIsLoading(false);
+        triggerNotification(`Couldn't load your saved settings: ${err.message}`);
+        setIsLoading(false);
       }
-    })();
-    return () => {
-      cancelled = true;
-    };
+    );
+    return unsubscribe;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [businessId]);
 
   const toggleKnownApp = (packageName: string) => {
@@ -92,7 +100,8 @@ export const MissedCallTextBackPage: React.FC = () => {
       triggerNotification("💾 Saved. The companion Android app will pick this up next time it syncs.");
     } catch (err) {
       console.error("Error saving missed-call settings:", err);
-      triggerNotification("Couldn't save settings — check your connection and try again.");
+      const reason = err instanceof Error ? err.message : "unknown error";
+      triggerNotification(`Couldn't save settings: ${reason}`);
     } finally {
       setIsSaving(false);
     }

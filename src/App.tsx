@@ -13,6 +13,9 @@ import { registerForPushNotifications } from "./lib/pushNotifications";
 import { buildTextDocumentPdf, bytesToBase64 } from "./lib/pdfExport";
 import { MAX_INLINE_BASE64_LENGTH } from "./lib/firestoreDocumentLimits";
 import { downloadCsv } from "./lib/csv";
+import { getRemoteSigningTokenFromUrl } from "./lib/remoteSigningClient";
+import { updateLiveLocation } from "./lib/timeClockService";
+import RemoteSigningPage from "./components/RemoteSigningPage";
 import { TimeClockApprovalModal } from "./components/TimeClockApprovalModal";
 import { RolePermissionEditorModal, MODULE_CATALOG } from "./components/RolePermissionEditorModal";
 import { LogTransactionModal } from "./components/LogTransactionModal";
@@ -1537,6 +1540,15 @@ const EventEngineEffects: React.FC = () => {
 };
 
 export default function App() {
+  // A remote-signing link (texted/emailed from the PDF Editor's "Send
+  // remotely" option) has no OwnersLocal login of its own -- render the
+  // public signing page instead of the normal logged-in app shell entirely.
+  // Safe ahead of every hook below: window.location.search is fixed for the
+  // life of this mounted instance, so which branch runs never changes
+  // between re-renders of the same instance.
+  const remoteSignToken = getRemoteSigningTokenFromUrl();
+  if (remoteSignToken) return <RemoteSigningPage token={remoteSignToken} />;
+
   // Logged in user profile (null if guest/default owner, or set when authenticated)
   // Standalone demo build: no Firebase Auth, no login screen -- opens
   // straight in as this fake Owner user. See src/hooks/useFirestoreCollection.ts
@@ -1738,7 +1750,7 @@ export default function App() {
   const [invoices, setInvoices] = useFirestoreCollection<Invoice>("invoices", businessId);
   const [generatedPdfDraft, setGeneratedPdfDraft] = useState<GeneratedPdfDraft | null>(null);
   const [estimatePrefill, setEstimatePrefill] = useState<EstimatePrefill | null>(null);
-  const [pendingSignatureCapture, setPendingSignatureCapture] = useState<{ customerName?: string } | null>(null);
+  const [pendingSignatureCapture, setPendingSignatureCapture] = useState<{ customerName?: string; customerPhone?: string; customerEmail?: string } | null>(null);
   const [bills, setBills] = useFirestoreCollection<Bill>("bills", businessId);
   const [vendors, setVendors] = useFirestoreCollection<Vendor>("vendors", businessId);
   // Read-only mirror for the Dashboard's Messages summary card -- MessagesPage
@@ -1841,6 +1853,68 @@ export default function App() {
     }
     return () => clearInterval(interval);
   }, [isClockedIn]);
+
+  // Real field GPS tracking: while the employee is clocked in, keep
+  // reporting real device fixes (not a fabricated moving dot) so managers
+  // can see where field staff actually are on the Interactive Map, not just
+  // their position at the moment they punched in. Runs app-wide (not just
+  // while the Time Clock page is open) so tracking doesn't stop the second
+  // someone navigates away, and stops the instant they clock out because the
+  // effect's own dependency on isClockedIn tears the watch down -- no
+  // separate location keeps reporting off the clock. Opt-in per employee
+  // (set at invite time or later from Settings/Roster) -- an owner has no
+  // employees record at all and is never tracked by this.
+  const currentEmployeeGpsTrackingEnabled = !!employees.find(e => e.email === loggedInUser?.email)?.gpsTrackingEnabled;
+  // Opt-in, per employee: the Snapshot camera feature (receipts, fuel
+  // purchases, forms) is off for a field employee until an owner/manager
+  // grants it from Documents -> Employee Snapshot -> Customize Employee
+  // Folder. The owner and every non-employee account keep full access
+  // regardless -- this only ever restricts an *employee* account.
+  const currentEmployeeSnapshotPermissionEnabled = !!employees.find(e => e.email === loggedInUser?.email)?.snapshotPermissionEnabled;
+  const canUseSnapshot = !loggedInUser?.isEmployee || currentEmployeeSnapshotPermissionEnabled;
+  // The specific clock-in log this GPS trail belongs to -- lets every fix
+  // get appended onto that one shift's permanent route record (see
+  // ShiftRoute) in addition to the live position, without a second lookup.
+  const currentClockInLogId = useMemo(() => {
+    if (!loggedInUser?.email) return undefined;
+    const myLogs = timeClockLogs
+      .filter(log => log.employeeEmail === loggedInUser.email)
+      .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+    if (!myLogs.length || myLogs[myLogs.length - 1].type === "Clock Out") return undefined;
+    return [...myLogs].reverse().find(log => log.type === "Clock In")?.id;
+  }, [timeClockLogs, loggedInUser?.email]);
+  useEffect(() => {
+    if (!isClockedIn || !loggedInUser?.email || !businessId) return;
+    if (!currentEmployeeGpsTrackingEnabled) return;
+    if (typeof navigator === "undefined" || !navigator.geolocation) return;
+
+    let lastSentAt = 0;
+    const MIN_INTERVAL_MS = 30000; // throttle writes; watchPosition can fire far more often than that
+
+    const watchId = navigator.geolocation.watchPosition(
+      (pos) => {
+        const now = Date.now();
+        if (now - lastSentAt < MIN_INTERVAL_MS) return;
+        lastSentAt = now;
+        void updateLiveLocation(businessId, loggedInUser.email, loggedInUser.name || loggedInUser.email, currentClockInLogId, {
+          lat: pos.coords.latitude,
+          lng: pos.coords.longitude,
+          accuracy: pos.coords.accuracy,
+          heading: pos.coords.heading,
+          speed: pos.coords.speed,
+          capturedAt: new Date(pos.timestamp).toISOString()
+        });
+      },
+      () => {
+        // Denied/unavailable -- the map simply keeps showing the last real
+        // fix it has (clock-in punch or an earlier live update) rather than
+        // a fabricated position.
+      },
+      { enableHighAccuracy: true, maximumAge: 20000, timeout: 25000 }
+    );
+
+    return () => navigator.geolocation.clearWatch(watchId);
+  }, [isClockedIn, loggedInUser?.email, businessId, currentEmployeeGpsTrackingEnabled, currentClockInLogId]);
 
   // Firestore clock events are the source of truth. Rebuild the active
   // shift after navigation, reload, or returning from another page so the
@@ -2448,7 +2522,6 @@ export default function App() {
   useEffect(() => {
     setAuthReady(true);
   }, []);
-
 
   // Sync Time Clock state to Firestore
   useEffect(() => {
@@ -3862,6 +3935,7 @@ Access to full financial telemetry is restricted.`;
     let invitePermissions = ["dashboard", "routes", "jobs", "timeclock", "messages"];
     let inviteGranularPermissions: GranularPermissions = defaultGranularFromModuleList(invitePermissions, "view");
     let inviteRequiresClockVerification = false;
+    let inviteGpsTrackingEnabled = false;
     let businessEmail: string | null = null;
 
     try {
@@ -3881,6 +3955,7 @@ Access to full financial telemetry is restricted.`;
       invitePermissions = inviteData.permissions || invitePermissions;
       inviteGranularPermissions = inviteData.granularPermissions || inviteGranularPermissions;
       inviteRequiresClockVerification = !!inviteData.requireTimeClockVerification;
+      inviteGpsTrackingEnabled = !!inviteData.gpsTrackingEnabled;
       businessEmail = inviteData.businessEmail || null;
       if (!businessEmail) {
         triggerNotification("This invite is missing a business account. Please ask your owner for a new invite.");
@@ -3929,6 +4004,7 @@ Access to full financial telemetry is restricted.`;
         permissions: invitePermissions,
         granularPermissions: inviteGranularPermissions,
         requireTimeClockVerification: inviteRequiresClockVerification,
+        gpsTrackingEnabled: inviteGpsTrackingEnabled,
         businessEmail,
         // Also tagged as businessId (same value) so this collection is
         // queryable through the same convention every other Firestore
@@ -4103,7 +4179,9 @@ Access to full financial telemetry is restricted.`;
     <DomainDataContext.Provider value={domainDataContextValue}>
     <NavTelemetryContext.Provider value={navTelemetryContextValue}>
     <EventEngineEffects />
-    {isLoggedIn && <UniversalAIIntake />}
+    {isLoggedIn && canUseSnapshot && (
+      <UniversalAIIntake snapshotFolder={loggedInUser?.isEmployee ? "Employee Snapshot" : undefined} />
+    )}
     <div
       className={`min-h-screen ${isLoggedIn ? (isDarkTheme ? 'bg-[#050f1a]' : 'bg-[#F5FAFF]') : isDarkTheme ? 'login-theme-dark-basic' : 'login-theme-light-basic'} text-[#342D7E] flex flex-col justify-between font-sans overflow-x-hidden relative select-none`}
       style={!isLoggedIn ? { backgroundImage: `url(${isDarkTheme ? darkLoginBackground : lightLoginBackground})` } : undefined}
@@ -6695,61 +6773,43 @@ Access to full financial telemetry is restricted.`;
                           </div>
                         </div>
 
-                        {/* MIDDLE ROW: 4 SEPARATE SQUARE SHAPED NEUTRAL CARDS */}
-                        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
+                        {/* MIDDLE ROW: 3 SEPARATE SQUARE SHAPED NEUTRAL CARDS */}
+                        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
                           {renderCardSlot(customCardTargets.card1, "Slot 1")}
                           {renderCardSlot(customCardTargets.card2, "Slot 2")}
                           {renderCardSlot(customCardTargets.card3, "Slot 3")}
-
-                          {/* Card 4: Customize Daily View */}
-                          <div 
-                            onClick={() => {
-                              if (!isAuthorizedToCustomize) {
-                                triggerNotification("Access Denied: Only Owners, Managers, and Accountants can customize the daily view panels.");
-                                return;
-                              }
-                              setIsCustomizingDailyViewOpen(true);
-                              triggerNotification("Opening dashboard daily view customizer...");
-                            }}
-                            className="bg-[#C7E3FA] border border-[#9EC8EF] p-4 rounded-[24px] shadow-sm flex flex-col justify-between h-[240px] transition-all hover:scale-[1.01] hover:shadow-md cursor-pointer text-left group"
-                          >
-                            <div className="flex items-center gap-1.5 text-[#1F3557]">
-                              {getScreenIcon("settings", "w-4 h-4 text-[#315C9F]")}
-                              <span className="text-[10px] font-black tracking-wider uppercase">CUSTOMIZE DAILY VIEW</span>
-                            </div>
-
-                            <div className="my-1 text-left flex-1 flex flex-col justify-center">
-                              <p className="text-xs font-black text-[#1F3557] leading-relaxed">
-                                Rearrange dashboard panel metrics instantly.
-                              </p>
-                              <p className="text-[10.5px] text-[#5E7393] leading-normal font-sans font-medium mt-1">
-                                Choose which metrics you want displayed on your primary three operational panels.
-                              </p>
-                            </div>
-
-                            <button 
-                              className={`w-full py-2 rounded-xl text-[9.5px] font-black uppercase tracking-wider transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
-                                isAuthorizedToCustomize
-                                  ? "bg-[#4A86F7] hover:bg-[#3977EE] text-white shadow-sm"
-                                  : "bg-blue-100/50 text-blue-400 border border-blue-200/50 cursor-not-allowed"
-                              }`}
-                            >
-                              {isAuthorizedToCustomize ? (
-                                <>
-                                  <Sliders className="w-3.5 h-3.5" />
-                                  <span>Configure Slots ➔</span>
-                                </>
-                              ) : (
-                                <>
-                                  <span>Restricted To Management 🔒</span>
-                                </>
-                              )}
-                            </button>
-                          </div>
                         </div>
 
+                        {/* Configure Dashboard -- opens the same slot-picker modal the old
+                            "Customize Daily View" card used to trigger, now a single button
+                            sitting directly above Company Bulletins instead of its own card. */}
+                        <button
+                          onClick={() => {
+                            if (!isAuthorizedToCustomize) {
+                              triggerNotification("Access Denied: Only Owners, Managers, and Accountants can customize the daily view panels.");
+                              return;
+                            }
+                            setIsCustomizingDailyViewOpen(true);
+                            triggerNotification("Opening dashboard daily view customizer...");
+                          }}
+                          className={`w-full py-2.5 rounded-xl text-[10.5px] font-black uppercase tracking-wider transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
+                            isAuthorizedToCustomize
+                              ? "bg-[#4A86F7] hover:bg-[#3977EE] text-white shadow-sm"
+                              : "bg-blue-100/50 text-blue-400 border border-blue-200/50 cursor-not-allowed"
+                          }`}
+                        >
+                          {isAuthorizedToCustomize ? (
+                            <>
+                              <Sliders className="w-3.5 h-3.5" />
+                              <span>Configure Dashboard ➔</span>
+                            </>
+                          ) : (
+                            <span>Restricted To Management 🔒</span>
+                          )}
+                        </button>
+
                         {/* BOTTOM ROW: COMPANY BULLETINS (Side to side rectangular card) */}
-                        <div 
+                        <div
                           onClick={() => {
                             const matched = OS_SCREENS.find(s => s.id === "bulletins");
                             if (matched) setActiveScreen(matched);
@@ -7014,6 +7074,7 @@ Access to full financial telemetry is restricted.`;
                           ].map((btn, idx) => (
                             <button
                               key={idx}
+                              disabled={btn.action === "payroll" && isRunningPayroll}
                               onClick={() => {
                                 if (btn.action === "expense") {
                                   sessionStorage.setItem("ownerslocal_pending_financial_scan", "expense");
@@ -7038,11 +7099,14 @@ Access to full financial telemetry is restricted.`;
                                 if (accounting) setActiveScreen(accounting);
                                 triggerNotification("Open Invoices to create a customer invoice.");
                               }}
-                              className="shrink-0 bg-gradient-to-r from-[#2E7BEF] to-[#1485F4] hover:from-[#1E6EE0] hover:to-[#0D5FCB] border border-white/40 rounded-xl px-3.5 py-2 flex items-center gap-1.5 cursor-pointer transition-all shadow-[0_0_10px_rgba(20,133,244,0.35)]"
+                              className="shrink-0 bg-gradient-to-r from-[#2E7BEF] to-[#1485F4] hover:from-[#1E6EE0] hover:to-[#0D5FCB] border border-white/40 rounded-xl px-3.5 py-2 flex items-center gap-1.5 cursor-pointer transition-all shadow-[0_0_10px_rgba(20,133,244,0.35)] disabled:opacity-60 disabled:cursor-not-allowed"
                             >
-                              <btn.icon className="w-3.5 h-3.5 text-white shrink-0" />
-                              <span className="text-[10.5px] font-extrabold text-white uppercase tracking-wide whitespace-nowrap">
-                                {btn.label}
+                              <btn.icon className="w-3.5 h-3.5 text-white shrink-0" style={{ filter: 'drop-shadow(0 1px 2px rgba(4,20,46,0.85))' }} />
+                              <span
+                                className="text-[10.5px] font-extrabold text-white uppercase tracking-wide whitespace-nowrap"
+                                style={{ textShadow: '0 1px 2px rgba(4,20,46,0.85), 0 0 1px rgba(4,20,46,0.9)' }}
+                              >
+                                {btn.action === "payroll" && isRunningPayroll ? "Running Payroll..." : btn.label}
                               </span>
                             </button>
                           ))}
@@ -7236,32 +7300,6 @@ Access to full financial telemetry is restricted.`;
                                   <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" style={{ boxShadow: '0 0 6px rgba(52,211,153,0.9)' }} />
                                   Live Data
                                 </span>
-                              </div>
-
-                              {/* Log real income/expenses, run real payroll */}
-                              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                                <button
-                                  type="button"
-                                  onClick={() => { sessionStorage.setItem("ownerslocal_pending_financial_scan", "income"); setLogTransactionType("income"); }}
-                                  className="min-h-11 px-3 py-2 text-[10.5px] font-mono font-black uppercase rounded-md bg-[#d8efff]/90 text-[#078e64] border border-white hover:shadow-[0_0_15px_rgba(52,211,153,0.5)] cursor-pointer flex items-center justify-center gap-1 transition-all shadow-[0_0_10px_rgba(56,189,248,0.30),inset_0_0_10px_rgba(255,255,255,0.88)]"
-                                >
-                                  + Log Income
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => { sessionStorage.setItem("ownerslocal_pending_financial_scan", "expense"); setLogTransactionType("expense"); }}
-                                  className="min-h-11 px-3 py-2 text-[10.5px] font-mono font-black uppercase rounded-md bg-[#d8efff]/90 text-[#d8435c] border border-white hover:shadow-[0_0_15px_rgba(216,67,92,0.45)] cursor-pointer flex items-center justify-center gap-1 transition-all shadow-[0_0_10px_rgba(56,189,248,0.30),inset_0_0_10px_rgba(255,255,255,0.88)]"
-                                >
-                                  + Log Expense
-                                </button>
-                                <button
-                                  type="button"
-                                  disabled={isRunningPayroll}
-                                  onClick={handleRunPayroll}
-                                  className="min-h-11 px-3 py-2 text-[10.5px] font-mono font-black uppercase rounded-md bg-[#d8efff]/90 text-[#07599a] border border-white hover:shadow-[0_0_15px_rgba(56,189,248,0.55)] cursor-pointer flex items-center justify-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed transition-all shadow-[0_0_10px_rgba(56,189,248,0.30),inset_0_0_10px_rgba(255,255,255,0.88)]"
-                                >
-                                  {isRunningPayroll ? "Running Payroll..." : "Run Selected Payroll"}
-                                </button>
                               </div>
 
                               {logTransactionType && (

@@ -39,7 +39,7 @@ import {
 import { CustomerPickerModal } from "./CustomerPickerModal";
 import { buildEstimatePdf, bytesToBase64 } from "../lib/pdfExport";
 import { MAX_INLINE_BASE64_LENGTH } from "../lib/firestoreDocumentLimits";
-import { composeEmail, composeSms } from "../lib/deviceHandoff";
+import SendChoiceModal from "./SendChoiceModal";
 import { downloadCsv, parseCsv } from "../lib/csv";
 import type { DocumentItem } from "../types/domain";
 
@@ -81,6 +81,8 @@ export const EstimatesPage: React.FC = () => {
   const [isEditMode, setIsEditMode] = useState(false);
   const [isConversionOpen, setIsConversionOpen] = useState(false);
   const [isConversionPickerOpen, setIsConversionPickerOpen] = useState(false);
+  const [isSendOpen, setIsSendOpen] = useState(false);
+  const [sendMatch, setSendMatch] = useState<{ email?: string; phone?: string } | null>(null);
   const [conversionComplete, setConversionComplete] = useState(false);
   const [jobDate, setJobDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [jobStartTime, setJobStartTime] = useState("09:00");
@@ -234,6 +236,8 @@ export const EstimatesPage: React.FC = () => {
       sourceType: "Estimate",
       sourceId: est.id,
       customerName: est.customerName,
+      customerPhone: matchedCustomer?.phone,
+      customerEmail: matchedCustomer?.email,
       representativeName: est.salesRep || loggedInUser?.name || "Company Representative",
       lines: [],
       pdfBase64,
@@ -1400,18 +1404,11 @@ export const EstimatesPage: React.FC = () => {
                         Open Customer
                       </button>
                       <button
-                        disabled={!match?.email}
-                        onClick={() => composeEmail({ to: match?.email, subject: `Estimate ${selectedEstimate.number}`, body: `Hi ${selectedEstimate.customerName},\n\nPlease find your estimate ${selectedEstimate.number} attached (Generate PDF, then attach the download).\n\nTotal: $${selectedEstimate.amount.toLocaleString()}` })}
+                        disabled={!match?.email && !match?.phone}
+                        onClick={() => { setSendMatch(match || null); setIsSendOpen(true); }}
                         className="px-4 py-2 bg-white hover:bg-slate-100 border border-slate-300 text-[#1F3557] font-bold rounded-xl text-xs uppercase tracking-wider transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
                       >
-                        Email
-                      </button>
-                      <button
-                        disabled={!match?.phone}
-                        onClick={() => composeSms({ to: match?.phone, body: `Hi ${selectedEstimate.customerName}, your estimate ${selectedEstimate.number} total is $${selectedEstimate.amount.toLocaleString()}.` })}
-                        className="px-4 py-2 bg-white hover:bg-slate-100 border border-slate-300 text-[#1F3557] font-bold rounded-xl text-xs uppercase tracking-wider transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-                      >
-                        Text
+                        Send
                       </button>
                     </>
                   );
@@ -1529,6 +1526,7 @@ export const EstimatesPage: React.FC = () => {
         </div>
       )}
 
+      <SendChoiceModal isOpen={isSendOpen} onClose={() => setIsSendOpen(false)} label={`Estimate ${selectedEstimate?.number || ""}`} phone={sendMatch?.phone} email={sendMatch?.email} />
     </div>
   );
 };

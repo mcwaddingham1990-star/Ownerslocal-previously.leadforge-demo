@@ -199,47 +199,52 @@ select option {
 }
 
 /* 6. Typography & Text Colors */
-/* Primary Text (#1F3557). Excludes the Money Tracker card (.mt-card) --
-   that card sets its own deliberate per-element text colors (headings,
-   glowing stat values, breakdown labels) via Tailwind arbitrary-value
-   classes, which these blanket tag selectors would otherwise stomp flat
-   since a stylesheet !important always beats a plain utility class or an
-   inline style regardless of the color it was actually given. */
-.workspace-theme text:not(.mt-card *),
-.workspace-theme h1:not(.mt-card *),
-.workspace-theme h2:not(.mt-card *),
-.workspace-theme h3:not(.mt-card *),
-.workspace-theme h4:not(.mt-card *),
-.workspace-theme h5:not(.mt-card *),
-.workspace-theme h6:not(.mt-card *),
-.workspace-theme th:not(.mt-card *),
-.workspace-theme .text-slate-900:not(.mt-card *),
-.workspace-theme .text-slate-800:not(.mt-card *),
-.workspace-theme .text-slate-700:not(.mt-card *),
-.workspace-theme .text-gray-900:not(.mt-card *),
-.workspace-theme .text-\[\#342D7E\]:not(.mt-card *),
-.workspace-theme .text-blue-900:not(.mt-card *),
-.workspace-theme .text-indigo-900:not(.mt-card *) {
+/* Primary Text (#1F3557) and Secondary Text (#5E7393) -- remapped ONLY for
+   elements that explicitly opt in via a plain Tailwind slate/gray (etc.)
+   class. This used to also blanket-paint every bare <h1>-<h6>/<th>/<p>/
+   <span>/<label>/<td>, on the theory that most such elements sit on the
+   app's light default background and should default to the brand navy/
+   grey. But an element that was deliberately left without its own color
+   class -- e.g. a <span> label inside a colored button or a stat-card
+   <div> with its own text-rose-900/text-blue-900/etc -- is relying on
+   inheriting ITS PARENT's color, and a blanket tag selector with
+   !important always stomps that flat regardless of what color the
+   parent actually has, painting it navy/grey on top of a blue button or
+   a colored badge no matter how illegible the result. Money Tracker
+   (.mt-card) needed its own exclusion from this for the same reason.
+   Restricting these two rules to explicit slate/gray classes -- which by
+   definition means the component wrote that color assuming plain
+   default styling, not a deliberate accent -- fixes the whole category
+   without hand-listing every colored badge/button the way .mt-card
+   needed its own exclusion. Elements that truly have no color class
+   fall through to the ambient inherited color, which is #1F3557 by
+   default via the base ".workspace-theme" rule above (rule 1) -- so
+   plain content keeps looking the same. Kept the .mt-card/button
+   exclusions here too, for the rare case a component explicitly opts
+   in with one of these slate/gray classes inside one of those. */
+.workspace-theme .text-slate-900:not(.mt-card *):not(button *),
+.workspace-theme .text-slate-800:not(.mt-card *):not(button *),
+.workspace-theme .text-slate-700:not(.mt-card *):not(button *),
+.workspace-theme .text-gray-900:not(.mt-card *):not(button *),
+.workspace-theme .text-\[\#342D7E\]:not(.mt-card *):not(button *),
+.workspace-theme .text-blue-900:not(.mt-card *):not(button *),
+.workspace-theme .text-indigo-900:not(.mt-card *):not(button *) {
   color: #1F3557 !important;
 }
 
-/* Secondary Text (#5E7393) -- same .mt-card exclusion as above. */
-.workspace-theme p:not(.mt-card *),
-.workspace-theme span:not(.mt-card *),
-.workspace-theme label:not(.mt-card *),
-.workspace-theme td:not(.mt-card *),
-.workspace-theme .text-slate-500:not(.mt-card *),
-.workspace-theme .text-slate-400:not(.mt-card *),
-.workspace-theme .text-slate-600:not(.mt-card *),
-.workspace-theme .text-gray-500:not(.mt-card *),
-.workspace-theme .text-gray-400:not(.mt-card *),
-.workspace-theme .text-\[\#342D7E\]\/75:not(.mt-card *),
-.workspace-theme .text-\[\#342D7E\]\/60:not(.mt-card *),
-.workspace-theme .text-\[\#342D7E\]\/50:not(.mt-card *) {
+.workspace-theme .text-slate-500:not(.mt-card *):not(button *),
+.workspace-theme .text-slate-400:not(.mt-card *):not(button *),
+.workspace-theme .text-slate-600:not(.mt-card *):not(button *),
+.workspace-theme .text-gray-500:not(.mt-card *):not(button *),
+.workspace-theme .text-gray-400:not(.mt-card *):not(button *),
+.workspace-theme .text-\[\#342D7E\]\/75:not(.mt-card *):not(button *),
+.workspace-theme .text-\[\#342D7E\]\/60:not(.mt-card *):not(button *),
+.workspace-theme .text-\[\#342D7E\]\/50:not(.mt-card *):not(button *) {
   color: #5E7393 !important;
 }
 
-/* Exceptions: White text on dark buttons or badges */
+/* Exceptions: White text on dark buttons or badges (non-<button> elements,
+   e.g. a div/a styled as a pill or badge, still need this explicitly). */
 .workspace-theme .text-white,
 .workspace-theme .text-slate-50,
 .workspace-theme button.bg-\[\#4A9BFF\] *,
@@ -274,6 +279,29 @@ select option {
   box-shadow: 0 0 18px rgba(14, 165, 233, 0.66), inset 0 0 8px rgba(255, 255, 255, 0.44) !important;
   -webkit-backdrop-filter: blur(8px) !important;
   backdrop-filter: blur(8px) !important;
+}
+
+/* 8b. Descendants of one of the force-blue buttons above (same exclusion
+   list as rule 8) that still carry their OWN explicit grey OR navy
+   Tailwind class -- a modal close-icon's text-slate-400, a KPI-card
+   label's text-[#5E7393], a KPI-card value's text-[#1F3557], etc. An
+   element's own explicit color class always wins over a parent's
+   inherited color regardless of !important on the parent, so rule 8's
+   button-level "color: #fff" alone never reached these; they rendered
+   dark/grey text or icons on top of the forced blue gradient everywhere
+   a button had a plain dark/grey label or icon and no light/transparent
+   background to opt it out of rule 8 in the first place. */
+.workspace-theme button:not(.bg-rose-50):not(.bg-emerald-500):not(.bg-rose-500):not(.text-red-500):not(.bg-transparent):not(.border-transparent):not(.mt-card *) :is(
+  .text-slate-300, .text-slate-400, .text-slate-500, .text-slate-600, .text-slate-700, .text-slate-800, .text-slate-900,
+  .text-gray-300, .text-gray-400, .text-gray-500, .text-gray-600, .text-gray-700, .text-gray-900,
+  .text-neutral-400, .text-neutral-500, .text-zinc-400, .text-zinc-500,
+  .text-blue-900, .text-indigo-900,
+  .text-\[\#5E7393\], .text-\[\#5E7393\]\/80, .text-\[\#5E7393\]\/75, .text-\[\#5E7393\]\/60, .text-\[\#5E7393\]\/50,
+  .text-\[\#8896AC\], .text-\[\#94A3B8\], .text-\[\#64748B\], .text-\[\#6B7280\], .text-\[\#9CA3AF\],
+  .text-\[\#1F3557\], .text-\[\#342D7E\], .text-\[\#342D7E\]\/75, .text-\[\#342D7E\]\/60, .text-\[\#342D7E\]\/50,
+  .text-\[\#315C9F\]
+) {
+  color: #ffffff !important;
 }
 
 .workspace-theme button:not(.bg-rose-50):not(.bg-emerald-500):not(.bg-rose-500):not(.text-red-500):not(.bg-transparent):not(.border-transparent):not(.mt-card *):hover,

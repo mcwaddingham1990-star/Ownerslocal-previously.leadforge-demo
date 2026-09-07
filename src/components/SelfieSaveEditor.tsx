@@ -6,9 +6,12 @@ import "./selfiesave-editor.css";
 import pdfWorkerUrl from "pdfjs-dist/legacy/build/pdf.worker.min.mjs?url";
 import type { GeneratedPdfDraft } from "../types/generatedPdf";
 import { base64ToBytes, bytesToBase64, buildFreeformDocumentPdf, appendSignatureCertificate, mergePdfs, type BusinessProfile } from "../lib/pdfExport";
+import { buildRemoteSigningLink } from "../lib/remoteSigningClient";
+import SignaturePad from "./SignaturePad";
+import SendChoiceModal from "./SendChoiceModal";
 
 type FieldKind = "signature" | "initials";
-type SignField = { id:number; party:number; line:number; kind:FieldKind; signed:boolean; committed:boolean; role?:string; name?:string; image?:string; stamp?:string; centralStamp?:string; coords?:string };
+type SignField = { id:number; party:number; line:number; kind:FieldKind; signed:boolean; committed:boolean; role?:string; name?:string; image?:string; signatureImage?:string; stamp?:string; centralStamp?:string; coords?:string };
 type CanvasObject = { id:number; kind:"text"|"image"|"link"|"video"; page:number; x:number; y:number; w:number; h:number; value:string; scale?:number; source?:"pdf"; fontSize?:number; fontFamily?:string; backgroundColor?:string };
 type Placement = { page?:number; x:number; y:number; w?:number; h?:number };
 type Features = { signatures:boolean; initials:boolean; selfies:boolean; photoId:boolean; location:boolean; displayLocation:boolean; timestamps:boolean; draftingDate:boolean };
@@ -58,6 +61,10 @@ export interface SelfieSaveEditorProps {
   // estimate/invoice. Optional: with no hint the fields are just labeled
   // "Signer 1" / "Signer 2".
   signerHint?: { customerName?: string; representativeName?: string } | null;
+  // Real customer contact info, when known -- powers the "Send" button and
+  // the "send remotely" signing link, both of which need somewhere to go.
+  customerPhone?: string;
+  customerEmail?: string;
   businessProfile?: BusinessProfile;
   // When true, seeds the standard 2-party signature + initials lines as
   // soon as the source PDF finishes loading -- the same fields "Capture
@@ -68,7 +75,7 @@ export interface SelfieSaveEditorProps {
   onSave: (docId: string, updatedName: string, metaProperties?: any) => void;
 }
 
-export default function SelfieSaveEditor({accountEmail,accountName,documentId,initialFilename,initialPdfBase64,autoOpenPdfPicker,initialDraft,signerHint,businessProfile,autoCaptureSignatures,onClose,onSave}:SelfieSaveEditorProps){
+export default function SelfieSaveEditor({accountEmail,accountName,documentId,initialFilename,initialPdfBase64,autoOpenPdfPicker,initialDraft,signerHint,customerPhone,customerEmail,businessProfile,autoCaptureSignatures,onClose,onSave}:SelfieSaveEditorProps){
   const [splash,setSplash]=useState(true);
   const [setup,setSetup]=useState(!autoOpenPdfPicker && !initialPdfBase64 && !initialDraft);
   const [features,setFeatures]=useState(defaultFeatures);
@@ -95,6 +102,17 @@ export default function SelfieSaveEditor({accountEmail,accountName,documentId,in
   const [cameraError,setCameraError]=useState("");
   const [finalLocked,setFinalLocked]=useState(false);
   const [toast,setToast]=useState("");
+  // "Save & Prepare for Signing" chooser (in-person stylus / in-person typed
+  // / send a remote link), and which method the active in-person signing
+  // modal below should offer -- typed name (existing default) or a drawn
+  // signature via SignaturePad.
+  const [signSetup,setSignSetup]=useState(false);
+  const [signMethod,setSignMethod]=useState<"typed"|"drawn">("typed");
+  const [drawnSignature,setDrawnSignature]=useState("");
+  const [savingCompleted,setSavingCompleted]=useState(false);
+  const [preparingRemote,setPreparingRemote]=useState(false);
+  const [sendOpen,setSendOpen]=useState(false);
+  const [sendBody,setSendBody]=useState("");
   const [pdfPages,setPdfPages]=useState<ImportedPdfPage[]>([]);
   const [loadingPdf,setLoadingPdf]=useState(false);
   // Drag/resize math already reads the page's post-transform size via
@@ -493,8 +511,8 @@ export default function SelfieSaveEditor({accountEmail,accountName,documentId,in
     setPageCount(count=>Math.max(count,highestPage));
   };
 
-  async function beginSign(id:number){if(finalLocked)return;const f=fields.find(x=>x.id===id);if(f?.committed)return;setActive(id);setSignerName(f?.name||"");setConsent(false);setCameraError("");if(!features.selfies)return;try{if(!navigator.mediaDevices?.getUserMedia)throw new Error("Camera access is unavailable");const request=navigator.mediaDevices.getUserMedia({video:{facingMode:"user"},audio:false});const timeout=new Promise<never>((_,reject)=>setTimeout(()=>reject(new Error("Camera request timed out")),12000));const s=await Promise.race([request,timeout]);streamRef.current=s;setTimeout(()=>{if(videoRef.current)videoRef.current.srcObject=s},0)}catch{setCameraError("Front-camera permission is required for this document.")}}
-  function saveMark(){if(!active||!signerName.trim()||!consent)return;const fieldId=active;const video=videoRef.current;let image="";if(features.selfies&&video){const c=document.createElement("canvas");c.width=320;c.height=240;c.getContext("2d")?.drawImage(video,0,0,320,240);image=c.toDataURL("image/jpeg",.78)}const now=new Date();const stamp=new Intl.DateTimeFormat("en-US",{dateStyle:"medium",timeStyle:"short"}).format(now);const centralStamp=new Intl.DateTimeFormat("en-US",{dateStyle:"medium",timeStyle:"short",timeZone:"America/Chicago"}).format(now)+" Central Time";const save=(coords="")=>{makeRoomForSignedField(fieldId,!!image);setFields(v=>v.map(f=>f.id===fieldId?{...f,signed:true,name:signerName.trim(),image,stamp,centralStamp,coords}:f));streamRef.current?.getTracks().forEach(t=>t.stop());streamRef.current=null;setActive(null);notify("Signing field completed — review before committing")};if(features.location&&navigator.geolocation)navigator.geolocation.getCurrentPosition(p=>save(`${p.coords.latitude.toFixed(5)}, ${p.coords.longitude.toFixed(5)}`),()=>save("Location unavailable"));else save()}
+  async function beginSign(id:number){if(finalLocked)return;const f=fields.find(x=>x.id===id);if(f?.committed)return;setActive(id);setSignerName(f?.name||"");setDrawnSignature(f?.signatureImage||"");setConsent(false);setCameraError("");if(!features.selfies)return;try{if(!navigator.mediaDevices?.getUserMedia)throw new Error("Camera access is unavailable");const request=navigator.mediaDevices.getUserMedia({video:{facingMode:"user"},audio:false});const timeout=new Promise<never>((_,reject)=>setTimeout(()=>reject(new Error("Camera request timed out")),12000));const s=await Promise.race([request,timeout]);streamRef.current=s;setTimeout(()=>{if(videoRef.current)videoRef.current.srcObject=s},0)}catch{setCameraError("Front-camera permission is required for this document.")}}
+  function saveMark(){if(!active||!signerName.trim()||!consent||(signMethod==="drawn"&&!drawnSignature))return;const fieldId=active;const video=videoRef.current;let image="";if(features.selfies&&video){const c=document.createElement("canvas");c.width=320;c.height=240;c.getContext("2d")?.drawImage(video,0,0,320,240);image=c.toDataURL("image/jpeg",.78)}const signatureImage=signMethod==="drawn"?drawnSignature:undefined;const now=new Date();const stamp=new Intl.DateTimeFormat("en-US",{dateStyle:"medium",timeStyle:"short"}).format(now);const centralStamp=new Intl.DateTimeFormat("en-US",{dateStyle:"medium",timeStyle:"short",timeZone:"America/Chicago"}).format(now)+" Central Time";const save=(coords="")=>{makeRoomForSignedField(fieldId,!!image);setFields(v=>v.map(f=>f.id===fieldId?{...f,signed:true,name:signerName.trim(),image,signatureImage,stamp,centralStamp,coords}:f));streamRef.current?.getTracks().forEach(t=>t.stop());streamRef.current=null;setActive(null);setDrawnSignature("");notify("Signing field completed — review before committing")};if(features.location&&navigator.geolocation)navigator.geolocation.getCurrentPosition(p=>save(`${p.coords.latitude.toFixed(5)}, ${p.coords.longitude.toFixed(5)}`),()=>save("Location unavailable"));else save()}
   async function commitParty(party:number){const mine=fields.filter(f=>f.party===party);if(!mine.length||mine.some(f=>!f.signed))return;const warning="Save Signer "+party+"'s complete portion? This locks the agreement text and this signer's answers. The drafter cannot edit this signed copy afterward.";if(await requestConfirm(warning)){const updatedFields=fields.map(f=>f.party===party?{...f,committed:true}:f);setFields(updatedFields);notify(`Signer ${party} committed — document text is now locked`);
     // Committing locks the whole document (see contentLocked below) even
     // though the shared Documents list previously only learned about a
@@ -503,7 +521,7 @@ export default function SelfieSaveEditor({accountEmail,accountName,documentId,in
     const allCommitted=updatedFields.length>0&&updatedFields.every(f=>f.committed);
     persist(allCommitted?"Signed":"Awaiting Signature",{keepEditorOpen:true});
   }}
-  const persist=(status:"Draft"|"Signed"|"Awaiting Signature", extra:Record<string,unknown>={})=>{
+  const persist=(status:"Draft"|"Signed"|"Awaiting Signature"|"Completed", extra:Record<string,unknown>={})=>{
     const docId=documentId||`doc_selfiesave_${Date.now()}`;
     const finalName=(filename.trim()||"Untitled document")+".pdf";
     onSave(docId,finalName,{
@@ -571,6 +589,72 @@ export default function SelfieSaveEditor({accountEmail,accountName,documentId,in
       await exportPdf(true);
     }
   }
+  // "Save Completed Document" -- marks this document done without requiring
+  // any signature fields at all (an internal record, a finished doc that
+  // never needed a customer signature to begin with). Distinct from
+  // finalize() above, which requires every signature field committed.
+  async function saveCompleted(){
+    setSavingCompleted(true);
+    try{
+      const bytes=await currentPdfBytes();
+      const pdfBase64=bytesToBase64(bytes);
+      const tooLargeToSave=pdfBase64.length>900_000;
+      persist("Completed",tooLargeToSave?{}:{pdfBase64,actualSizeBytes:bytes.length,mimeType:"application/pdf"});
+      const pdfName=(filename.trim()||"Untitled document").replace(/[\\/:*?\"<>|]+/g,"-");
+      const blob=new Blob([bytes],{type:"application/pdf"});
+      const url=URL.createObjectURL(blob);const link=document.createElement("a");link.href=url;link.download=`${pdfName}.pdf`;link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+      notify(tooLargeToSave?"Marked complete — too large to save inline, so it was downloaded to your device instead.":"Document marked complete and saved to Documents");
+    }catch(error){
+      console.error(error);
+      notify("Could not build the PDF. Try again.");
+    }finally{
+      setSavingCompleted(false);
+    }
+  }
+  // "Save & Prepare for Signing" -- in-person branch. Adds the standard
+  // signer fields (same ones "Capture Signatures" adds) if none exist yet,
+  // sets which method the signing modal below offers, then persists the
+  // Awaiting-Signature status right away so Documents reflects it even
+  // before anyone actually signs.
+  function prepareInPerson(method:"typed"|"drawn"){
+    setSignMethod(method);
+    setSignSetup(false);
+    if(fields.length===0)captureSignatures();
+    else setSetup(true);
+    persist("Awaiting Signature",{keepEditorOpen:true});
+  }
+  // "Save & Prepare for Signing" -- remote branch. Builds the real PDF right
+  // now (so the signer has something to review), generates a single-use
+  // token, and persists it on the document's signingOptions so the
+  // unauthenticated /sign page (server/remoteSigning.ts) can find this exact
+  // document and nothing else. Then hands off to the universal Send modal
+  // with the link pre-filled -- unlike a blank Send, this one has to carry
+  // the link or the whole point is lost.
+  async function sendRemotely(){
+    setPreparingRemote(true);
+    try{
+      const bytes=await currentPdfBytes();
+      const pdfBase64=bytesToBase64(bytes);
+      const tooLargeToSave=pdfBase64.length>900_000;
+      const token=`sign_${Date.now()}_${Math.random().toString(36).slice(2,10)}`;
+      const remoteTokenExpiresAt=new Date(Date.now()+14*24*60*60*1000).toISOString();
+      persist("Awaiting Signature",{
+        ...(tooLargeToSave?{}:{pdfBase64,actualSizeBytes:bytes.length,mimeType:"application/pdf"}),
+        signingOptions:{features,header,footer,clauses,fields,placements,pageCount,hasImportedPdf:pdfPages.length>0,signMethod:"both",remoteToken:token,remoteTokenExpiresAt,remoteSignerName:signerHint?.customerName||""}
+      });
+      const link=buildRemoteSigningLink(token);
+      const name=signerHint?.customerName?` ${signerHint.customerName}`:"";
+      setSendBody(`Hi${name}, please review and sign this document: ${link}`);
+      setSignSetup(false);
+      setSendOpen(true);
+      notify(tooLargeToSave?"Signing link ready — the document itself was too large to attach, but the link still works.":"Signing link ready to send");
+    }catch(error){
+      console.error(error);
+      notify("Could not prepare the signing link. Try again.");
+    }finally{
+      setPreparingRemote(false);
+    }
+  }
   function pointerDown(e:React.PointerEvent,key:string){
     if(contentLocked||e.button!==0)return;
     e.stopPropagation();
@@ -609,12 +693,18 @@ export default function SelfieSaveEditor({accountEmail,accountName,documentId,in
         <div className="document-pages" style={{transform:`scale(${zoom})`,transformOrigin:"top center"}}>{Array.from({length:pageCount},(_,pageIndex)=>{const page=pageIndex+1,pdfPage=pdfPages[pageIndex];return <article ref={page===1?paperRef:undefined} key={page} className={`paper ${pdfPage?"imported-pdf-page":""} ${finalLocked?"paper-locked":""}`} style={pdfPage?{aspectRatio:`${pdfPage.width} / ${pdfPage.height}`}:{}} onPointerDown={e=>{if(!(e.target as HTMLElement).closest(".canvas-object"))setSelected(null)}} onDoubleClick={e=>openObjectMenu(e,page)}>
           {pdfPage?<><img className="pdf-page-background" src={pdfPage.image} alt={`Imported PDF page ${page}`}/>{!contentLocked&&<div className="pdf-text-layer" aria-label={`Select text on PDF page ${page}`}>{pdfPage.text.map((item,index)=><span key={`${index}-${item.left}-${item.top}`} data-page={page} data-index={index} className="pdf-text-content" style={{left:`${item.left}%`,top:`${item.top}%`,width:`${Math.max(item.width,.8)}%`,height:`${Math.max(item.height,1)}%`,fontSize:`${item.height}cqh`,fontFamily:item.fontFamily}}>{item.value}</span>)}</div>}</>:<div className="paper-header"><input placeholder="Optional header" value={header} disabled={contentLocked} onChange={e=>setHeader(e.target.value)}/><span>{features.draftingDate?`Date document was drafted: ${draftDate}`:""}</span></div>}<div className="blank-page-hint">{page===1&&!pdfPage&&!contentLocked&&!clauses.length&&!objects.length&&<>Tap <b>Free text box</b>, or double-tap anywhere on this white page to add something.</>}</div>
           {objects.filter(o=>(o.page||1)===page).map(o=>{const key=`object:${o.id}`;const scaleX=o.w/(o.kind==="text"?96:280),scaleY=o.h/(o.kind==="text"?40:160),contentScale=o.kind==="text"?1:Math.max(.55,Math.min(3,Math.max(scaleX,scaleY)));return <div key={o.id} data-object-id={o.id} className={`canvas-object ${o.kind==="text"?"text-object":""} ${o.source==="pdf"?"pdf-edit-object":""} ${selected===key?"selected":""}`} style={{left:o.x,top:o.y,width:o.w,height:o.h,fontSize:o.fontSize,fontFamily:o.fontFamily,backgroundColor:o.source==="pdf"?o.backgroundColor:undefined,"--content-scale":contentScale} as React.CSSProperties} onPointerDown={e=>pointerDown(e,key)} onDoubleClick={e=>e.stopPropagation()}>{selected===key&&itemControls(key)}{o.kind==="image"&&/^https?:/.test(o.value)?<img src={o.value} alt="Document object"/>:o.kind==="video"&&/^https?:/.test(o.value)?<video src={o.value} controls/>:o.kind==="link"&&/^https?:/.test(o.value)?<a href={o.value} target="_blank" rel="noreferrer">{o.value}</a>:<div className="editable-object-content" contentEditable={!contentLocked} suppressContentEditableWarning onInput={e=>o.kind==="text"&&editTextObject(o.id,e.currentTarget,(e.nativeEvent as InputEvent).inputType||"insertText")} onBlur={e=>o.kind==="text"&&commitTextObject(o.id,e.currentTarget)}>{o.value}</div>}</div>})}
-          <div className="paper-body">{clauses.map((c,i)=>{const key=`clause:${i}`,pos=placements[key]||{page:1,x:90,y:180+i*90,w:560,h:70};if((pos.page||1)!==page)return null;const contentScale=Math.max(.55,Math.min(3,Math.max((pos.w||560)/560,(pos.h||70)/70)));return <label key={key} className={`canvas-object movable-clause ${selected===key?"selected":""}`} style={{left:pos.x,top:pos.y,width:pos.w||560,height:pos.h||70,"--content-scale":contentScale} as React.CSSProperties} onPointerDown={e=>pointerDown(e,key)}>{selected===key&&itemControls(key)}<b>{i+1}.</b><textarea autoFocus={i===clauses.length-1} placeholder={`Contract Conditions Clause ${i+1}`} value={c} disabled={contentLocked} onChange={e=>setClauses(v=>v.map((x,j)=>j===i?e.target.value:x))}/></label>})}{fields.map(f=>{const key=`field:${f.id}`,pos=placements[key]||{page:1,x:90,y:320,w:560,h:110};if((pos.page||1)!==page)return null;const contentScale=Math.max(.55,Math.min(2,Math.max((pos.w||560)/560,(pos.h||110)/110)));const partyFields=fields.filter(x=>x.party===f.party),isLastPartyField=partyFields.at(-1)?.id===f.id,partyReady=partyFields.every(x=>x.signed),partyCommitted=partyFields.every(x=>x.committed);return <div className={`canvas-object movable-field sign-field ${f.signed?"is-signed":""} ${selected===key?"selected":""}`} style={{left:pos.x,top:pos.y,width:pos.w||560,height:pos.h||110,"--content-scale":contentScale} as React.CSSProperties} onPointerDown={e=>pointerDown(e,key)} key={f.id}>{selected===key&&itemControls(key)}<div className="sign-label"><span>{f.kind} · Party {f.party} · Line {f.line}</span><span>{f.committed?"✓ Committed & locked":f.signed?"Ready to commit":"Required"}</span></div>{f.signed?<><div className="evidence"><div><strong className="script">{f.name}</strong>{!f.committed&&<button onClick={()=>beginSign(f.id)}>Change before commit</button>}</div>{f.image&&<img src={f.image} alt={`Verification selfie for ${f.name}`}/>}<div>{features.timestamps&&<><small>Device: {f.stamp}</small><small>{f.centralStamp}</small></>}{features.displayLocation&&<small>{f.coords}</small>}</div></div>{isLastPartyField&&!partyCommitted&&<button className="commit-signer field-commit" disabled={!partyReady} onClick={()=>commitParty(f.party)}>Save signed document — Signer {f.party}</button>}</>:<button className="sign-button" onClick={()=>beginSign(f.id)}><Icon>◉</Icon> Complete {f.kind}{features.selfies?" & capture selfie":""}</button>}</div>})}</div>{!pdfPage&&<footer className="paper-footer"><input placeholder="Optional footer" value={footer} disabled={contentLocked} onChange={e=>setFooter(e.target.value)}/><b>Page {page}</b></footer>}
+          <div className="paper-body">{clauses.map((c,i)=>{const key=`clause:${i}`,pos=placements[key]||{page:1,x:90,y:180+i*90,w:560,h:70};if((pos.page||1)!==page)return null;const contentScale=Math.max(.55,Math.min(3,Math.max((pos.w||560)/560,(pos.h||70)/70)));return <label key={key} className={`canvas-object movable-clause ${selected===key?"selected":""}`} style={{left:pos.x,top:pos.y,width:pos.w||560,height:pos.h||70,"--content-scale":contentScale} as React.CSSProperties} onPointerDown={e=>pointerDown(e,key)}>{selected===key&&itemControls(key)}<b>{i+1}.</b><textarea autoFocus={i===clauses.length-1} placeholder={`Contract Conditions Clause ${i+1}`} value={c} disabled={contentLocked} onChange={e=>setClauses(v=>v.map((x,j)=>j===i?e.target.value:x))}/></label>})}{fields.map(f=>{const key=`field:${f.id}`,pos=placements[key]||{page:1,x:90,y:320,w:560,h:110};if((pos.page||1)!==page)return null;const contentScale=Math.max(.55,Math.min(2,Math.max((pos.w||560)/560,(pos.h||110)/110)));const partyFields=fields.filter(x=>x.party===f.party),isLastPartyField=partyFields.at(-1)?.id===f.id,partyReady=partyFields.every(x=>x.signed),partyCommitted=partyFields.every(x=>x.committed);return <div className={`canvas-object movable-field sign-field ${f.signed?"is-signed":""} ${selected===key?"selected":""}`} style={{left:pos.x,top:pos.y,width:pos.w||560,height:pos.h||110,"--content-scale":contentScale} as React.CSSProperties} onPointerDown={e=>pointerDown(e,key)} key={f.id}>{selected===key&&itemControls(key)}<div className="sign-label"><span>{f.kind} · Party {f.party} · Line {f.line}</span><span>{f.committed?"✓ Committed & locked":f.signed?"Ready to commit":"Required"}</span></div>{f.signed?<><div className="evidence"><div><strong className="script">{f.name}</strong>{!f.committed&&<button onClick={()=>beginSign(f.id)}>Change before commit</button>}</div>{f.signatureImage&&<img src={f.signatureImage} alt={`Drawn signature for ${f.name}`} style={{background:"#fff",border:"1px solid #d7e3ee",borderRadius:6,maxHeight:70}}/>}{f.image&&<img src={f.image} alt={`Verification selfie for ${f.name}`}/>}<div>{features.timestamps&&<><small>Device: {f.stamp}</small><small>{f.centralStamp}</small></>}{features.displayLocation&&<small>{f.coords}</small>}</div></div>{isLastPartyField&&!partyCommitted&&<button className="commit-signer field-commit" disabled={!partyReady} onClick={()=>commitParty(f.party)}>Save signed document — Signer {f.party}</button>}</>:<button className="sign-button" onClick={()=>beginSign(f.id)}><Icon>◉</Icon> Complete {f.kind}{features.selfies?" & capture selfie":""}</button>}</div>})}</div>{!pdfPage&&<footer className="paper-footer"><input placeholder="Optional footer" value={footer} disabled={contentLocked} onChange={e=>setFooter(e.target.value)}/><b>Page {page}</b></footer>}
         </article>})}</div></section></section>
     {pdfSelection&&<button type="button" className="pdf-selection-edit" style={{left:pdfSelection.left,top:pdfSelection.top}} onPointerDown={e=>e.preventDefault()} onClick={()=>editImportedPdfText(pdfSelection.page,pdfSelection.item,pdfSelection.value,pdfSelection)}>Edit selected text</button>}
     {menu&&<div className="object-menu-backdrop" onPointerDown={()=>setMenu(null)}><div className="floating" role="dialog" aria-modal="true" aria-label="Add object" onPointerDown={e=>e.stopPropagation()}><button onClick={()=>addObject("text")}>T Custom text field</button><button onClick={addClause}>§ Contract clause</button><button onClick={()=>addField("signature")}>⌁ Signature line</button><button onClick={()=>addField("initials")}>Ab Initials line</button><button onClick={()=>addObject("image")}>▧ Image</button><button onClick={()=>addObject("link")}>↗ Link</button><button onClick={()=>addObject("video")}>▶ Video</button></div></div>}
-    <footer className="actionbar"><div><strong>{fields.length?`${fields.filter(f=>f.committed).length} of ${fields.length} fields committed`:"No signatures requested"}</strong><span><i style={{width:`${fields.length?fields.filter(f=>f.committed).length/fields.length*100:0}%`}}/></span><small>{fields.length===0?"Generate PDF works right now -- signatures are optional. Click Capture Signatures above only if this document needs one.":contentLocked&&!complete?"Agreement text locked; remaining signers may complete only their assigned fields.":complete?"All parties committed. Ready for final lock.":"Each signer must complete and commit every assigned field."}</small></div><button className="save-draft" disabled={exporting} onClick={()=>exportPdf(false)}>{exporting?"Building PDF…":"⬇ Generate PDF"}</button><button className="finalize" disabled={!complete||finalLocked||exporting} onClick={finalize}>🔒 Save final signed copy</button></footer>
+    <footer className="actionbar"><div><strong>{fields.length?`${fields.filter(f=>f.committed).length} of ${fields.length} fields committed`:"No signatures requested"}</strong><span><i style={{width:`${fields.length?fields.filter(f=>f.committed).length/fields.length*100:0}%`}}/></span><small>{fields.length===0?"Save a draft or a completed copy any time -- signatures are optional. Use \"Prepare for Signing\" only if this document needs one.":contentLocked&&!complete?"Agreement text locked; remaining signers may complete only their assigned fields.":complete?"All parties committed. Ready for final lock.":"Each signer must complete and commit every assigned field."}</small></div><button className="save-draft" disabled={exporting} onClick={()=>exportPdf(false)}>{exporting?"Building PDF…":"💾 Save Draft"}</button><button className="save-draft" disabled={savingCompleted} onClick={saveCompleted}>{savingCompleted?"Building PDF…":"✅ Save Completed Document"}</button><button className="save-draft" disabled={contentLocked} onClick={()=>setSignSetup(true)}>✍️ Save & Prepare for Signing</button><button className="save-draft" onClick={()=>{setSendBody("");setSendOpen(true)}}>📤 Send</button><button className="finalize" disabled={!complete||finalLocked||exporting} onClick={finalize}>🔒 Save final signed copy</button></footer>
+    {signSetup&&<div className="modal-backdrop" role="dialog" aria-modal="true"><div className="modal setup-modal"><button className="modal-close" onClick={()=>setSignSetup(false)}>×</button><p className="eyebrow">CUSTOMER SIGNING</p><h2>How will the customer sign?</h2><p>Choose how this document collects the customer's signature.</p>
+      <button className="capture" onClick={()=>prepareInPerson("drawn")}>🖊 In person — sign with a stylus or finger</button>
+      <button className="capture" onClick={()=>prepareInPerson("typed")}>⌨ In person — type name on this device</button>
+      <button className="capture" disabled={preparingRemote} onClick={sendRemotely}>{preparingRemote?"Preparing link…":"✉ Send remotely — customer picks stylus or typed, on their own device"}</button>
+    </div></div>}
+    <SendChoiceModal isOpen={sendOpen} onClose={()=>setSendOpen(false)} label={filename||"document"} phone={customerPhone} email={customerEmail} body={sendBody} />
     {setup&&<div className="modal-backdrop"><div className="modal setup-modal"><p className="eyebrow">DOCUMENT REQUIREMENTS</p><h2>Choose the evidence for this document</h2><p>Select any combination. Signers will see and consent to the requirements before signing.</p>{Object.entries({signatures:"Signature fields",initials:"Initials fields",selfies:"Selfie with signing actions",photoId:"Photo ID before signing",location:"Capture device coordinates",displayLocation:"Display coordinates on document",timestamps:"Device time + Central Time",draftingDate:"Verified drafting date"}).map(([k,label])=><label className="check option" key={k}><input type="checkbox" checked={features[k as keyof Features]} onChange={()=>updateFeature(k as keyof Features)}/>{label}</label>)}<button className="capture" onClick={()=>setSetup(false)}>Start with a blank document</button></div></div>}
-    {active&&<div className="modal-backdrop" role="dialog" aria-modal="true"><div className="modal"><button className="modal-close" onClick={()=>{streamRef.current?.getTracks().forEach(t=>t.stop());setActive(null)}}>×</button><p className="eyebrow">SIGNER EVIDENCE</p><h2>Complete this signing field</h2><p>Review the document, enter your legal name, and consent before saving this field. Your whole portion stays editable until you commit it.</p>{features.selfies&&<div className="camera">{cameraError?<div className="camera-error">Camera unavailable -- continuing without a selfie<br/><small>{cameraError}</small></div>:<video ref={videoRef} autoPlay muted playsInline/>}<span>FRONT CAMERA</span></div>}<label>Full legal name<input value={signerName} onChange={e=>setSignerName(e.target.value)} placeholder="Type your legal name"/></label><label className="check"><input type="checkbox" checked={consent} onChange={e=>setConsent(e.target.checked)}/> I consent to electronic records and intend this action to sign this document.</label><button className="capture" disabled={!signerName.trim()||!consent} onClick={saveMark}>Save this field for review</button></div></div>}
+    {active&&<div className="modal-backdrop" role="dialog" aria-modal="true"><div className="modal"><button className="modal-close" onClick={()=>{streamRef.current?.getTracks().forEach(t=>t.stop());setActive(null)}}>×</button><p className="eyebrow">SIGNER EVIDENCE</p><h2>Complete this signing field</h2><p>Review the document, enter your legal name, and consent before saving this field. Your whole portion stays editable until you commit it.</p>{features.selfies&&<div className="camera">{cameraError?<div className="camera-error">Camera unavailable -- continuing without a selfie<br/><small>{cameraError}</small></div>:<video ref={videoRef} autoPlay muted playsInline/>}<span>FRONT CAMERA</span></div>}<label>Full legal name<input value={signerName} onChange={e=>setSignerName(e.target.value)} placeholder="Type your legal name"/></label>{signMethod==="drawn"&&<div style={{margin:"10px 0"}}><SignaturePad onChange={setDrawnSignature} /></div>}<label className="check"><input type="checkbox" checked={consent} onChange={e=>setConsent(e.target.checked)}/> I consent to electronic records and intend this action to sign this document.</label><button className="capture" disabled={!signerName.trim()||!consent||(signMethod==="drawn"&&!drawnSignature)} onClick={saveMark}>Save this field for review</button></div></div>}
   </main></div>
 }

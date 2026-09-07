@@ -56,10 +56,26 @@ import {
   ExternalLink
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
-import { APIProvider, Map, Marker, useMap } from "@vis.gl/react-google-maps";
+import { APIProvider, Map, Marker, Polyline, useMap } from "@vis.gl/react-google-maps";
 import { composeEmail, composeSms, callNumber } from "../lib/deviceHandoff";
+import { subscribeToCollection } from "../lib/firestoreService";
+import { fetchRecentRoutes, ShiftRoute } from "../lib/timeClockService";
+import { GpsPrivacyNotice } from "./GpsPrivacyNotice";
 
 const DFW_FALLBACK = { lat: 32.7767, lng: -96.7970 };
+
+// Human-readable age of a real GPS fix ("Live", "3m ago", ...) -- never
+// invented for a fix that doesn't exist, callers only pass a real timestamp.
+function formatFixAge(iso: string): string {
+  const ms = Date.now() - new Date(iso).getTime();
+  if (!Number.isFinite(ms) || ms < 0) return "Live";
+  if (ms < 90000) return "Live";
+  const minutes = Math.round(ms / 60000);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.round(hours / 24)}d ago`;
+}
 
 const FitMapToPins: React.FC<{ pins: Array<{ lat: number; lng: number }> }> = ({ pins }) => {
   const map = useMap();
@@ -112,6 +128,10 @@ export const InteractiveMapPage: React.FC<InteractiveMapPageProps> = ({
 }) => {
   const { loggedInUser, simulatedRole } = useAuth();
   const activeRole = simulatedRole || loggedInUser?.role || "Owner";
+  // Same multi-tenant scoping key every other collection in the app keys off
+  // (see App.tsx) -- needed here to subscribe to the real active_shifts feed
+  // that live technician GPS fixes land in.
+  const businessId = loggedInUser?.isEmployee ? loggedInUser?.businessEmail : loggedInUser?.email;
   const {
     customers,
     setCustomers,
@@ -273,6 +293,44 @@ export const InteractiveMapPage: React.FC<InteractiveMapPageProps> = ({
   const [filterLeadStatus, setFilterLeadStatus] = useState("All"); // All, New, Contacted, Qualified, Estimate Sent, Won, Lost
   const [filterCategory, setFilterCategory] = useState("All"); // All, Residential, Commercial
   const [filterTechStatus, setFilterTechStatus] = useState("All"); // All, Available, Traveling, Lunch, Offline, Clocked Out
+  // "Technician Location" filter -- narrows the map to one specific
+  // technician's real GPS pin ("All" shows every technician). Selecting one
+  // also naturally re-centers the map on them, since FitMapToPins fits to
+  // whatever filteredPins ends up containing.
+  const [selectedTechnicianId, setSelectedTechnicianId] = useState("All");
+
+  // Real past-shift routes for whichever technician is selected above --
+  // fetched on demand (not for every technician up front), and always the
+  // real ShiftRoute records timeClockService.ts writes while GPS tracking
+  // was on for that shift. Nothing here is a live feed: once a shift ends,
+  // its route is a fixed historical record.
+  const [technicianRoutes, setTechnicianRoutes] = useState<ShiftRoute[]>([]);
+  const [routesLoading, setRoutesLoading] = useState(false);
+  const [selectedRouteId, setSelectedRouteId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (selectedTechnicianId === "All" || !businessId) {
+      setTechnicianRoutes([]);
+      setSelectedRouteId(null);
+      return;
+    }
+    let cancelled = false;
+    setRoutesLoading(true);
+    fetchRecentRoutes(businessId, selectedTechnicianId, 10)
+      .then(routes => {
+        if (cancelled) return;
+        setTechnicianRoutes(routes);
+        setSelectedRouteId(routes[0]?.id || null);
+      })
+      .catch(() => { if (!cancelled) setTechnicianRoutes([]); })
+      .finally(() => { if (!cancelled) setRoutesLoading(false); });
+    return () => { cancelled = true; };
+  }, [selectedTechnicianId, businessId]);
+
+  const selectedRoutePoints = useMemo(
+    () => technicianRoutes.find(r => r.id === selectedRouteId)?.points || [],
+    [technicianRoutes, selectedRouteId]
+  );
 
   const [markerClusterActive, setMarkerClusterActive] = useState(true);
 
@@ -304,18 +362,29 @@ export const InteractiveMapPage: React.FC<InteractiveMapPageProps> = ({
   const [isMultiSelectMode, setIsMultiSelectMode] = useState(false);
   const [selectedBasketIds, setSelectedBasketIds] = useState<string[]>([]);
 
-  // Vehicles are real — one per technician who has a vehicle name assigned
-  // (no fleet CRUD exists yet, so this list starts empty for a new company
-  // instead of showing fabricated trucks).
-  const [vehicles, setVehicles] = useState<Array<{ id: string; name: string; driver: string; fuel: number; speed: number; eta: number; currentRoute: string; assignedJobs: number }>>([]);
-
   // Real technicians — one per real employee. Name and clocked-in/on-break/
   // off-duty status come from the real employees + time_clock_logs
-  // collections; a real last-known GPS fix (captured at their last clock
-  // event) anchors their starting position when one exists. There is no
-  // real live GPS feed, so once placed they still animate via the jitter
-  // simulation below rather than actual tracked movement — that part
-  // remains a known limitation, not something faked as real.
+  // collections. Position comes from the most real fix available: a live
+  // GPS update reported while clocked in (see activeShifts below and the
+  // watchPosition effect in App.tsx) when one exists, otherwise the single
+  // fix captured at their last clock event. Nothing here is ever animated
+  // with fabricated movement — a technician's dot only moves when a real
+  // device fix says it did.
+  const [activeShifts, setActiveShifts] = useState<Array<{
+    id: string;
+    employeeEmail: string;
+    lastLocation?: { lat: number; lng: number; accuracy?: number; heading?: number | null; speed?: number | null; capturedAt: string };
+    lastLocationAt?: string;
+  }>>([]);
+
+  useEffect(() => {
+    if (!businessId) {
+      setActiveShifts([]);
+      return;
+    }
+    return subscribeToCollection("active_shifts", businessId, docs => setActiveShifts(docs as any));
+  }, [businessId]);
+
   const [activeTechnicians, setActiveTechnicians] = useState<Array<{
     id: string;
     name: string;
@@ -326,6 +395,8 @@ export const InteractiveMapPage: React.FC<InteractiveMapPageProps> = ({
     jobId?: string;
     routeProgress?: number; // 0 to 100
     routePath?: Array<{ lat: number; lng: number }>;
+    lastLocationAt?: string; // real timestamp of the fix behind lat/lng, when known
+    speedMph?: number; // real device-reported speed from the live GPS fix, when the device provided one
   }>>([]);
 
   const parseGpsString = (gps: string): { lat: number; lng: number } | null => {
@@ -346,12 +417,22 @@ export const InteractiveMapPage: React.FC<InteractiveMapPageProps> = ({
       const realStatus: "Available" | "Lunch" | "Offline" =
         !lastLog || lastLog.type === "Clock Out" ? "Offline" :
         lastLog.type === "Break Start" ? "Lunch" : "Available";
-      const lastRealFix = lastLog ? parseGpsString(lastLog.gps) : null;
+      const myShift = activeShifts.find(s => s.employeeEmail === er.email);
+      const liveFix = myShift?.lastLocation;
+      const lastRealFix = liveFix || (lastLog ? parseGpsString(lastLog.gps) : null);
       const fallbackFix = geocodeAddress(businessAddresses?.[0] || "Dallas, TX", er.email);
+      // The device's own real reported speed (Geolocation API coords.speed,
+      // meters/second) -- only present on a live fix, and only when the
+      // device actually reported one. Converted to mph; never guessed or
+      // interpolated when absent.
+      const speedMph = liveFix?.speed != null ? liveFix.speed * 2.23694 : undefined;
       return {
         id: er.email,
         name: `${er.firstName} ${er.lastName}`.trim(),
-        vehicle: existing?.vehicle || "Unassigned",
+        // The vehicle this employee actually typed in at their last
+        // clock-in (TimeClockLog.vehicle) -- real, not a separate dispatch
+        // field that nothing in this app ever sets.
+        vehicle: lastLog?.vehicle || "Unassigned",
         // Preserve an in-progress local dispatch ("Traveling" to a job)
         // rather than overwrite it with the plain clocked-in state.
         status: existing?.jobId ? "Traveling" : realStatus,
@@ -359,11 +440,30 @@ export const InteractiveMapPage: React.FC<InteractiveMapPageProps> = ({
         lng: existing?.jobId ? existing.lng : (lastRealFix?.lng ?? existing?.lng ?? fallbackFix.lng),
         jobId: existing?.jobId,
         routeProgress: existing?.routeProgress,
-        routePath: existing?.routePath
+        routePath: existing?.routePath,
+        lastLocationAt: existing?.jobId ? existing.lastLocationAt : (myShift?.lastLocationAt ?? existing?.lastLocationAt),
+        speedMph
       };
     }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [employees, timeClockLogs, businessAddresses]);
+  }, [employees, timeClockLogs, businessAddresses, activeShifts]);
+
+  // Vehicles are real — one per technician who's clocked in and typed a
+  // vehicle name at clock-in (no separate fleet CRUD exists). Speed is that
+  // technician's own real device-reported speed. There is no fuel-telemetry
+  // integration of any kind (no OBD-II/fleet API), so fuel is never shown
+  // rather than invented -- same reasoning as removing the old jitter
+  // animation for technician position.
+  const vehicles = useMemo(() => activeTechnicians
+    .filter(t => t.vehicle !== "Unassigned" && t.status !== "Offline")
+    .map(t => ({
+      id: `veh_${t.id}`,
+      name: t.vehicle,
+      driver: t.name,
+      driverId: t.id,
+      speedMph: t.speedMph,
+      assignedJobs: schedulingEvents.filter(e => e.assignedEmployee === t.name && e.status !== "Completed").length
+    })), [activeTechnicians, schedulingEvents]);
 
   // Service territories start empty. Only owner-created, real territories belong here.
   const [serviceTerritories, setServiceTerritories] = useState<ServiceTerritory[]>([]);
@@ -743,8 +843,8 @@ export const InteractiveMapPage: React.FC<InteractiveMapPageProps> = ({
           id: t.id,
           type: "Technician",
           title: `Tech: ${t.name}`,
-          subtitle: `Status: ${t.status} | Vehicle: ${t.vehicle}`,
-          address: `Mobile Location - DFW Metro`,
+          subtitle: `Status: ${t.status} | Vehicle: ${t.vehicle} | ${t.lastLocationAt ? formatFixAge(t.lastLocationAt) : "Last clock-in fix"}`,
+          address: `GPS fix (${t.lat.toFixed(4)}, ${t.lng.toFixed(4)})`,
           lat: t.lat,
           lng: t.lng,
           raw: t
@@ -752,22 +852,21 @@ export const InteractiveMapPage: React.FC<InteractiveMapPageProps> = ({
       });
     }
 
-    // 8. Vehicles (Truck icons)
+    // 8. Vehicles (Truck icons) -- always co-located with their real driver;
+    // there's no separate vehicle GPS device, so no fabricated offset from
+    // the technician's own real fix.
     if (showVehicles) {
       vehicles.forEach(v => {
-        // Retrieve matching tech coordinates
-        const tech = activeTechnicians.find(t => t.name === v.driver);
-        const fallback = geocodeAddress(v.currentRoute || v.name, v.id);
-        const lat = tech ? tech.lat + 0.003 : fallback.lat;
-        const lng = tech ? tech.lng - 0.003 : fallback.lng;
+        const tech = activeTechnicians.find(t => t.id === v.driverId);
+        if (!tech) return;
         list.push({
           id: v.id,
           type: "Vehicle",
           title: v.name,
-          subtitle: `Driver: ${v.driver} | Fuel: ${v.fuel}% | Speed: ${v.speed} mph`,
-          address: `Current Route: ${v.currentRoute}`,
-          lat,
-          lng,
+          subtitle: `Driver: ${v.driver} | Speed: ${v.speedMph != null ? `${Math.round(v.speedMph)} mph` : "GPS speed unavailable"}`,
+          address: `GPS fix (${tech.lat.toFixed(4)}, ${tech.lng.toFixed(4)})`,
+          lat: tech.lat,
+          lng: tech.lng,
           raw: v
         });
       });
@@ -808,6 +907,11 @@ export const InteractiveMapPage: React.FC<InteractiveMapPageProps> = ({
         if (pin.raw.status !== filterTechStatus) return false;
       }
 
+      // 5b. Technician Location -- narrow to one specific technician
+      if (selectedTechnicianId !== "All" && pin.type === "Technician") {
+        if (pin.id !== selectedTechnicianId) return false;
+      }
+
       // 6. Business Sector (Customers)
       if (filterCategory !== "All" && pin.type === "Customer") {
         if (pin.raw.type !== filterCategory) return false;
@@ -825,7 +929,7 @@ export const InteractiveMapPage: React.FC<InteractiveMapPageProps> = ({
 
       return true;
     });
-  }, [allPins, searchQuery, filterType, filterPriority, filterJobStatus, filterLeadStatus, filterTechStatus, filterCategory]);
+  }, [allPins, searchQuery, filterType, filterPriority, filterJobStatus, filterLeadStatus, filterTechStatus, filterCategory, selectedTechnicianId]);
 
   // Real revenue heatmap -- one bubble per real customer pin, sized and
   // positioned from that customer's actual lifetime value and geocoded
@@ -848,54 +952,10 @@ export const InteractiveMapPage: React.FC<InteractiveMapPageProps> = ({
   }, [filteredPins]);
   const maxHeatValue = Math.max(1, ...revenueHeatBubbles.map(b => b.value));
 
-  // Live Simulated Movements of Technicians & Vehicles every few seconds
-  useEffect(() => {
-    const timer = setInterval(() => {
-      setActiveTechnicians(prev => {
-        return prev.map(tech => {
-          // If Offline or Clocked out, don't move
-          if (tech.status === "Offline" || tech.status === "Clocked Out") return tech;
-
-          // Introduce minor coordinate jitter to animate movement beautifully
-          const latJitter = (Math.random() - 0.5) * 0.002;
-          const lngJitter = (Math.random() - 0.5) * 0.002;
-
-          let updatedLat = tech.lat + latJitter;
-          let updatedLng = tech.lng + lngJitter;
-
-          // Keep simulated movement within the DFW fallback area.
-          if (updatedLat < 32.60) updatedLat = 32.62;
-          if (updatedLat > 32.95) updatedLat = 32.93;
-          if (updatedLng < -97.05) updatedLng = -97.03;
-          if (updatedLng > -96.55) updatedLng = -96.57;
-
-          return {
-            ...tech,
-            lat: updatedLat,
-            lng: updatedLng
-          };
-        });
-      });
-
-      // Also simulate fuel and speeds
-      setVehicles(prev => {
-        return prev.map(veh => {
-          const matchingTech = activeTechnicians.find(t => t.name === veh.driver);
-          if (!matchingTech || matchingTech.status === "Offline") {
-            return { ...veh, speed: 0, fuel: Math.max(2, veh.fuel - 0.05) };
-          }
-          const speedOffset = Math.round((Math.random() - 0.5) * 8);
-          return {
-            ...veh,
-            speed: Math.max(0, Math.min(65, (matchingTech.status === "Traveling" ? 40 : 0) + speedOffset)),
-            fuel: Math.max(5, Math.round(veh.fuel - (Math.random() * 0.4))) // burn fuel slowly
-          };
-        });
-      });
-    }, 4500);
-
-    return () => clearInterval(timer);
-  }, [activeTechnicians]);
+  // Nothing here is simulated or animated on a timer anymore -- technician
+  // position and vehicle speed are both driven entirely by real GPS fixes
+  // (see the activeShifts/activeTechnicians/vehicles derivations above),
+  // which already re-render this component whenever a new real fix lands.
 
   // Handle estimate approvals & conversion directly from the map
   const handleApproveEstimate = (estId: string) => {
@@ -1695,6 +1755,54 @@ export const InteractiveMapPage: React.FC<InteractiveMapPageProps> = ({
               </select>
             </div>
 
+            <div className="flex items-center gap-2">
+              <span className="text-slate-400">Technician Location:</span>
+              <select
+                value={selectedTechnicianId}
+                onChange={(e) => {
+                  const techId = e.target.value;
+                  setSelectedTechnicianId(techId);
+                  setSelectedPin(null);
+                  if (techId !== "All") {
+                    // Selecting one technician is a request to see just them --
+                    // make sure the layer/type filters that gate technician
+                    // pins from appearing at all aren't hiding the result.
+                    setShowTechnicians(true);
+                    setFilterType("Technician");
+                  }
+                }}
+                className="bg-slate-800 border border-white/10 rounded px-2.5 py-1 text-xs text-white"
+              >
+                <option value="All">All Technicians</option>
+                {activeTechnicians.map(tech => (
+                  <option key={tech.id} value={tech.id}>{tech.name}</option>
+                ))}
+              </select>
+            </div>
+
+            {selectedTechnicianId !== "All" && (
+              <div className="flex items-center gap-2">
+                <span className="text-slate-400">Past Route:</span>
+                {routesLoading ? (
+                  <span className="text-[10px] text-slate-400 font-semibold">Loading real GPS history…</span>
+                ) : technicianRoutes.length === 0 ? (
+                  <span className="text-[10px] text-slate-400 font-semibold">No recorded routes for this technician</span>
+                ) : (
+                  <select
+                    value={selectedRouteId || ""}
+                    onChange={(e) => setSelectedRouteId(e.target.value || null)}
+                    className="bg-slate-800 border border-white/10 rounded px-2.5 py-1 text-xs text-white"
+                  >
+                    {technicianRoutes.map(r => (
+                      <option key={r.id} value={r.id}>
+                        {new Date(r.startedAt).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })} — {r.points.length} pts
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </div>
+            )}
+
             {/* LASSO / MULTI-SELECT TOGGLE CONTROL */}
             <div className="ml-auto flex items-center gap-2 border-l border-white/10 pl-4">
               <button
@@ -1713,6 +1821,8 @@ export const InteractiveMapPage: React.FC<InteractiveMapPageProps> = ({
             </div>
 
           </div>
+
+          {selectedTechnicianId !== "All" && <GpsPrivacyNotice dark />}
 
           {/* MAP CANVAS (REAL GOOGLE MAP OR HIGH-FIDELITYFALLBACK VECTOR CANVAS) */}
           <div className="bg-slate-950/60 rounded-[32px] p-2.5 border-2 border-white/10 overflow-hidden relative shadow-[0_12px_48px_rgba(0,0,0,0.5)]" style={{ height: "660px" }}>
@@ -1755,7 +1865,15 @@ export const InteractiveMapPage: React.FC<InteractiveMapPageProps> = ({
                       well outside the APIProvider/Map tree entirely, so it
                       threw "failed to retrieve APIProviderContext" and never
                       actually fit the camera to the pins. */}
-                  <FitMapToPins pins={filteredPins} />
+                  <FitMapToPins pins={selectedRoutePoints.length > 1 ? selectedRoutePoints : filteredPins} />
+                  {selectedRoutePoints.length > 1 && (
+                    <Polyline
+                      path={selectedRoutePoints.map(p => ({ lat: p.lat, lng: p.lng }))}
+                      strokeColor="#4A9BFF"
+                      strokeOpacity={0.9}
+                      strokeWeight={4}
+                    />
+                  )}
                   {/* Standard markers do not require a cloud Map ID and are
                       substantially more reliable on mobile browsers. */}
                   {filteredPins.map(pin => (
@@ -1866,6 +1984,30 @@ export const InteractiveMapPage: React.FC<InteractiveMapPageProps> = ({
                       </g>
                     );
                   })}
+
+                  {/* SELECTED TECHNICIAN'S PAST ROUTE -- real recorded GPS points, same coordinate projection as the territory polygons above */}
+                  {selectedRoutePoints.length > 1 && (() => {
+                    const latCenter = DFW_FALLBACK.lat;
+                    const lngCenter = DFW_FALLBACK.lng;
+                    const projected = selectedRoutePoints.map(p => ({
+                      x: 450 + (p.lng - lngCenter) * 1100,
+                      y: 300 - (p.lat - latCenter) * 1200
+                    }));
+                    return (
+                      <g>
+                        <polyline
+                          points={projected.map(p => `${p.x},${p.y}`).join(" ")}
+                          fill="none"
+                          stroke="#4A9BFF"
+                          strokeWidth="3"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
+                        <circle cx={projected[0].x} cy={projected[0].y} r="6" fill="#10b981" stroke="white" strokeWidth="1.5" />
+                        <circle cx={projected[projected.length - 1].x} cy={projected[projected.length - 1].y} r="6" fill="#ef4444" stroke="white" strokeWidth="1.5" />
+                      </g>
+                    );
+                  })()}
 
                   {/* REVENUE HEATMAP GRADIENT BUBBLES -- one per real customer, sized by their actual lifetime value */}
                   {showRevenueHeatmap && (
@@ -2342,16 +2484,17 @@ export const InteractiveMapPage: React.FC<InteractiveMapPageProps> = ({
                       <div className="space-y-2 text-xs font-sans text-slate-300">
                         <p className="flex justify-between"><span className="text-slate-400">Vehicle:</span> <strong>{selectedPin.raw.vehicle}</strong></p>
                         <p className="flex justify-between"><span className="text-slate-400">Status:</span> <strong className="text-emerald-400">{selectedPin.raw.status}</strong></p>
+                        <p className="flex justify-between"><span className="text-slate-400">Speed:</span> <strong>{selectedPin.raw.speedMph != null ? `${Math.round(selectedPin.raw.speedMph)} mph` : "GPS speed unavailable"}</strong></p>
                         <p className="flex justify-between"><span className="text-slate-400">Latitude:</span> <strong>{selectedPin.raw.lat.toFixed(5)}</strong></p>
                         <p className="flex justify-between"><span className="text-slate-400">Longitude:</span> <strong>{selectedPin.raw.lng.toFixed(5)}</strong></p>
+                        <p className="flex justify-between"><span className="text-slate-400">GPS Fix:</span> <strong className={selectedPin.raw.lastLocationAt && formatFixAge(selectedPin.raw.lastLocationAt) === "Live" ? "text-emerald-400" : "text-amber-400"}>{selectedPin.raw.lastLocationAt ? formatFixAge(selectedPin.raw.lastLocationAt) : "From last clock-in"}</strong></p>
                       </div>
                     )}
 
                     {selectedPin.type === "Vehicle" && (
                       <div className="space-y-2 text-xs font-sans text-slate-300">
                         <p className="flex justify-between"><span className="text-slate-400">Driver:</span> <strong>{selectedPin.raw.driver}</strong></p>
-                        <p className="flex justify-between"><span className="text-slate-400">Fuel Level:</span> <strong className={selectedPin.raw.fuel < 30 ? "text-rose-400" : "text-cyan-400"}>{selectedPin.raw.fuel}%</strong></p>
-                        <p className="flex justify-between"><span className="text-slate-400">Speed:</span> <strong>{selectedPin.raw.speed} mph</strong></p>
+                        <p className="flex justify-between"><span className="text-slate-400">Speed:</span> <strong className="text-cyan-400">{selectedPin.raw.speedMph != null ? `${Math.round(selectedPin.raw.speedMph)} mph` : "GPS speed unavailable"}</strong></p>
                         <p className="flex justify-between"><span className="text-slate-400">Active Jobs:</span> <strong>{selectedPin.raw.assignedJobs}</strong></p>
                       </div>
                     )}

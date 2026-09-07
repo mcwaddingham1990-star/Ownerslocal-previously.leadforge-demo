@@ -1,136 +1,122 @@
-import { deleteDoc, doc, runTransaction } from "firebase/firestore";
-import { db } from "../firebase";
 import { TimeClockLog } from "../types/domain";
+import {
+  activeShifts,
+  deleteActiveShift,
+  shiftRoutes,
+  upsertActiveShift
+} from "./mockGpsStore";
+
+/**
+ * Standalone demo build: the real version of this file writes clock-in/out
+ * state and live GPS fixes directly to Firestore (`active_shifts`,
+ * `shift_routes`) via runTransaction/setDoc/updateDoc -- entirely bypassing
+ * useFirestoreCollection.ts's mock, since it never goes through that hook.
+ * This mock keeps the exact same exported function signatures every caller
+ * (TimeClockPage.tsx, App.tsx's live-location watcher, RecentRoutesSection)
+ * already uses, backed by the in-memory store in mockGpsStore.ts instead of
+ * real Firestore, so the demo has no real network dependency here either.
+ */
+
+export interface LiveLocationFix {
+  lat: number;
+  lng: number;
+  accuracy?: number;
+  heading?: number | null;
+  speed?: number | null;
+  capturedAt: string; // ISO timestamp of the real device fix, not of the write
+}
+
+export interface ShiftRoute {
+  id: string;
+  businessId: string;
+  employeeEmail: string;
+  employeeName: string;
+  clockInLogId: string;
+  startedAt: string;
+  updatedAt: string;
+  points: LiveLocationFix[];
+}
 
 const activeShiftId = (businessId: string, employeeEmail: string) =>
   encodeURIComponent(`${businessId}::${employeeEmail.toLowerCase()}`);
 
-const persistedLog = (businessId: string, log: TimeClockLog) =>
-  Object.fromEntries(
-    Object.entries({ ...log, businessId, updatedAt: log.timestamp })
-      .filter(([, value]) => value !== undefined)
-  );
-
 export async function clockInTransaction(businessId: string, log: TimeClockLog): Promise<void> {
-  const activeRef = doc(db, "active_shifts", activeShiftId(businessId, log.employeeEmail));
-  const logRef = doc(db, "time_clock_logs", log.id);
-
-  try {
-    await runTransaction(db, async transaction => {
-      const active = await transaction.get(activeRef);
-      if (active.exists()) throw new Error("This employee is already clocked in.");
-
-      transaction.set(activeRef, {
-        businessId,
-        employeeEmail: log.employeeEmail,
-        employeeName: log.employeeName,
-        clockInLogId: log.id,
-        clockedInAt: log.timestamp,
-        updatedAt: log.timestamp
-      });
-      transaction.set(logRef, persistedLog(businessId, log));
-    });
-  } catch (error) {
-    if (!isPermissionError(error)) throw error;
-    await clockInViaBusinessProfile(businessId, log);
-  }
+  const id = activeShiftId(businessId, log.employeeEmail);
+  if (activeShifts.has(id)) throw new Error("This employee is already clocked in.");
+  upsertActiveShift(id, {
+    id,
+    businessId,
+    employeeEmail: log.employeeEmail,
+    employeeName: log.employeeName,
+    clockInLogId: log.id,
+    clockedInAt: log.timestamp,
+    updatedAt: log.timestamp
+  });
 }
 
 export async function clockOutTransaction(
   businessId: string,
   log: TimeClockLog,
-  legacyLogsShowActive: boolean
+  _legacyLogsShowActive: boolean
 ): Promise<void> {
-  const activeRef = doc(db, "active_shifts", activeShiftId(businessId, log.employeeEmail));
+  const id = activeShiftId(businessId, log.employeeEmail);
+  if (!activeShifts.has(id)) throw new Error("No active shift exists to clock out.");
+  deleteActiveShift(id);
+}
 
-  // Older active shifts predate active_shifts, and a clock-in can also have
-  // landed only in the business-profile compatibility store if writing
-  // active_shifts directly hit a permission error (see clockInTransaction's
-  // own fallback). Claim/confirm one exactly once so the following
-  // transaction still gives duplicate clock-outs backend protection — but a
-  // permission failure on this best-effort migration step must not abort
-  // the clock-out outright, or every clock-out for an account that needs
-  // the compatibility path fails with a confusing "no active shift" error
-  // while the employee is very much still clocked in.
-  if (legacyLogsShowActive) {
-    try {
-      await runTransaction(db, async transaction => {
-        const active = await transaction.get(activeRef);
-        if (!active.exists()) {
-          transaction.set(activeRef, {
-            businessId,
-            employeeEmail: log.employeeEmail,
-            employeeName: log.employeeName,
-            migratedFromLogs: true,
-            updatedAt: log.timestamp
-          });
-        }
-      });
-    } catch (error) {
-      if (!isPermissionError(error)) throw error;
-      await clockOutViaBusinessProfile(businessId, log, legacyLogsShowActive);
-      return;
-    }
-  }
-
-  const logRef = doc(db, "time_clock_logs", log.id);
-  try {
-    await runTransaction(db, async transaction => {
-      const active = await transaction.get(activeRef);
-      if (!active.exists()) throw new Error("No active shift exists to clock out.");
-
-      transaction.set(logRef, persistedLog(businessId, log));
-      transaction.delete(activeRef);
+export async function updateLiveLocation(
+  businessId: string,
+  employeeEmail: string,
+  employeeName: string,
+  clockInLogId: string | undefined,
+  location: LiveLocationFix
+): Promise<void> {
+  const id = activeShiftId(businessId, employeeEmail);
+  const existing = activeShifts.get(id);
+  if (existing) {
+    upsertActiveShift(id, {
+      ...existing,
+      lastLocation: location,
+      lastLocationAt: location.capturedAt,
+      updatedAt: location.capturedAt
     });
-  } catch (error) {
-    if (!isPermissionError(error)) throw error;
-    await clockOutViaBusinessProfile(businessId, log, legacyLogsShowActive);
+  }
+  if (clockInLogId) {
+    const existingRoute = shiftRoutes.get(clockInLogId);
+    const points = existingRoute ? [...existingRoute.points, location] : [location];
+    shiftRoutes.set(clockInLogId, {
+      id: existingRoute?.id || `route_${clockInLogId}`,
+      businessId,
+      employeeEmail,
+      employeeName,
+      clockInLogId,
+      updatedAt: location.capturedAt,
+      points
+    });
   }
 }
 
-const isPermissionError = (error: unknown) =>
-  typeof error === "object" && error !== null &&
-  "code" in error && String((error as { code?: unknown }).code).includes("permission-denied");
-
-// Compatibility storage for projects where the web app has deployed before
-// the new collection rules. Business-profile access already follows company
-// membership, so punches remain shared across devices instead of failing.
-async function clockInViaBusinessProfile(businessId: string, log: TimeClockLog): Promise<void> {
-  const profileRef = doc(db, "business_profiles", businessId);
-  const key = encodeURIComponent(log.employeeEmail.toLowerCase());
-  await runTransaction(db, async transaction => {
-    const snapshot = await transaction.get(profileRef);
-    const data = snapshot.data() || {};
-    const active = { ...(data.timeClockActiveShifts || {}) };
-    if (active[key]) throw new Error("This employee is already clocked in.");
-    active[key] = { employeeEmail: log.employeeEmail, employeeName: log.employeeName, clockInLogId: log.id, clockedInAt: log.timestamp };
-    transaction.set(profileRef, {
-      timeClockActiveShifts: active,
-      timeClockLogs: { ...(data.timeClockLogs || {}), [log.id]: persistedLog(businessId, log) },
-      updatedAt: log.timestamp
-    }, { merge: true });
-  });
+/** One shift's full route, or null if tracking was never on for it. */
+export async function fetchShiftRoute(clockInLogId: string): Promise<ShiftRoute | null> {
+  const route = shiftRoutes.get(clockInLogId);
+  if (!route) return null;
+  return { ...route, startedAt: route.points[0]?.capturedAt || route.updatedAt };
 }
 
-async function clockOutViaBusinessProfile(businessId: string, log: TimeClockLog, legacyLogsShowActive: boolean): Promise<void> {
-  const profileRef = doc(db, "business_profiles", businessId);
-  const key = encodeURIComponent(log.employeeEmail.toLowerCase());
-  await runTransaction(db, async transaction => {
-    const snapshot = await transaction.get(profileRef);
-    const data = snapshot.data() || {};
-    const active = { ...(data.timeClockActiveShifts || {}) };
-    if (!active[key] && !legacyLogsShowActive) throw new Error("No active shift exists to clock out.");
-    delete active[key];
-    transaction.set(profileRef, {
-      timeClockActiveShifts: active,
-      timeClockLogs: { ...(data.timeClockLogs || {}), [log.id]: persistedLog(businessId, log) },
-      updatedAt: log.timestamp
-    }, { merge: true });
-  });
+/**
+ * An employee's most recent recorded routes, newest first.
+ */
+export async function fetchRecentRoutes(businessId: string, employeeEmail: string, limitCount = 20): Promise<ShiftRoute[]> {
+  const routes = Array.from(shiftRoutes.values())
+    .filter(r => r.businessId === businessId && r.employeeEmail === employeeEmail)
+    .map(r => ({ ...r, startedAt: r.points[0]?.capturedAt || r.updatedAt }));
+  return routes
+    .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())
+    .slice(0, limitCount);
 }
 
 // Kept separate for administrative repair tools that may need to clear an
 // orphaned active marker after deleting/correcting its source punch.
 export async function clearActiveShift(businessId: string, employeeEmail: string): Promise<void> {
-  await deleteDoc(doc(db, "active_shifts", activeShiftId(businessId, employeeEmail)));
+  deleteActiveShift(activeShiftId(businessId, employeeEmail));
 }

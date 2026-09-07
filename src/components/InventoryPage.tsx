@@ -812,8 +812,8 @@ export const InventoryPage: React.FC<InventoryPageProps> = () => {
       const scanned = data as ScannedReceipt;
       if (scanned.unreadable || !scanned.items?.length) {
         setOcrError(scanned.unreadable
-          ? "Couldn't read a receipt or label in that photo. Try a clearer, well-lit shot of the item's label, barcode, or receipt."
-          : "No items could be read on that receipt. Try a clearer, well-lit shot.");
+          ? "Couldn't identify a receipt, label, or physical stock in that photo. Try a clearer, well-lit shot of the item's label/receipt, or of the items themselves."
+          : "No items could be read or identified in that photo. Try a clearer, well-lit shot.");
         setSnapshotStage("camera");
         return;
       }
@@ -2299,7 +2299,7 @@ export const InventoryPage: React.FC<InventoryPageProps> = () => {
                   <div className="text-center p-6 text-slate-500 space-y-1.5 z-10">
                     <Camera className="w-10 h-10 mx-auto text-slate-600" />
                     <p className="text-xs font-bold font-sans text-slate-400">Tap to take a photo or upload an image</p>
-                    <p className="text-[10px] font-mono text-slate-600">Receipt, delivery slip, or product label/barcode</p>
+                    <p className="text-[10px] font-mono text-slate-600">Receipt, delivery slip, product label/barcode -- or just the items themselves</p>
                   </div>
                 </div>
 
@@ -2319,7 +2319,7 @@ export const InventoryPage: React.FC<InventoryPageProps> = () => {
                 <div className="space-y-1">
                   <h4 className="text-xs font-black text-slate-700 uppercase tracking-wider">Processing Scanned Items</h4>
                   <p className="text-[10.5px] text-slate-500 max-w-xs mx-auto leading-relaxed font-sans font-medium">
-                    OCR engines are reading scanned receipts and matching vendor SKU abbreviations directly to company master inventory index...
+                    Reading receipt text (or visually counting the items in the photo) and matching against the company master inventory index...
                   </p>
                 </div>
               </div>
@@ -2328,13 +2328,19 @@ export const InventoryPage: React.FC<InventoryPageProps> = () => {
             {snapshotStage === "review" && aiSuggestions && (() => {
               const receiptTotal = scanReceiptTotal(aiSuggestions);
               const allChecked = aiSuggestions.items.length > 0 && selectedScanItems.every(Boolean);
+              // No vendor/total/cost/sku on any item -- there's no receipt or label at
+              // all, so these came from the AI visually counting physical stock in the
+              // photo rather than reading text. Quantities there are estimates, not
+              // reads, so let the owner correct the count before it hits inventory.
+              const isVisualScan = !aiSuggestions.vendor && aiSuggestions.total == null
+                && aiSuggestions.items.every(item => item.unitCost == null && !item.sku && !item.barcode);
               return (
               <div className="space-y-4 text-xs text-slate-600 font-semibold">
                 <div className="p-3 bg-indigo-50 border border-indigo-100 rounded-xl flex items-start gap-2 text-[11px] font-sans font-medium">
                   <Sparkles className="w-4 h-4 text-indigo-500 shrink-0 mt-0.5" />
                   <div>
                     <span className="font-bold text-indigo-800 block">Scan complete — {aiSuggestions.items.length} item{aiSuggestions.items.length === 1 ? "" : "s"} found</span>
-                    <span>{aiSuggestions.vendor || "Vendor not detected"}{aiSuggestions.purchaseDate ? ` · ${aiSuggestions.purchaseDate}` : ""}</span>
+                    <span>{isVisualScan ? "Visually estimated from the photo -- check the counts below before confirming." : `${aiSuggestions.vendor || "Vendor not detected"}${aiSuggestions.purchaseDate ? ` · ${aiSuggestions.purchaseDate}` : ""}`}</span>
                   </div>
                 </div>
 
@@ -2349,7 +2355,7 @@ export const InventoryPage: React.FC<InventoryPageProps> = () => {
                       const match = findInventoryMatch(item);
                       const lineCost = item.unitCost != null ? item.unitCost : null;
                       return (
-                        <label key={index} className="flex items-start gap-2.5 p-3 cursor-pointer hover:bg-white/60">
+                        <div key={index} className="flex items-start gap-2.5 p-3 hover:bg-white/60">
                           <input
                             type="checkbox"
                             checked={!!selectedScanItems[index]}
@@ -2357,18 +2363,31 @@ export const InventoryPage: React.FC<InventoryPageProps> = () => {
                             className="w-4 h-4 mt-0.5 accent-[#4A9BFF] shrink-0"
                           />
                           <div className="flex-1 min-w-0">
-                            <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
-                              <span className="text-slate-800 font-black">
-                                {item.quantity != null ? `${item.quantity} × ` : ""}{item.name || "Unnamed item"}
-                              </span>
-                              <span className="font-mono text-slate-800 font-black">{lineCost != null ? `$${lineCost.toFixed(2)} ea` : "Cost not detected"}</span>
+                            <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
+                              {isVisualScan ? (
+                                <span className="flex items-center gap-1.5 text-slate-800 font-black">
+                                  <input
+                                    type="number"
+                                    min={0}
+                                    value={item.quantity ?? 0}
+                                    onChange={e => setAiSuggestions(prev => prev ? { ...prev, items: prev.items.map((it, i) => i === index ? { ...it, quantity: Number(e.target.value) } : it) } : prev)}
+                                    onClick={e => e.stopPropagation()}
+                                    className="w-14 rounded-lg border border-[#A9CDEE] px-1.5 py-1 text-xs font-mono font-black text-center"
+                                  /> × {item.name || "Unnamed item"}{item.unit ? ` (${item.unit})` : ""}
+                                </span>
+                              ) : (
+                                <span className="text-slate-800 font-black">
+                                  {item.quantity != null ? `${item.quantity} × ` : ""}{item.name || "Unnamed item"}
+                                </span>
+                              )}
+                              {!isVisualScan && <span className="font-mono text-slate-800 font-black">{lineCost != null ? `$${lineCost.toFixed(2)} ea` : "Cost not detected"}</span>}
                             </div>
                             <div className="text-[9.5px] text-slate-400 font-medium mt-0.5">
-                              {item.sku ? `SKU ${item.sku}` : "No SKU detected"}
+                              {isVisualScan ? "Visually estimated -- adjust the count if it's off" : (item.sku ? `SKU ${item.sku}` : "No SKU detected")}
                               {match ? ` · Restocks existing "${match.name}" (${match.quantity} on hand)` : " · Will be added as a new item"}
                             </div>
                           </div>
-                        </label>
+                        </div>
                       );
                     })}
                   </div>

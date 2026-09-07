@@ -180,6 +180,8 @@ export const LeadsPage: React.FC = () => {
       sourceType: "Lead",
       sourceId: lead.id,
       customerName: lead.name,
+      customerPhone: lead.phone,
+      customerEmail: lead.email,
       representativeName: lead.salesRep || "Company Representative",
       lines: [],
       pdfBase64
