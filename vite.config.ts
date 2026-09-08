@@ -12,6 +12,19 @@ import { defineConfig } from 'vite';
 export default defineConfig(() => {
   return {
     plugins: [react(), tailwindcss()],
+    define: {
+      // Same mechanism as the real app's vite.config.ts: Render supplies this
+      // at build time via an environment variable on the demo's own service,
+      // never hard-coded here. A Google Maps JS API key is meant to be
+      // client-visible (Google restricts it by HTTP referrer on their end,
+      // not by keeping it secret) -- this demo's Render service needs its
+      // own referrer allowlist entry for ownersdemo.onrender.com, separate
+      // from the real app's.
+      'process.env.GOOGLE_MAPS_PLATFORM_KEY': JSON.stringify(
+        process.env.GOOGLE_MAPS_PLATFORM_KEY || ''
+      ),
+      'process.env.GOOGLE_MAPS_MAP_ID': JSON.stringify(process.env.GOOGLE_MAPS_MAP_ID || ''),
+    },
     resolve: {
       alias: {
         '@': path.resolve(__dirname, '.'),
