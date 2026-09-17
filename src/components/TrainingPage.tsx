@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import { collection, doc, setDoc, deleteDoc, query, where, onSnapshot } from "firebase/firestore";
 import { db } from "../firebase";
 import { useAuth } from "../context/AuthContext";
@@ -122,6 +122,14 @@ export const TrainingPage: React.FC = () => {
 
   const [courses, _setCourses] = useState<Course[]>([]);
   const [profiles, _setProfiles] = useState<EmployeeTrainingProfile[]>([]);
+  // Guards the auto-onboarding effect below against racing the (possibly
+  // stale, possibly empty-on-a-new-device) localStorage cache: without this,
+  // that effect could see profiles=[] before the real Firestore listener
+  // has delivered even once, wrongly conclude an employee has no profile
+  // yet, and setDoc a fresh blank one over their real one (same
+  // deterministic doc id) -- silently wiping real completedCourseIds/
+  // quizScores/trainingHours instead of just leaving it alone.
+  const profilesLoadedFromServerRef = useRef(false);
   const courseCacheKey = businessId ? `ownerslocal_courses:${businessId.toLowerCase()}` : "";
   const profileCacheKey = businessId ? `ownerslocal_training_profiles:${businessId.toLowerCase()}` : "";
 
@@ -268,11 +276,13 @@ export const TrainingPage: React.FC = () => {
       const next = [...byEmployee.values()];
       _setProfiles(next);
       localStorage.setItem(profileCacheKey, JSON.stringify(next));
+      profilesLoadedFromServerRef.current = true;
     }, (error) => console.error("Unable to load training assignments:", error));
 
     return () => {
       unsubCourses();
       unsubProfiles();
+      profilesLoadedFromServerRef.current = false;
     };
   }, [businessId, courseCacheKey, profileCacheKey]);
 
@@ -325,6 +335,9 @@ export const TrainingPage: React.FC = () => {
   // The legacy `roster` collection only contains invite/onboarding records
   // and can be empty even while real employees already exist.
   useEffect(() => {
+    // Wait for the real Firestore listener's first delivery before
+    // deciding anyone is missing a profile -- see profilesLoadedFromServerRef.
+    if (!profilesLoadedFromServerRef.current) return;
     // Add default training profiles for any real employee who doesn't have one.
     rosterCandidates.forEach(employee => {
       const employeeName = employee.name;

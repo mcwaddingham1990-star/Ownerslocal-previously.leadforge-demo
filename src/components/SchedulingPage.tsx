@@ -33,12 +33,34 @@ import type { SchedulingEvent } from "../types/domain";
 import { useAuth } from "../context/AuthContext";
 import { useDomainData } from "../context/DomainDataContext";
 import { useNavTelemetry } from "../context/NavTelemetryContext";
+import { CreateWorkOrderPicker } from "./CreateWorkOrderPicker";
+import { CreateMembershipPicker } from "./CreateMembershipPicker";
+import { MembershipBuilder } from "./MembershipBuilder";
+import type { Membership } from "../types/membership";
+import { CustomerPortalControls } from "./CustomerPortalControls";
+import { resolveCustomerByIdOrName } from "../lib/resolveCustomer";
+import { BulkImportModal } from "./BulkImportModal";
+import type { ImportFieldSpec, DuplicateCheckResult } from "../lib/spreadsheetImport";
+
+type JobImportKey = "customer" | "eventType" | "date" | "startTime" | "endTime" | "assignedEmployee" | "address" | "notes" | "status";
+const JOB_IMPORT_FIELDS: ImportFieldSpec<JobImportKey>[] = [
+  { key: "customer", label: "Customer", aliases: ["customer", "customer name", "client", "client name"], required: true },
+  { key: "eventType", label: "Type (Job/Estimate/etc)", aliases: ["type", "event type", "job type"] },
+  { key: "date", label: "Date", aliases: ["date", "job date", "scheduled date"], required: true },
+  { key: "startTime", label: "Start Time", aliases: ["start time", "start", "time"] },
+  { key: "endTime", label: "End Time", aliases: ["end time", "end"] },
+  { key: "assignedEmployee", label: "Assigned To", aliases: ["assigned employee", "assigned to", "technician", "tech", "employee"] },
+  { key: "address", label: "Address", aliases: ["address", "job address", "location", "service address"] },
+  { key: "notes", label: "Notes", aliases: ["notes", "description", "job notes"] },
+  { key: "status", label: "Status", aliases: ["status", "job status"] }
+];
 
 const DEFAULT_EVENT_TYPES = [
   "Estimate",
   "Consultation",
   "Meeting",
   "Job",
+  "Work Order",
   "Project Review",
   "Site Visit",
   "Follow-Up",
@@ -58,6 +80,76 @@ const DEFAULT_EVENT_TYPES = [
 
 
 const PRIORITIES: Array<"Low" | "Medium" | "High" | "Urgent"> = ["Low", "Medium", "High", "Urgent"];
+
+/** Simple Recurring Maintenance view: shows every Membership's next
+ * service by bucket (overdue / upcoming), plus the real visits the
+ * scheduler has already generated (unscheduled -- generated but nobody's
+ * put a date/tech on it yet -- and completed). Owns its own MembershipBuilder
+ * instance for "View / Edit" so it drops into Scheduling without extra
+ * plumbing on the parent page. */
+const RecurringMaintenanceView: React.FC = () => {
+  const { memberships, workOrders } = useDomainData();
+  const [editingMembership, setEditingMembership] = useState<Membership | null>(null);
+  const today = new Date().toISOString().slice(0, 10);
+
+  const activeMemberships = memberships.filter(m => m.status === "Active");
+  const overdue = activeMemberships.filter(m => m.nextMaintenanceDate && m.nextMaintenanceDate < today);
+  const upcoming = activeMemberships.filter(m => m.nextMaintenanceDate && m.nextMaintenanceDate >= today);
+  const membershipVisits = workOrders.filter(w => w.sourceMembershipId);
+  const unscheduledVisits = membershipVisits.filter(w => !w.scheduledDate && w.status !== "Completed" && w.status !== "Cancelled");
+  const completedVisits = membershipVisits.filter(w => w.status === "Completed");
+
+  const Bucket = ({ title, color, children }: { title: string; color: string; children: React.ReactNode }) => (
+    <div className="rounded-2xl border border-[#9EC8EF] bg-white p-4">
+      <p className={`text-xs font-black uppercase ${color}`}>{title}</p>
+      <div className="mt-3 space-y-2">{children}</div>
+    </div>
+  );
+
+  return (
+    <div className="bg-white rounded-3xl border border-[#A9CDEE]/50 p-4 space-y-4">
+      <div className="grid gap-4 md:grid-cols-2">
+        <Bucket title={`Overdue (${overdue.length})`} color="text-rose-600">
+          {overdue.length === 0 && <p className="text-xs text-slate-400">Nothing overdue.</p>}
+          {overdue.map(m => (
+            <button key={m.id} onClick={() => setEditingMembership(m)} className="w-full rounded-xl border border-rose-200 bg-rose-50 p-3 text-left text-xs">
+              <p className="font-black text-[#1F3557]">{m.planName} — {m.customerName}</p>
+              <p className="text-[10px] text-rose-600">Due {m.nextMaintenanceDate}</p>
+            </button>
+          ))}
+        </Bucket>
+        <Bucket title={`Upcoming (${upcoming.length})`} color="text-[#315C9F]">
+          {upcoming.length === 0 && <p className="text-xs text-slate-400">Nothing scheduled yet.</p>}
+          {upcoming.map(m => (
+            <button key={m.id} onClick={() => setEditingMembership(m)} className="w-full rounded-xl border border-[#9EC8EF] bg-[#EAF5FF] p-3 text-left text-xs">
+              <p className="font-black text-[#1F3557]">{m.planName} — {m.customerName}</p>
+              <p className="text-[10px] text-[#5E7393]">Due {m.nextMaintenanceDate}</p>
+            </button>
+          ))}
+        </Bucket>
+        <Bucket title={`Unscheduled Visits (${unscheduledVisits.length})`} color="text-amber-700">
+          {unscheduledVisits.length === 0 && <p className="text-xs text-slate-400">No generated visits waiting on a date yet.</p>}
+          {unscheduledVisits.map(w => (
+            <div key={w.id} className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs">
+              <p className="font-black text-[#1F3557]">{w.workOrderNumber} — {w.customerName}</p>
+              <p className="text-[10px] text-amber-700">{w.jobDescription}</p>
+            </div>
+          ))}
+        </Bucket>
+        <Bucket title={`Completed (${completedVisits.length})`} color="text-emerald-700">
+          {completedVisits.length === 0 && <p className="text-xs text-slate-400">No completed visits yet.</p>}
+          {completedVisits.slice(0, 10).map(w => (
+            <div key={w.id} className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-xs">
+              <p className="font-black text-[#1F3557]">{w.workOrderNumber} — {w.customerName}</p>
+              <p className="text-[10px] text-emerald-700">{w.scheduledDate || w.date}</p>
+            </div>
+          ))}
+        </Bucket>
+      </div>
+      <MembershipBuilder isOpen={!!editingMembership} onClose={() => setEditingMembership(null)} editingMembership={editingMembership} />
+    </div>
+  );
+};
 
 export const SchedulingPage: React.FC = () => {
   const { loggedInUser, simulatedRole } = useAuth();
@@ -104,6 +196,106 @@ export const SchedulingPage: React.FC = () => {
   // reads as the whole page freezing. Route confirmations through in-app UI.
   const [confirmState, setConfirmState] = useState<{ message: string; onConfirm: () => void } | null>(null);
   const requestConfirm = (message: string, onConfirm: () => void) => setConfirmState({ message, onConfirm });
+  const [isBulkImportOpen, setIsBulkImportOpen] = useState(false);
+  const [lastImportedEventIds, setLastImportedEventIds] = useState<string[]>([]);
+
+  // Best-effort date/time normalization -- a real spreadsheet export rarely
+  // already uses this app's exact YYYY-MM-DD / 24-hour HH:MM format, so this
+  // accepts the common real-world shapes (M/D/YYYY, M/D/YY, already-ISO, and
+  // 12-hour "9:00 AM") instead of silently dropping every imported row that
+  // isn't pre-formatted exactly right.
+  const parseImportedDate = (raw: string | undefined): string => {
+    const value = (raw || "").trim();
+    if (!value) return new Date().toISOString().slice(0, 10);
+    if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
+    const slash = value.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
+    if (slash) {
+      let [, m, d, y] = slash;
+      if (y.length === 2) y = `20${y}`;
+      return `${y}-${m.padStart(2, "0")}-${d.padStart(2, "0")}`;
+    }
+    const parsed = new Date(value);
+    return isNaN(parsed.getTime()) ? new Date().toISOString().slice(0, 10) : parsed.toISOString().slice(0, 10);
+  };
+  const parseImportedTime = (raw: string | undefined, fallback: string): string => {
+    const value = (raw || "").trim();
+    if (!value) return fallback;
+    if (/^\d{1,2}:\d{2}$/.test(value)) return value.padStart(5, "0");
+    const ampm = value.match(/^(\d{1,2}):(\d{2})\s*(am|pm)$/i);
+    if (ampm) {
+      let hour = parseInt(ampm[1], 10);
+      const minute = ampm[2];
+      const isPm = ampm[3].toLowerCase() === "pm";
+      if (isPm && hour !== 12) hour += 12;
+      if (!isPm && hour === 12) hour = 0;
+      return `${String(hour).padStart(2, "0")}:${minute}`;
+    }
+    return fallback;
+  };
+
+  // A row is a likely duplicate if an existing event already has the same
+  // customer, date, and start time -- a reasonable proxy for "this exact
+  // appointment is already on the calendar."
+  const checkJobDuplicate = (row: Partial<Record<JobImportKey, string>>): DuplicateCheckResult => {
+    const customerName = (row.customer || "").trim().toLowerCase();
+    if (!customerName) return { isDuplicate: false };
+    const date = parseImportedDate(row.date);
+    const startTime = parseImportedTime(row.startTime, "09:00");
+    const match = events.find(e => e.customer.trim().toLowerCase() === customerName && e.date === date && e.startTime === startTime);
+    if (match) return { isDuplicate: true, reason: `Matches an existing ${match.eventType.toLowerCase()} on ${date}` };
+    return { isDuplicate: false };
+  };
+
+  // Bulk import (spreadsheet/PDF -> real SchedulingEvent records). Matches
+  // each row's customer name against real Customer records by the same
+  // helper the rest of the app uses (resolveCustomerByIdOrName), so an
+  // imported job for an existing customer links up instead of creating a
+  // disconnected duplicate -- unmatched names still import fine as
+  // free-text (same as manually typing a new customer name into this page
+  // already allows).
+  const handleBulkImportJobs = (rows: Array<Partial<Record<JobImportKey, string>>>) => {
+    const imported: SchedulingEvent[] = rows
+      .filter(row => row.customer?.trim())
+      .map(row => {
+        const matchedCustomer = resolveCustomerByIdOrName(customersList, undefined, row.customer);
+        const eventType = row.eventType?.trim();
+        const statusRaw = (row.status || "").trim().toLowerCase();
+        return {
+          id: "sched_import_" + Math.random().toString(36).substring(2, 9),
+          eventType: eventType && DEFAULT_EVENT_TYPES.includes(eventType) ? eventType : "Job",
+          date: parseImportedDate(row.date),
+          startTime: parseImportedTime(row.startTime, "09:00"),
+          endTime: parseImportedTime(row.endTime, "10:00"),
+          customer: matchedCustomer?.contact || matchedCustomer?.company || row.customer!.trim(),
+          customerId: matchedCustomer?.id,
+          customerPhone: matchedCustomer?.phone,
+          customerEmail: matchedCustomer?.email,
+          customerAddress: row.address?.trim() || matchedCustomer?.address,
+          assignedEmployee: row.assignedEmployee?.trim() || "",
+          location: row.address?.trim() || matchedCustomer?.address || "",
+          priority: "Medium",
+          notes: row.notes?.trim() || "",
+          status: statusRaw.includes("complete") ? "Completed" : statusRaw.includes("cancel") ? "Cancelled" : row.assignedEmployee?.trim() ? "Assigned" : "Unassigned",
+          createdAt: new Date().toISOString()
+        };
+      });
+    if (!imported.length) {
+      triggerNotification("No valid rows found -- make sure Customer and Date columns are mapped.");
+      return;
+    }
+    setEvents(prev => [...imported, ...prev]);
+    setLastImportedEventIds(imported.map(e => e.id));
+    triggerNotification(`✅ Imported ${imported.length} job(s)/event(s). Downloaded an import report.`);
+    if (logOperationalEvent) logOperationalEvent("Spreadsheet Imported", `Imported ${imported.length} scheduling records`, "📥");
+  };
+
+  const undoLastJobImport = () => {
+    const count = lastImportedEventIds.length;
+    setEvents(prev => prev.filter(e => !lastImportedEventIds.includes(e.id)));
+    setLastImportedEventIds([]);
+    triggerNotification(`Undone -- removed ${count} imported job(s)/event(s).`);
+    if (logOperationalEvent) logOperationalEvent("Import Undone", `Removed ${count} scheduling records from the last import`, "↩️");
+  };
   // Navigation states
   const [currentDate, setCurrentDate] = useState<Date>(() => {
     if (preSelectedDate) {
@@ -112,7 +304,7 @@ export const SchedulingPage: React.FC = () => {
     return new Date();
   });
 
-  const [activeView, setActiveView] = useState<"month" | "week" | "day">("month");
+  const [activeView, setActiveView] = useState<"month" | "week" | "day" | "recurring">("month");
   const [timeFormat24, setTimeFormat24] = useState<boolean>(false); // false = 12-hour, true = 24-hour
   const [searchQuery, setSearchQuery] = useState("");
 
@@ -122,6 +314,8 @@ export const SchedulingPage: React.FC = () => {
   const [filterCrew, setFilterCrew] = useState("All");
   const [filterCustomer, setFilterCustomer] = useState("All");
   const [filterEventType, setFilterEventType] = useState("All");
+  const [isWorkOrderPickerOpen, setIsWorkOrderPickerOpen] = useState(false);
+  const [isMembershipPickerOpen, setIsMembershipPickerOpen] = useState(false);
   const [filterPriority, setFilterPriority] = useState("All");
   const [filterStatus, setFilterStatus] = useState("All");
   const [filterCompleted, setFilterCompleted] = useState("All"); // All, Completed, Incomplete
@@ -872,13 +1066,33 @@ export const SchedulingPage: React.FC = () => {
           </div>
           <div className="flex flex-wrap gap-2.5">
             {isHighPrivilege ? (
-              <button
-                onClick={() => { resetForm(); setIsNewEventOpen(true); }}
-                className="px-4 py-2.5 bg-[#315C9F] hover:bg-[#1F3557] text-white border border-[#9EC8EF] font-bold rounded-xl text-xs uppercase tracking-wider transition-colors cursor-pointer flex items-center gap-1.5 shadow-sm"
-              >
-                <Plus className="w-4 h-4" />
-                New Event
-              </button>
+              <>
+                <button
+                  onClick={() => { resetForm(); setIsNewEventOpen(true); }}
+                  className="px-4 py-2.5 bg-[#315C9F] hover:bg-[#1F3557] text-white border border-[#9EC8EF] font-bold rounded-xl text-xs uppercase tracking-wider transition-colors cursor-pointer flex items-center gap-1.5 shadow-sm"
+                >
+                  <Plus className="w-4 h-4" />
+                  New Event
+                </button>
+                <button
+                  onClick={() => setIsBulkImportOpen(true)}
+                  className="px-4 py-2.5 bg-[#EAF5FF] hover:bg-[#BDDDF8] border border-[#9EC8EF] text-[#315C9F] font-bold rounded-xl text-xs uppercase tracking-wider transition-colors cursor-pointer flex items-center gap-1.5"
+                >
+                  📥 Import Schedule
+                </button>
+                <button
+                  onClick={() => setIsWorkOrderPickerOpen(true)}
+                  className="px-4 py-2.5 bg-[#EAF5FF] hover:bg-[#BDDDF8] border border-[#9EC8EF] text-[#315C9F] font-bold rounded-xl text-xs uppercase tracking-wider transition-colors cursor-pointer flex items-center gap-1.5"
+                >
+                  🧰 Create Work Order
+                </button>
+                <button
+                  onClick={() => setIsMembershipPickerOpen(true)}
+                  className="px-4 py-2.5 bg-[#EAF5FF] hover:bg-[#BDDDF8] border border-[#9EC8EF] text-[#315C9F] font-bold rounded-xl text-xs uppercase tracking-wider transition-colors cursor-pointer flex items-center gap-1.5"
+                >
+                  📜 Add Membership
+                </button>
+              </>
             ) : (
               <div className="px-3.5 py-2 bg-slate-200 text-slate-500 rounded-xl text-xs font-bold uppercase border border-slate-300 flex items-center gap-1.5 cursor-not-allowed" title="Create is restricted for your role">
                 <ShieldAlert className="w-3.5 h-3.5" />
@@ -958,6 +1172,12 @@ export const SchedulingPage: React.FC = () => {
                 className={`px-3 py-1.5 rounded-lg font-bold text-xs uppercase tracking-wider transition-all ${activeView === "day" ? "bg-[#315C9F] text-white shadow-xs" : "text-[#1F3557] hover:bg-[#BDDDF8]/50"}`}
               >
                 Day
+              </button>
+              <button
+                onClick={() => setActiveView("recurring")}
+                className={`px-3 py-1.5 rounded-lg font-bold text-xs uppercase tracking-wider transition-all ${activeView === "recurring" ? "bg-[#315C9F] text-white shadow-xs" : "text-[#1F3557] hover:bg-[#BDDDF8]/50"}`}
+              >
+                Recurring Maintenance
               </button>
             </div>
           </div>
@@ -1372,6 +1592,8 @@ export const SchedulingPage: React.FC = () => {
             </div>
           </div>
         )}
+
+        {activeView === "recurring" && <RecurringMaintenanceView />}
       </div>
 
       {/* 4. UPCOMING / PAST DUE JOBS TICKERS */}
@@ -1629,7 +1851,7 @@ export const SchedulingPage: React.FC = () => {
                         <input
                           value={formCustomCityState}
                           onChange={(e) => setFormCustomCityState(e.target.value)}
-                          placeholder="Seattle, WA"
+                          placeholder="e.g. City, State"
                           type="text"
                           className="w-full bg-[#F5FAFF] border border-[#A9CDEE] rounded-xl p-2 font-medium"
                         />
@@ -1848,6 +2070,12 @@ export const SchedulingPage: React.FC = () => {
                 </div>
               </div>
 
+              {/* Customer Portal */}
+              <div className="space-y-1.5 border-b border-slate-50 pb-3">
+                <span className="text-[9px] uppercase tracking-wider text-slate-400 font-extrabold block">Customer Portal</span>
+                <CustomerPortalControls customer={resolveCustomerByIdOrName(customersList, selectedEvent.customerId, selectedEvent.customer)} />
+              </div>
+
               {/* Notes */}
               {selectedEvent.notes && (
                 <div className="space-y-1 border-b border-slate-50 pb-3">
@@ -1949,6 +2177,28 @@ export const SchedulingPage: React.FC = () => {
         </div>
       )}
 
+      <CreateWorkOrderPicker isOpen={isWorkOrderPickerOpen} onClose={() => setIsWorkOrderPickerOpen(false)} />
+      <CreateMembershipPicker isOpen={isMembershipPickerOpen} onClose={() => setIsMembershipPickerOpen(false)} />
+
+      {isBulkImportOpen && (
+        <BulkImportModal<JobImportKey>
+          title="Import Schedule"
+          description="Upload a spreadsheet (CSV/TSV/Excel export, or a tabular PDF) of existing jobs/appointments. A customer name that matches an existing customer record links up automatically."
+          fields={JOB_IMPORT_FIELDS}
+          checkDuplicate={checkJobDuplicate}
+          rowLabel={row => row.customer ? `${row.customer}${row.date ? ` — ${row.date}` : ""}` : ""}
+          onConfirm={handleBulkImportJobs}
+          onClose={() => setIsBulkImportOpen(false)}
+        />
+      )}
+
+      {lastImportedEventIds.length > 0 && (
+        <div className="fixed bottom-6 left-6 bg-white border-2 border-[#9EC8EF] shadow-lg rounded-2xl px-4 py-3 flex items-center gap-3 z-50 text-xs animate-fade-in">
+          <span className="font-bold text-[#1F3557]">Imported {lastImportedEventIds.length} job(s)/event(s).</span>
+          <button onClick={undoLastJobImport} className="font-bold text-rose-600 hover:underline cursor-pointer">Undo</button>
+          <button onClick={() => setLastImportedEventIds([])} className="text-[#5E7393] hover:text-[#1F3557] cursor-pointer"><X className="w-3.5 h-3.5" /></button>
+        </div>
+      )}
     </div>
   );
 };

@@ -528,17 +528,64 @@ select option {
 .workspace-theme.theme-dark-basic :is(div, section, article, main, aside, header, footer, form)[class~="bg-slate-50"],
 .workspace-theme.theme-dark-basic :is(div, section, article, main, aside, header, footer, form)[class~="bg-slate-100"],
 .workspace-theme.theme-dark-basic :is(div, section, article, main, aside, header, footer, form)[class~="bg-gray-50"],
-.workspace-theme.theme-dark-basic :is(div, section, article, main, aside, header, footer, form)[class~="bg-gray-100"] {
+.workspace-theme.theme-dark-basic :is(div, section, article, main, aside, header, footer, form)[class~="bg-gray-100"],
+.workspace-theme.theme-dark-basic :is(div, section, article, main, aside, header, footer, form)[class~="bg-zinc-50"],
+.workspace-theme.theme-dark-basic :is(div, section, article, main, aside, header, footer, form)[class~="bg-zinc-100"],
+.workspace-theme.theme-dark-basic :is(div, section, article, main, aside, header, footer, form)[class~="bg-stone-50"],
+.workspace-theme.theme-dark-basic :is(div, section, article, main, aside, header, footer, form)[class~="bg-neutral-50"],
+.workspace-theme.theme-dark-basic :is(div, section, article, main, aside, header, footer, form)[class~="bg-red-50"],
+.workspace-theme.theme-dark-basic :is(div, section, article, main, aside, header, footer, form)[class~="bg-red-100"],
+.workspace-theme.theme-dark-basic :is(div, section, article, main, aside, header, footer, form)[class~="bg-rose-50"],
+.workspace-theme.theme-dark-basic :is(div, section, article, main, aside, header, footer, form)[class~="bg-rose-100"],
+.workspace-theme.theme-dark-basic :is(div, section, article, main, aside, header, footer, form)[class~="bg-orange-50"],
+.workspace-theme.theme-dark-basic :is(div, section, article, main, aside, header, footer, form)[class~="bg-orange-100"],
+.workspace-theme.theme-dark-basic :is(div, section, article, main, aside, header, footer, form)[class~="bg-amber-50"],
+.workspace-theme.theme-dark-basic :is(div, section, article, main, aside, header, footer, form)[class~="bg-amber-100"],
+.workspace-theme.theme-dark-basic :is(div, section, article, main, aside, header, footer, form)[class~="bg-yellow-50"],
+.workspace-theme.theme-dark-basic :is(div, section, article, main, aside, header, footer, form)[class~="bg-yellow-100"],
+.workspace-theme.theme-dark-basic :is(div, section, article, main, aside, header, footer, form)[class~="bg-lime-50"],
+.workspace-theme.theme-dark-basic :is(div, section, article, main, aside, header, footer, form)[class~="bg-lime-100"],
+.workspace-theme.theme-dark-basic :is(div, section, article, main, aside, header, footer, form)[class~="bg-green-50"],
+.workspace-theme.theme-dark-basic :is(div, section, article, main, aside, header, footer, form)[class~="bg-green-100"],
+.workspace-theme.theme-dark-basic :is(div, section, article, main, aside, header, footer, form)[class~="bg-emerald-50"],
+.workspace-theme.theme-dark-basic :is(div, section, article, main, aside, header, footer, form)[class~="bg-emerald-100"],
+.workspace-theme.theme-dark-basic :is(div, section, article, main, aside, header, footer, form)[class~="bg-teal-50"],
+.workspace-theme.theme-dark-basic :is(div, section, article, main, aside, header, footer, form)[class~="bg-teal-100"],
+.workspace-theme.theme-dark-basic :is(div, section, article, main, aside, header, footer, form)[class~="bg-cyan-50"],
+.workspace-theme.theme-dark-basic :is(div, section, article, main, aside, header, footer, form)[class~="bg-cyan-100"],
+.workspace-theme.theme-dark-basic :is(div, section, article, main, aside, header, footer, form)[class~="bg-sky-50"],
+.workspace-theme.theme-dark-basic :is(div, section, article, main, aside, header, footer, form)[class~="bg-sky-100"],
+.workspace-theme.theme-dark-basic :is(div, section, article, main, aside, header, footer, form)[class~="bg-violet-50"],
+.workspace-theme.theme-dark-basic :is(div, section, article, main, aside, header, footer, form)[class~="bg-violet-100"],
+.workspace-theme.theme-dark-basic :is(div, section, article, main, aside, header, footer, form)[class~="bg-purple-50"],
+.workspace-theme.theme-dark-basic :is(div, section, article, main, aside, header, footer, form)[class~="bg-purple-100"],
+.workspace-theme.theme-dark-basic :is(div, section, article, main, aside, header, footer, form)[class~="bg-fuchsia-50"],
+.workspace-theme.theme-dark-basic :is(div, section, article, main, aside, header, footer, form)[class~="bg-fuchsia-100"],
+.workspace-theme.theme-dark-basic :is(div, section, article, main, aside, header, footer, form)[class~="bg-pink-50"],
+.workspace-theme.theme-dark-basic :is(div, section, article, main, aside, header, footer, form)[class~="bg-pink-100"] {
   background-color: var(--dark-surface) !important;
   background-image: none !important;
 }
 
-/* Borders remain quiet and structural instead of glowing. */
+/* Borders remain quiet and structural instead of glowing. A default text
+   color goes here too: the enumerated text-color overrides below only
+   catch specific known Tailwind/hex classes, so any element using a color
+   class this list doesn't happen to name (there are many, scattered across
+   a very large file) was silently keeping its original light-theme navy
+   text -- illegible against these dark surfaces. This low-specificity
+   default (workspace-theme.theme-dark-basic + a bare descendant selector)
+   is always beaten by the more specific muted/accent/white overrides
+   below, so those distinctions are untouched. */
 .workspace-theme.theme-dark-basic,
-.workspace-theme.theme-dark-basic *,
+.workspace-theme.theme-dark-basic * {
+  border-color: var(--dark-border) !important;
+}
 .workspace-theme.theme-dark-basic ::before,
 .workspace-theme.theme-dark-basic ::after {
   border-color: var(--dark-border) !important;
+}
+.workspace-theme.theme-dark-basic *:not([class*="text-red"]):not([class*="text-rose"]):not([class*="text-green"]):not([class*="text-emerald"]):not([class*="text-amber"]):not([class*="text-yellow"]):not([class*="text-orange"]):not([class*="#00C853"]):not([class*="#FF1744"]) {
+  color: var(--dark-text) !important;
 }
 
 /* Primary and secondary typography. */
@@ -574,6 +621,42 @@ select option {
 .workspace-theme.theme-dark-basic [class~="text-blue-600"],
 .workspace-theme.theme-dark-basic [class~="text-blue-700"] {
   color: #62a0ff !important;
+}
+
+/* text-{color}-700/800/900 -- near-black shades meant for text on a light
+   card background (e.g. DispatchPage's stat tiles: text-rose-900 on
+   bg-rose-50) -- fall inside the text-red/rose/green/emerald/amber/
+   yellow/orange exclusion on the catch-all above (which exists to protect
+   the much brighter -400/-500/-600 shades used for genuine semantic
+   accents), so they were never touched and stayed illegible once their
+   card's background got darkened. Brightened here instead of narrowing
+   that exclusion, which would risk the ticker/badge colors it protects. */
+.workspace-theme.theme-dark-basic [class~="text-red-700"],
+.workspace-theme.theme-dark-basic [class~="text-red-800"],
+.workspace-theme.theme-dark-basic [class~="text-red-900"],
+.workspace-theme.theme-dark-basic [class~="text-rose-700"],
+.workspace-theme.theme-dark-basic [class~="text-rose-800"],
+.workspace-theme.theme-dark-basic [class~="text-rose-900"] {
+  color: #fca5a5 !important;
+}
+.workspace-theme.theme-dark-basic [class~="text-amber-700"],
+.workspace-theme.theme-dark-basic [class~="text-amber-800"],
+.workspace-theme.theme-dark-basic [class~="text-amber-900"],
+.workspace-theme.theme-dark-basic [class~="text-yellow-700"],
+.workspace-theme.theme-dark-basic [class~="text-yellow-800"],
+.workspace-theme.theme-dark-basic [class~="text-yellow-900"],
+.workspace-theme.theme-dark-basic [class~="text-orange-700"],
+.workspace-theme.theme-dark-basic [class~="text-orange-800"],
+.workspace-theme.theme-dark-basic [class~="text-orange-900"] {
+  color: #fcd34d !important;
+}
+.workspace-theme.theme-dark-basic [class~="text-green-700"],
+.workspace-theme.theme-dark-basic [class~="text-green-800"],
+.workspace-theme.theme-dark-basic [class~="text-green-900"],
+.workspace-theme.theme-dark-basic [class~="text-emerald-700"],
+.workspace-theme.theme-dark-basic [class~="text-emerald-800"],
+.workspace-theme.theme-dark-basic [class~="text-emerald-900"] {
+  color: #6ee7b7 !important;
 }
 
 /* Fields, filters, menus, and table rows. */
@@ -655,6 +738,67 @@ select option {
   color: #ffffff !important;
 }
 
+/* Left sidebar nav buttons. The generic button rule above deliberately
+   flattens every button (background-image: none, box-shadow: none) for a
+   plain/quiet default -- but that also killed the active item's blue
+   gradient and glow, and left every nav button looking like a flat gray
+   rectangle instead of fitting the dark theme. Higher specificity than
+   the generic button rule (three classes vs. two-plus-element), so this
+   wins regardless of source order. */
+.workspace-theme.theme-dark-basic .sidebar-nav-btn {
+  background-image: linear-gradient(180deg, rgba(32, 111, 255, .16), rgba(9, 24, 39, .4)) !important;
+  border-color: rgba(56, 145, 255, .32) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(140, 190, 255, .12),
+    inset 0 -1px 0 rgba(0, 0, 0, .35),
+    0 2px 6px rgba(0, 0, 0, .35) !important;
+}
+.workspace-theme.theme-dark-basic .sidebar-nav-btn:hover {
+  background-image: linear-gradient(180deg, rgba(46, 130, 255, .28), rgba(9, 24, 39, .5)) !important;
+  border-color: rgba(74, 163, 255, .55) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(160, 205, 255, .16),
+    inset 0 -1px 0 rgba(0, 0, 0, .35),
+    0 0 14px rgba(20, 93, 255, .3) !important;
+}
+.workspace-theme.theme-dark-basic .sidebar-nav-btn.sidebar-nav-btn-active {
+  background-image: linear-gradient(180deg, #3688ff, #145dff) !important;
+  border-color: #5cb3ff !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, .4),
+    inset 0 -2px 4px rgba(0, 10, 40, .3),
+    0 0 18px rgba(20, 93, 255, .55),
+    0 4px 10px rgba(0, 0, 0, .4) !important;
+}
+
+/* Same treatment for Dark Mode Dynamic -- the generic button rule there
+   doesn't flatten shadows the way dark-basic's does, but it also never
+   gave sidebar buttons any glass/glow treatment at all, just a flat
+   surface color. */
+.workspace-theme.theme-dark-dynamic .sidebar-nav-btn {
+  background-color: transparent !important;
+  background-image: linear-gradient(180deg, rgba(32, 145, 255, .14), rgba(4, 13, 28, .2)) !important;
+  border-color: rgba(56, 145, 255, .3) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(140, 210, 255, .1),
+    0 2px 6px rgba(0, 0, 0, .3) !important;
+}
+.workspace-theme.theme-dark-dynamic .sidebar-nav-btn:hover {
+  background-image: linear-gradient(180deg, rgba(46, 165, 255, .26), rgba(4, 13, 28, .3)) !important;
+  border-color: var(--dynamic-cyan) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(160, 220, 255, .16),
+    0 0 16px rgba(24, 200, 255, .3) !important;
+}
+.workspace-theme.theme-dark-dynamic .sidebar-nav-btn.sidebar-nav-btn-active {
+  background-image: linear-gradient(180deg, #168dff 0%, #123cff 62%, #075cff 100%) !important;
+  border-color: #20c9ff !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, .35),
+    0 0 10px rgba(0, 193, 255, .52),
+    0 0 24px rgba(20, 93, 255, .34) !important;
+}
+
 /* Selected navigation, hovers, charts, and overlays. */
 .workspace-theme.theme-dark-basic [class~="bg-[#A9CEF5]"]:not(button),
 .workspace-theme.theme-dark-basic .custom-dropdown-item-active {
@@ -672,6 +816,39 @@ select option {
   background-color: var(--dark-surface-raised) !important;
   border-color: var(--dark-border-strong) !important;
   color: var(--dark-text) !important;
+}
+
+/* Money Tracker (Revenue page) card. Its own background/border classes are
+   one-off arbitrary values (bg-[linear-gradient(...)], text-[#07599a],
+   border-white/95, etc.), not the semantic Tailwind classes the generic
+   overrides above match -- so this card kept its light "frosted glass"
+   look regardless of theme, sitting as a jarring light tile in an
+   otherwise dark workspace. Recolored to the approved dark reference. */
+.workspace-theme.theme-dark-basic .mt-card {
+  background-image: none !important;
+  background-color: var(--dark-surface) !important;
+  border-color: var(--dark-border-strong) !important;
+  box-shadow: 0 0 24px rgba(20, 93, 255, .22), inset 0 0 20px rgba(20, 93, 255, .06) !important;
+}
+.workspace-theme.theme-dark-basic .mt-card [class*="rgba(220,240,255"],
+.workspace-theme.theme-dark-basic .mt-card [class*="rgba(224,242,255"],
+.workspace-theme.theme-dark-basic .mt-card [class*="rgba(225,243,255"],
+.workspace-theme.theme-dark-basic .mt-card [class~="bg-white"],
+.workspace-theme.theme-dark-basic .mt-card [class~="bg-white/40"],
+.workspace-theme.theme-dark-basic .mt-card [class~="bg-white/45"],
+.workspace-theme.theme-dark-basic .mt-card [class~="bg-white/70"],
+.workspace-theme.theme-dark-basic .mt-card [class*="bg-[#C7E3FA]"],
+.workspace-theme.theme-dark-basic .mt-card [class*="bg-[#c7e3fa]"],
+.workspace-theme.theme-dark-basic .mt-card [class*="bg-[#EAF5FF]"],
+.workspace-theme.theme-dark-basic .mt-card [class*="bg-[#cce8fb]"],
+.workspace-theme.theme-dark-basic .mt-card [class*="bg-[#dff4ff]"],
+.workspace-theme.theme-dark-basic .mt-card [class*="bg-[#e2f3ff]"],
+.workspace-theme.theme-dark-basic .mt-card [class*="bg-[#e8f6ff]"] {
+  background-image: none !important;
+  background-color: var(--dark-surface-raised) !important;
+}
+.workspace-theme.theme-dark-basic .mt-card [class*="border-white"] {
+  border-color: var(--dark-border-strong) !important;
 }
 
 /* Light Mode Basic login page background. `background-attachment: fixed`
@@ -790,9 +967,21 @@ select option {
   --dynamic-border-soft: rgba(56, 145, 255, .55);
   --dynamic-cyan: #18c8ff;
   --dynamic-blue: #145dff;
+  --dynamic-text: #eaf6ff;
   background-color: #010713 !important;
   background-repeat: no-repeat !important;
   background-attachment: fixed !important;
+}
+
+/* Same reasoning as theme-dark-basic's equivalent rule: only two specific
+   navy classes were ever remapped below, so any other color class (there
+   are many, scattered across a very large file) kept its original
+   light-theme text color -- illegible against these forced-dark glass
+   surfaces. Low specificity, so the more specific accent/muted/white
+   overrides below still win. */
+.workspace-theme.theme-dark-dynamic:not([class*="text-red"]):not([class*="text-rose"]):not([class*="text-green"]):not([class*="text-emerald"]):not([class*="text-amber"]):not([class*="text-yellow"]):not([class*="text-orange"]):not([class*="#00C853"]):not([class*="#FF1744"]),
+.workspace-theme.theme-dark-dynamic *:not([class*="text-red"]):not([class*="text-rose"]):not([class*="text-green"]):not([class*="text-emerald"]):not([class*="text-amber"]):not([class*="text-yellow"]):not([class*="text-orange"]):not([class*="#00C853"]):not([class*="#FF1744"]) {
+  color: var(--dynamic-text) !important;
 }
 
 /* Main shell and navigation -- the menu is a glass tile over the starscape
@@ -910,6 +1099,77 @@ select option {
 .workspace-theme.theme-dark-dynamic [class~="text-[#5E7393]"] {
   color: rgba(205, 226, 255, .72) !important;
 }
+/* Same reasoning as theme-dark-basic's equivalent rule: text-{color}-700/
+   800/900 (near-black, meant for text on a light card background) falls
+   inside the catch-all's semantic-color exclusion and was never
+   otherwise touched. */
+.workspace-theme.theme-dark-dynamic [class~="text-red-700"],
+.workspace-theme.theme-dark-dynamic [class~="text-red-800"],
+.workspace-theme.theme-dark-dynamic [class~="text-red-900"],
+.workspace-theme.theme-dark-dynamic [class~="text-rose-700"],
+.workspace-theme.theme-dark-dynamic [class~="text-rose-800"],
+.workspace-theme.theme-dark-dynamic [class~="text-rose-900"] {
+  color: #fca5a5 !important;
+}
+.workspace-theme.theme-dark-dynamic [class~="text-amber-700"],
+.workspace-theme.theme-dark-dynamic [class~="text-amber-800"],
+.workspace-theme.theme-dark-dynamic [class~="text-amber-900"],
+.workspace-theme.theme-dark-dynamic [class~="text-yellow-700"],
+.workspace-theme.theme-dark-dynamic [class~="text-yellow-800"],
+.workspace-theme.theme-dark-dynamic [class~="text-yellow-900"],
+.workspace-theme.theme-dark-dynamic [class~="text-orange-700"],
+.workspace-theme.theme-dark-dynamic [class~="text-orange-800"],
+.workspace-theme.theme-dark-dynamic [class~="text-orange-900"] {
+  color: #fcd34d !important;
+}
+.workspace-theme.theme-dark-dynamic [class~="text-green-700"],
+.workspace-theme.theme-dark-dynamic [class~="text-green-800"],
+.workspace-theme.theme-dark-dynamic [class~="text-green-900"],
+.workspace-theme.theme-dark-dynamic [class~="text-emerald-700"],
+.workspace-theme.theme-dark-dynamic [class~="text-emerald-800"],
+.workspace-theme.theme-dark-dynamic [class~="text-emerald-900"] {
+  color: #6ee7b7 !important;
+}
 .workspace-theme.theme-dark-dynamic svg:not([class*="text-green"]):not([class*="text-emerald"]):not([class*="text-red"]):not([class*="text-rose"]):not([class*="text-yellow"]):not([class*="text-amber"]) {
   filter: drop-shadow(0 0 5px rgba(32, 145, 255, .18));
+}
+
+/* Money Tracker (Revenue page) card -- same reasoning as theme-dark-basic's
+   equivalent rule: this card's own one-off arbitrary background/border
+   classes aren't matched by anything above, so it stayed a light card
+   regardless of theme. Matched to the approved dark-dynamic reference:
+   translucent navy glass with a glowing blue edge, same as every other
+   card in this theme. */
+.workspace-theme.theme-dark-dynamic .mt-card {
+  background-image: none !important;
+  background-color: var(--dynamic-surface) !important;
+  border-color: var(--dynamic-border) !important;
+  border-width: 1.5px !important;
+  box-shadow:
+    inset 0 1px 0 rgba(140, 210, 255, .12),
+    0 0 0 1px rgba(24, 200, 255, .1),
+    0 0 22px rgba(20, 93, 255, .22),
+    0 8px 28px rgba(0, 10, 30, .5) !important;
+  -webkit-backdrop-filter: blur(16px) saturate(130%);
+  backdrop-filter: blur(16px) saturate(130%);
+}
+.workspace-theme.theme-dark-dynamic .mt-card [class*="rgba(220,240,255"],
+.workspace-theme.theme-dark-dynamic .mt-card [class*="rgba(224,242,255"],
+.workspace-theme.theme-dark-dynamic .mt-card [class*="rgba(225,243,255"],
+.workspace-theme.theme-dark-dynamic .mt-card [class~="bg-white"],
+.workspace-theme.theme-dark-dynamic .mt-card [class~="bg-white/40"],
+.workspace-theme.theme-dark-dynamic .mt-card [class~="bg-white/45"],
+.workspace-theme.theme-dark-dynamic .mt-card [class~="bg-white/70"],
+.workspace-theme.theme-dark-dynamic .mt-card [class*="bg-[#C7E3FA]"],
+.workspace-theme.theme-dark-dynamic .mt-card [class*="bg-[#c7e3fa]"],
+.workspace-theme.theme-dark-dynamic .mt-card [class*="bg-[#EAF5FF]"],
+.workspace-theme.theme-dark-dynamic .mt-card [class*="bg-[#cce8fb]"],
+.workspace-theme.theme-dark-dynamic .mt-card [class*="bg-[#dff4ff]"],
+.workspace-theme.theme-dark-dynamic .mt-card [class*="bg-[#e2f3ff]"],
+.workspace-theme.theme-dark-dynamic .mt-card [class*="bg-[#e8f6ff]"] {
+  background-image: none !important;
+  background-color: var(--dynamic-surface-raised) !important;
+}
+.workspace-theme.theme-dark-dynamic .mt-card [class*="border-white"] {
+  border-color: var(--dynamic-border-soft) !important;
 }

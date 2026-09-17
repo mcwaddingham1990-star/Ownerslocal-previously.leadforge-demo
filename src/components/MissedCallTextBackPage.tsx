@@ -1,9 +1,12 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { doc, onSnapshot, setDoc } from "firebase/firestore";
 import { db } from "../firebase";
 import { useAuth } from "../context/AuthContext";
 import { useNavTelemetry } from "../context/NavTelemetryContext";
-import { PhoneMissed, Smartphone, Info } from "lucide-react";
+import { useDomainData } from "../context/DomainDataContext";
+import { useFirestoreCollection } from "../hooks/useFirestoreCollection";
+import type { MissedCallEvent } from "../types/domain";
+import { PhoneMissed, PhoneIncoming, PhoneOutgoing, Smartphone, Info, MessageCircle, UserPlus } from "lucide-react";
 
 const DEFAULT_MESSAGE = "Sorry we missed your call! We'll get back to you shortly.";
 
@@ -22,8 +25,30 @@ const KNOWN_APPS: { label: string; packageName: string }[] = [
 export const MissedCallTextBackPage: React.FC = () => {
   const { loggedInUser, simulatedRole, businessId } = useAuth();
   const { triggerNotification } = useNavTelemetry();
+  const { customers, leads } = useDomainData();
   const activeRole = simulatedRole || loggedInUser?.role || "Owner";
   const isAuthorized = activeRole === "Owner" || activeRole === "Office Manager" || activeRole === "Manager" || activeRole === "General Manager";
+
+  // Read-only: the companion Android app writes here directly (see
+  // CrmLinker.kt) whether or not the browser is even open -- this page just
+  // displays that real log, it never writes to this collection itself.
+  const [callEvents] = useFirestoreCollection<MissedCallEvent>("missed_call_events", businessId);
+  const sortedCallEvents = useMemo(
+    () => [...callEvents].sort((a, b) => b.callTimestamp.localeCompare(a.callTimestamp)),
+    [callEvents]
+  );
+  const matchLabel = (event: MissedCallEvent): string => {
+    if (event.customerId) {
+      const match = customers.find((c) => c.id === event.customerId);
+      return match ? `Customer: ${match.contact || match.company}` : "Matched customer";
+    }
+    if (event.leadId) {
+      const match = leads.find((l) => l.id === event.leadId);
+      const name = match ? match.name : "";
+      return event.createdNewLead ? `New lead created${name ? `: ${name}` : ""}` : `Lead: ${name || "matched"}`;
+    }
+    return "No match found";
+  };
 
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
@@ -134,11 +159,13 @@ export const MissedCallTextBackPage: React.FC = () => {
       <div className="bg-[#E3F3FF] p-4 rounded-2xl border border-[#A9CDEE] flex items-start gap-2.5">
         <Info className="h-4 w-4 text-[#315C9F] mt-0.5 flex-shrink-0" />
         <p className="text-[11px] text-slate-600 font-sans leading-relaxed">
-          This page only stores settings. Actually detecting a missed call and sending the text
-          happens on your phone, in the separate <strong>Missed Call Text-Back</strong> Android
-          app installed there — it reads these settings when you sign in with this same account
-          and tap "Sync Now" (or automatically each time you open it). Nothing here works without
-          that app installed and its phone/SMS permissions granted.
+          Detecting a missed call and sending the text happens on your phone, in the separate{" "}
+          <strong>Missed Call Text-Back</strong> Android app installed there — it reads these
+          settings when you sign in with this same account (and keeps working in the background
+          even after you close the app or lock the phone). Nothing here works without that app
+          installed and its phone/SMS permissions granted. Every call it sees and every auto-reply
+          it sends is logged in real time to the Call Log below and to that customer's Call &amp;
+          Text History on their Customer Card.
         </p>
       </div>
 
@@ -214,6 +241,47 @@ export const MissedCallTextBackPage: React.FC = () => {
             placeholder="e.g. com.example.callingapp"
             className="w-full px-3 py-1.5 bg-white border border-[#A9CDEE] rounded-lg text-xs font-mono disabled:opacity-60"
           />
+        </div>
+      </div>
+
+      <div className="bg-[#E3F3FF] p-4.5 rounded-2xl border border-[#A9CDEE] space-y-3">
+        <div className="flex items-center gap-2">
+          <MessageCircle className="h-4 w-4 text-[#315C9F]" />
+          <h3 className="text-xs font-extrabold text-[#342D7E] uppercase tracking-wider">
+            Call Log ({sortedCallEvents.length})
+          </h3>
+        </div>
+        <p className="text-[11px] text-slate-500 font-sans leading-relaxed">
+          Every call the companion app has seen for this business, newest first — missed calls it
+          auto-texted back, and answered incoming/outgoing calls it logged for the record.
+        </p>
+        <div className="bg-white rounded-xl border border-[#A9CDEE] divide-y divide-[#A9CDEE]/60 max-h-96 overflow-y-auto">
+          {sortedCallEvents.length === 0 ? (
+            <p className="text-[11px] text-slate-500 font-sans p-3">
+              No calls logged yet. This fills in automatically once the Android app is installed, signed in, and granted its phone/SMS/call-log permissions.
+            </p>
+          ) : (
+            sortedCallEvents.map((event) => (
+              <div key={event.id} className="p-2.5 flex items-start gap-2.5 text-xs font-sans">
+                {event.direction === "missed" && <PhoneMissed className="w-3.5 h-3.5 text-rose-600 shrink-0 mt-0.5" />}
+                {event.direction === "incoming" && <PhoneIncoming className="w-3.5 h-3.5 text-emerald-600 shrink-0 mt-0.5" />}
+                {event.direction === "outgoing" && <PhoneOutgoing className="w-3.5 h-3.5 text-[#315C9F] shrink-0 mt-0.5" />}
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-bold text-slate-800 font-mono">{event.phoneNumber}</span>
+                    <span className="text-[9px] font-semibold text-slate-400 shrink-0">{event.callTimestamp}</span>
+                  </div>
+                  <div className="flex items-center gap-1 text-[10px] text-slate-500 mt-0.5">
+                    {event.createdNewLead && <UserPlus className="w-3 h-3 text-amber-600 shrink-0" />}
+                    {matchLabel(event)}
+                  </div>
+                  {event.autoReplySent && event.autoReplyMessage && (
+                    <p className="text-[10px] text-slate-500 italic mt-1">Texted back: "{event.autoReplyMessage}"</p>
+                  )}
+                </div>
+              </div>
+            ))
+          )}
         </div>
       </div>
 

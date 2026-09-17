@@ -1,6 +1,10 @@
 import { createContext, useContext, Dispatch, SetStateAction } from "react";
-import { Customer, Lead, Estimate, InventoryItem, DocumentItem, SchedulingEvent, RevenueEvent, EmployeeRecord, TimeClockLog, Transaction } from "../types/domain";
+import { Customer, Lead, Estimate, InventoryItem, DocumentItem, SchedulingEvent, RevenueEvent, EmployeeRecord, TimeClockLog, Transaction, WorkOrder } from "../types/domain";
 import { Account, JournalEntry, Invoice, Bill, Vendor, BankAccount, RecurringTransaction, MileageLog, Budget, SalesTaxRate } from "../types/accounting";
+import { PriceBookFolder, PriceBookModel } from "../types/priceBook";
+import { Membership } from "../types/membership";
+import { PurchaseOrder } from "../types/purchaseOrder";
+import { ReviewRequest, ReviewAutomationSettings } from "../types/reviewRequest";
 import type { GeneratedPdfDraft, EstimatePrefill } from "../types/generatedPdf";
 
 export interface RosterEntry {
@@ -20,6 +24,27 @@ export interface DomainDataContextValue {
   setEstimates: Dispatch<SetStateAction<Estimate[]>>;
   schedulingEvents: SchedulingEvent[];
   setSchedulingEvents: Dispatch<SetStateAction<SchedulingEvent[]>>;
+  workOrders: WorkOrder[];
+  setWorkOrders: Dispatch<SetStateAction<WorkOrder[]>>;
+  priceBookFolders: PriceBookFolder[];
+  setPriceBookFolders: Dispatch<SetStateAction<PriceBookFolder[]>>;
+  priceBookModels: PriceBookModel[];
+  setPriceBookModels: Dispatch<SetStateAction<PriceBookModel[]>>;
+  /** Queued "open the PDF Editor's blank canvas, filed into this Documents
+   * folder" request -- set from any page (e.g. Create Work Order's "Create
+   * Blank Work Order Document" choice), consumed by DocumentsPage on
+   * mount/update since that's the only place the PDF Editor is rendered. */
+  pendingCreateTemplateFolder: string | null;
+  setPendingCreateTemplateFolder: Dispatch<SetStateAction<string | null>>;
+  memberships: Membership[];
+  setMemberships: Dispatch<SetStateAction<Membership[]>>;
+  purchaseOrders: PurchaseOrder[];
+  setPurchaseOrders: Dispatch<SetStateAction<PurchaseOrder[]>>;
+  reviewRequests: ReviewRequest[];
+  setReviewRequests: Dispatch<SetStateAction<ReviewRequest[]>>;
+  /** Business-wide Automated Review Request settings -- persisted on the business profile the same way globalAiSetting/aiKnowledgeBase are. */
+  reviewAutomationSettings: ReviewAutomationSettings;
+  setReviewAutomationSettings: Dispatch<SetStateAction<ReviewAutomationSettings>>;
   inventoryList: InventoryItem[];
   setInventoryList: Dispatch<SetStateAction<InventoryItem[]>>;
   documents: DocumentItem[];
@@ -46,6 +71,8 @@ export interface DomainDataContextValue {
   setTimeClockLogs: Dispatch<SetStateAction<TimeClockLog[]>>;
   /** Forces a fresh server read of time clock logs — recovers a view stuck on stale data if the realtime listener died (Firestore listeners don't auto-retry after a permission/unavailable error). */
   refreshTimeClockLogs: () => Promise<void>;
+  /** 0 (Sunday) - 6 (Saturday): the business's configured start-of-workweek day (Settings > Payroll), the same value real payroll runs use to bucket hours into FLSA workweeks for overtime. Job costing uses this too, so its overtime math lines up with actual payroll instead of assuming Sunday. */
+  payrollWorkweekStart: number;
   transactions: Transaction[];
   setTransactions: Dispatch<SetStateAction<Transaction[]>>;
   /** Atomically persists a transaction and its balanced journal entry. */

@@ -1,5 +1,6 @@
 import type { Dispatch, SetStateAction } from "react";
 import type { AppNotification, EmployeeRecord, TimeClockLog } from "../types/domain";
+import { authedFetch } from "./apiClient";
 
 /**
  * Owner/Manager-role heuristic, matching the same check TimeClockPage's
@@ -186,7 +187,7 @@ export function resolveTimeClockApproval(params: {
  */
 export async function sendPushBestEffort(recipientEmails: string[], title: string, body: string, data?: Record<string, string>): Promise<void> {
   try {
-    await fetch("/api/notifications/send-push", {
+    await authedFetch("/api/notifications/send-push", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ recipientEmails, title, body, data }),

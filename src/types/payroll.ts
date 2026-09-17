@@ -61,7 +61,7 @@ export interface PayrollRun {
   approvedAt?: string;
   approvedBy?: string;
   submittedAt?: string;
-  provider?: "plaid" | "stripe" | "bank_ach" | "manual";
+  provider?: "stripe" | "bank_ach" | "manual";
   providerBatchId?: string;
   failureReason?: string;
   auditLog: Array<{ at: string; by: string; action: string; detail?: string }>;

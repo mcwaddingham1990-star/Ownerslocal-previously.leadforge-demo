@@ -32,7 +32,11 @@ export function useDomainActions() {
       status: "Active",
       type: "Residential",
       isVIP: false,
-      recentlyAdded: true
+      recentlyAdded: true,
+      // Marketing attribution -- carries the real Lead source through into
+      // the Customer record so it survives past this conversion.
+      source: lead.source,
+      sourceLeadId: lead.id
     };
 
     setCustomers(prev => [newCustomer, ...prev]);
@@ -59,7 +63,9 @@ export function useDomainActions() {
       phone: lead.phone || undefined,
       address: lead.address || undefined,
       createdDate: formatEstimateDate(new Date()),
-      expirationDate: estimateExpirationDate()
+      expirationDate: estimateExpirationDate(),
+      source: lead.source,
+      sourceLeadId: lead.id
     };
 
     setEstimates(prev => [newEstimate, ...prev]);
@@ -118,6 +124,8 @@ export function useDomainActions() {
       description: `Approved scope from estimate ${estimate.number}`,
       budget: estimate.amount,
       progress: 0,
+      source: estimate.source ?? matchedCustomer?.source,
+      sourceLeadId: estimate.sourceLeadId ?? matchedCustomer?.sourceLeadId,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       activity: [{
@@ -139,15 +147,21 @@ export function useDomainActions() {
       c => c.contact === estimate.customerName || c.company === estimate.company
     );
     if (existingCustomer) {
-      if (existingCustomer.status === "Potential") {
+      const needsActivation = existingCustomer.status === "Potential";
+      // Backfill attribution onto a customer record that predates this
+      // estimate's source (e.g. created via a bare "Potential" upsert
+      // before a Lead was ever linked) so later Estimates/Jobs for the
+      // same customer still resolve a real source instead of "Other".
+      const needsSourceBackfill = !existingCustomer.source && estimate.source;
+      if (needsActivation || needsSourceBackfill) {
         setCustomers(prev =>
           prev.map(c =>
             c.id === existingCustomer.id
-              ? { ...c, status: "Active" }
+              ? { ...c, ...(needsActivation ? { status: "Active" as const } : {}), ...(needsSourceBackfill ? { source: estimate.source, sourceLeadId: estimate.sourceLeadId } : {}) }
               : c
           )
         );
-        logOperationalEvent("Customer Activated", `${estimate.customerName} moved from Potential → Active`, "🤝", { screen: "customers", customerId: existingCustomer.id });
+        if (needsActivation) logOperationalEvent("Customer Activated", `${estimate.customerName} moved from Potential → Active`, "🤝", { screen: "customers", customerId: existingCustomer.id });
       }
     } else {
       // No CRM record at all — create an Active customer from estimate data.
@@ -164,7 +178,9 @@ export function useDomainActions() {
         status: "Active",
         type: "Residential",
         isVIP: false,
-        recentlyAdded: true
+        recentlyAdded: true,
+        source: estimate.source || "Manual Entry",
+        sourceLeadId: estimate.sourceLeadId
       };
       setCustomers(prev => [newCustomer, ...prev]);
       logOperationalEvent("Customer Created", `${estimate.customerName} added as Active customer from accepted estimate`, "🤝", { screen: "customers", customerId: newCustomer.id });
@@ -180,7 +196,7 @@ export function useDomainActions() {
    * the CRM immediately. If a matching customer already exists (by name or
    * company) nothing is written — the existing record wins.
    */
-  const upsertPotentialCustomer = (customerName: string, company?: string, phone?: string, address?: string) => {
+  const upsertPotentialCustomer = (customerName: string, company?: string, phone?: string, address?: string, source?: Customer["source"], sourceLeadId?: string) => {
     const trimmedName = customerName.trim();
     if (!trimmedName) return;
     const alreadyExists = customers.some(
@@ -201,7 +217,12 @@ export function useDomainActions() {
       status: "Potential",
       type: "Residential",
       isVIP: false,
-      recentlyAdded: true
+      recentlyAdded: true,
+      // No Lead means this customer was typed in directly -- "Manual Entry"
+      // is the honest attribution unless the caller already knows better
+      // (e.g. an estimate that itself carries a real Lead source).
+      source: source || "Manual Entry",
+      sourceLeadId
     };
 
     setCustomers(prev => [newCustomer, ...prev]);

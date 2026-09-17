@@ -41,7 +41,13 @@ import { buildEstimatePdf, bytesToBase64 } from "../lib/pdfExport";
 import { MAX_INLINE_BASE64_LENGTH } from "../lib/firestoreDocumentLimits";
 import SendChoiceModal from "./SendChoiceModal";
 import { downloadCsv, parseCsv } from "../lib/csv";
-import type { DocumentItem } from "../types/domain";
+import type { DocumentItem, WorkOrder } from "../types/domain";
+import { WorkOrderBuilder } from "./WorkOrderBuilder";
+import { CreateMembershipPicker } from "./CreateMembershipPicker";
+import type { Membership } from "../types/membership";
+import { CustomerPortalControls } from "./CustomerPortalControls";
+import { resolveCustomerByIdOrName } from "../lib/resolveCustomer";
+import { PriceBookModal } from "./PriceBookModal";
 
 export type { Estimate } from "../types/domain";
 import type { Estimate } from "../types/domain";
@@ -84,6 +90,12 @@ export const EstimatesPage: React.FC = () => {
   const [isSendOpen, setIsSendOpen] = useState(false);
   const [sendMatch, setSendMatch] = useState<{ email?: string; phone?: string } | null>(null);
   const [conversionComplete, setConversionComplete] = useState(false);
+  const [lastConvertedJobId, setLastConvertedJobId] = useState<string | null>(null);
+  const [isWorkOrderBuilderOpen, setIsWorkOrderBuilderOpen] = useState(false);
+  const [workOrderPrefill, setWorkOrderPrefill] = useState<Partial<WorkOrder> | undefined>(undefined);
+  const [isMembershipPickerOpen, setIsMembershipPickerOpen] = useState(false);
+  const [membershipPrefillBase, setMembershipPrefillBase] = useState<Partial<Membership> | undefined>(undefined);
+  const [isPriceBookOpen, setIsPriceBookOpen] = useState(false);
   const [jobDate, setJobDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [jobStartTime, setJobStartTime] = useState("09:00");
   const [jobEndTime, setJobEndTime] = useState("12:00");
@@ -249,6 +261,14 @@ export const EstimatesPage: React.FC = () => {
 
   const handleAddEstimate = (action: "save" | "pdf" | "signatures" | "convert" = "save") => {
     if (!formCustomerName.trim()) return;
+    // Inherit the real source from an existing customer record when one
+    // already matches (so a repeat customer's estimates keep rolling up
+    // under their original Lead source); a brand-new name typed straight
+    // into this form has no Lead behind it at all, so "Manual Entry" is
+    // the honest attribution rather than leaving it blank.
+    const matchedCustomer = customers.find(c => c.contact === formCustomerName.trim() || c.company === (formCompany.trim() || formCustomerName.trim() + " Inc"));
+    const source = matchedCustomer?.source || "Manual Entry";
+    const sourceLeadId = matchedCustomer?.sourceLeadId;
     const newEst: Estimate = {
       id: "est_" + Math.random().toString(36).substring(2, 9),
       number: generateEstimateNumber(),
@@ -262,7 +282,9 @@ export const EstimatesPage: React.FC = () => {
       address: formAddress.trim() || undefined,
       phone: formPhone.trim() || undefined,
       createdDate: formatEstimateDate(new Date()),
-      expirationDate: estimateExpirationDate()
+      expirationDate: estimateExpirationDate(),
+      source,
+      sourceLeadId
     };
 
     if (setEstimates) {
@@ -277,7 +299,7 @@ export const EstimatesPage: React.FC = () => {
     // customerPhone/customerAddress empty on that job no matter what.
     // When the estimate is accepted the status upgrades to "Active"
     // automatically via approveEstimateToJob.
-    upsertPotentialCustomer(newEst.customerName, newEst.company, newEst.phone, newEst.address);
+    upsertPotentialCustomer(newEst.customerName, newEst.company, newEst.phone, newEst.address, source, sourceLeadId);
     if (logOperationalEvent) {
       logOperationalEvent("Estimate Created", `${newEst.number} for ${newEst.customerName}`, "📝");
     }
@@ -345,7 +367,7 @@ export const EstimatesPage: React.FC = () => {
 
   const handleApproveEstimate = () => {
     if (!selectedEstimate) return;
-    approveEstimateToJob(selectedEstimate.id, {
+    const job = approveEstimateToJob(selectedEstimate.id, {
       date: jobDate,
       startTime: jobStartTime,
       endTime: jobEndTime,
@@ -354,6 +376,7 @@ export const EstimatesPage: React.FC = () => {
       priority: jobPriority,
       notes: jobNotes
     });
+    setLastConvertedJobId(job?.id || null);
     setSelectedEstimate({ ...selectedEstimate, status: "Accepted" });
     setConversionComplete(true);
   };
@@ -486,6 +509,12 @@ export const EstimatesPage: React.FC = () => {
             >
               <Plus className="w-3.5 h-3.5" />
               New Estimate
+            </button>
+            <button
+              onClick={() => setIsPriceBookOpen(true)}
+              className="px-4 py-2 bg-[#EAF5FF] hover:bg-[#BDDDF8] border border-[#9EC8EF] text-[#1F3557] font-bold rounded-xl text-xs uppercase tracking-wider transition-colors cursor-pointer flex items-center gap-1.5"
+            >
+              💲 Price Book
             </button>
             <button
               onClick={() => importInputRef.current?.click()}
@@ -1346,6 +1375,18 @@ export const EstimatesPage: React.FC = () => {
                     </div>
                   </div>
 
+                  {!!selectedEstimate.lineItems?.length && (
+                    <div className="space-y-1.5">
+                      <p className="text-[10px] uppercase font-bold text-[#5E7393]">Line Items</p>
+                      {selectedEstimate.lineItems.map(li => (
+                        <div key={li.id} className="flex justify-between rounded-lg bg-[#EAF5FF]/50 border border-[#9EC8EF]/30 p-2 text-xs">
+                          <span>{li.quantity} × {li.description}</span>
+                          <b>${(li.quantity * li.unitPrice).toLocaleString()}</b>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
                   <div className="space-y-1">
                     <p className="text-[10px] uppercase font-bold text-[#5E7393]">Scope notes / exclusions</p>
                     <p className="text-xs bg-[#EAF5FF]/40 border border-[#9EC8EF]/30 p-3 rounded-xl font-medium text-[#1F3557] min-h-[60px]">
@@ -1442,7 +1483,52 @@ export const EstimatesPage: React.FC = () => {
                 {!isEditMode && selectedEstimate && !schedulingEvents.some(event => event.sourceEstimateId === selectedEstimate.id) && (
                   <button type="button" onClick={openConversion} className="px-4 py-2 bg-[#BDDDF8] hover:bg-[#A1CEF4] text-[#1F3557] font-bold rounded-xl text-xs uppercase tracking-wider">Convert to Job</button>
                 )}
+                {!isEditMode && selectedEstimate && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const linkedJob = schedulingEvents.find(event => event.sourceEstimateId === selectedEstimate.id);
+                      setWorkOrderPrefill({
+                        sourceEstimateId: selectedEstimate.id,
+                        sourceJobId: linkedJob?.id,
+                        customerName: selectedEstimate.customerName,
+                        address: selectedEstimate.address,
+                        customerPhone: selectedEstimate.phone,
+                        jobDescription: selectedEstimate.projectSpecifics || selectedEstimate.notes || `${selectedEstimate.company || selectedEstimate.customerName} project`,
+                        estimatedValue: selectedEstimate.amount,
+                        date: new Date().toISOString().slice(0, 10)
+                      });
+                      setIsWorkOrderBuilderOpen(true);
+                    }}
+                    className="px-4 py-2 bg-white border border-[#9EC8EF] text-[#315C9F] font-bold rounded-xl text-xs uppercase tracking-wider"
+                  >
+                    🧰 Create Work Order
+                  </button>
+                )}
+                {!isEditMode && selectedEstimate && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMembershipPrefillBase({
+                        sourceEstimateId: selectedEstimate.id,
+                        customerName: selectedEstimate.customerName,
+                        address: selectedEstimate.address,
+                        customerPhone: selectedEstimate.phone
+                      });
+                      setIsMembershipPickerOpen(true);
+                    }}
+                    className="px-4 py-2 bg-white border border-[#9EC8EF] text-[#315C9F] font-bold rounded-xl text-xs uppercase tracking-wider"
+                  >
+                    📜 Add Membership
+                  </button>
+                )}
               </div>
+              {!isEditMode && selectedEstimate && (
+                <div className="mt-3 border-t border-[#9EC8EF] pt-3">
+                  <p className="mb-2 text-[9px] font-bold uppercase tracking-wider text-[#5E7393]">Customer Portal</p>
+                  <CustomerPortalControls customer={resolveCustomerByIdOrName(customers, selectedEstimate.customerId, selectedEstimate.customerName)} />
+                </div>
+              )}
             </div>
           </div>
         </div>
@@ -1465,7 +1551,31 @@ export const EstimatesPage: React.FC = () => {
                 <span className="mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-emerald-100"><CheckCircle className="h-8 w-8 text-emerald-600" /></span>
                 <h4 className="mt-4 text-lg font-black text-[#1F3557]">Job scheduled successfully</h4>
                 <p className="mt-2 text-sm text-[#5E7393]">The accepted estimate is now linked to a job and visible in Jobs, Scheduling, and Dispatch.</p>
-                <div className="mt-5 grid grid-cols-2 gap-2">
+                <div className="mt-5 rounded-xl border border-blue-200 bg-blue-50 p-4">
+                  <p className="text-xs font-black uppercase text-[#1F3557]">Create Work Order?</p>
+                  <div className="mt-2 grid grid-cols-2 gap-2">
+                    <button
+                      onClick={() => {
+                        setWorkOrderPrefill({
+                          sourceEstimateId: selectedEstimate.id,
+                          sourceJobId: lastConvertedJobId || undefined,
+                          customerName: selectedEstimate.customerName,
+                          address: selectedEstimate.address,
+                          customerPhone: selectedEstimate.phone,
+                          jobDescription: selectedEstimate.projectSpecifics || selectedEstimate.notes || `${selectedEstimate.company || selectedEstimate.customerName} project`,
+                          estimatedValue: selectedEstimate.amount,
+                          date: new Date().toISOString().slice(0, 10)
+                        });
+                        setIsWorkOrderBuilderOpen(true);
+                      }}
+                      className="rounded-xl bg-[#315C9F] px-4 py-2.5 text-xs font-black uppercase text-white"
+                    >
+                      Yes
+                    </button>
+                    <button onClick={() => setIsConversionOpen(false)} className="rounded-xl border border-[#9EC8EF] bg-white px-4 py-2.5 text-xs font-black uppercase text-[#315C9F]">Skip for Now</button>
+                  </div>
+                </div>
+                <div className="mt-3 grid grid-cols-2 gap-2">
                   <button onClick={() => setIsConversionOpen(false)} className="rounded-xl border border-[#9EC8EF] bg-white px-4 py-3 text-xs font-black uppercase text-[#315C9F]">Stay here</button>
                   <button onClick={() => { setIsConversionOpen(false); setSelectedEstimate(null); onNavigateToScreen?.("jobs"); }} className="rounded-xl bg-[#315C9F] px-4 py-3 text-xs font-black uppercase text-white">Open job</button>
                 </div>
@@ -1527,6 +1637,9 @@ export const EstimatesPage: React.FC = () => {
       )}
 
       <SendChoiceModal isOpen={isSendOpen} onClose={() => setIsSendOpen(false)} label={`Estimate ${selectedEstimate?.number || ""}`} phone={sendMatch?.phone} email={sendMatch?.email} />
+      <WorkOrderBuilder isOpen={isWorkOrderBuilderOpen} onClose={() => setIsWorkOrderBuilderOpen(false)} prefill={workOrderPrefill} />
+      <CreateMembershipPicker isOpen={isMembershipPickerOpen} onClose={() => setIsMembershipPickerOpen(false)} prefillBase={membershipPrefillBase} />
+      <PriceBookModal isOpen={isPriceBookOpen} onClose={() => setIsPriceBookOpen(false)} />
     </div>
   );
 };

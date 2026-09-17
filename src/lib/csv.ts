@@ -2,8 +2,21 @@
 // page's Import/Export buttons instead of each hand-rolling its own.
 
 export function downloadCsv(filename: string, headers: string[], rows: Array<Array<string | number>>) {
+  // Guards against CSV/Excel "formula injection": a text cell starting with
+  // =, +, -, @, tab, or CR can be interpreted as a live formula (up to
+  // arbitrary command execution via legacy DDE) by whatever spreadsheet app
+  // opens this export. Exploitable via any exported field that ultimately
+  // comes from untrusted input -- e.g. a name/company/notes value entered
+  // through the public, unauthenticated website lead-capture form (see
+  // server/webLeadFormHandler.ts) and later exported from the Leads page.
+  // Only applies to actual string cells -- numeric values (including
+  // legitimately negative amounts) are never at risk and pass through as-is.
+  const FORMULA_INJECTION_PATTERN = /^[=+\-@\t\r]/;
   const escape = (val: string | number) => {
-    const str = String(val ?? "");
+    let str = String(val ?? "");
+    if (typeof val === "string" && FORMULA_INJECTION_PATTERN.test(str)) {
+      str = `'${str}`;
+    }
     return /[",\n]/.test(str) ? `"${str.replace(/"/g, '""')}"` : str;
   };
   const csvContent = [headers, ...rows].map(row => row.map(escape).join(",")).join("\r\n");
@@ -18,8 +31,8 @@ export function downloadCsv(filename: string, headers: string[], rows: Array<Arr
   URL.revokeObjectURL(url);
 }
 
-/** Minimal RFC4180-ish CSV parser -- handles quoted fields with embedded commas/newlines/escaped quotes. */
-export function parseCsv(text: string): string[][] {
+/** Minimal RFC4180-ish delimited-text parser -- handles quoted fields with embedded delimiters/newlines/escaped quotes. Defaults to comma; pass "\t" for a tab-separated (Excel "Save as .tsv" / paste) file. */
+export function parseCsv(text: string, delimiter: string = ","): string[][] {
   const rows: string[][] = [];
   let row: string[] = [];
   let field = "";
@@ -34,7 +47,7 @@ export function parseCsv(text: string): string[][] {
       }
     } else if (char === '"') {
       inQuotes = true;
-    } else if (char === ",") {
+    } else if (char === delimiter) {
       row.push(field); field = "";
     } else if (char === "\n" || char === "\r") {
       if (char === "\r" && text[i + 1] === "\n") i++;

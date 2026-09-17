@@ -33,16 +33,40 @@ import {
   Edit3,
   X,
   Save,
-  Minus
+  Minus,
+  PhoneMissed,
+  PhoneIncoming,
+  PhoneOutgoing,
+  MessageCircle
 } from "lucide-react";
 
 export type { Customer } from "../types/domain";
-import type { Customer, DocumentItem } from "../types/domain";
+import type { Customer, DocumentItem, WorkOrder, MissedCallEvent } from "../types/domain";
 import type { ProjectCompletionPlan } from "../types/completion";
 import { useFirestoreCollection } from "../hooks/useFirestoreCollection";
-import { buildCustomerProfilePdf, buildEstimatePdf, buildInvoicePdf, buildTextDocumentPdf, mergePdfs, base64ToBytes, bytesToBase64 } from "../lib/pdfExport";
+import { WorkOrderBuilder } from "./WorkOrderBuilder";
+import { CreateMembershipPicker } from "./CreateMembershipPicker";
+import { MembershipBuilder } from "./MembershipBuilder";
+import type { Membership } from "../types/membership";
+import { CustomerPortalControls } from "./CustomerPortalControls";
+import { ReviewRequestControls } from "./ReviewRequestControls";
+import { buildCustomerProfilePdf, buildEstimatePdf, buildInvoicePdf, buildTextDocumentPdf, buildCallTextHistoryPdf, mergePdfs, base64ToBytes, bytesToBase64 } from "../lib/pdfExport";
 import { MAX_INLINE_BASE64_LENGTH } from "../lib/firestoreDocumentLimits";
 import { composeEmail, composeSms, callNumber } from "../lib/deviceHandoff";
+import { BulkImportModal } from "./BulkImportModal";
+import { normalizePhoneForMatch, normalizeEmailForMatch, type ImportFieldSpec, type DuplicateCheckResult } from "../lib/spreadsheetImport";
+
+type CustomerImportKey = "company" | "contact" | "phone" | "email" | "address" | "type" | "status" | "vip";
+const CUSTOMER_IMPORT_FIELDS: ImportFieldSpec<CustomerImportKey>[] = [
+  { key: "company", label: "Company", aliases: ["company", "company name", "business", "business name", "customer"], required: false },
+  { key: "contact", label: "Contact Name", aliases: ["contact", "contact person", "contact name", "name", "customer name", "full name"] },
+  { key: "phone", label: "Phone", aliases: ["phone", "phone number", "cell", "mobile", "telephone"] },
+  { key: "email", label: "Email", aliases: ["email", "email address", "e-mail"] },
+  { key: "address", label: "Address", aliases: ["address", "service address", "billing address", "street address", "location"] },
+  { key: "type", label: "Type (Residential/Commercial)", aliases: ["type", "customer type"] },
+  { key: "status", label: "Status", aliases: ["status", "customer status", "account status"] },
+  { key: "vip", label: "VIP", aliases: ["vip", "vip status", "is vip"] }
+];
 
 export interface CustomersPageProps {
   // NOTE: this page calls onOpenPlaceholder("estimates")/("scheduling", "icon")
@@ -59,7 +83,13 @@ export const INITIAL_CUSTOMERS: Customer[] = [];
 export const CustomersPage: React.FC<CustomersPageProps> = ({
   onOpenPlaceholder
 }) => {
-  const { customers: propCustomers, setCustomers: propSetCustomers, estimates, invoices, schedulingEvents, documents, setDocuments, setGeneratedPdfDraft, setPendingSignatureCapture, preSelectedCustomerId, setPreSelectedCustomerId, businessProfile } = useDomainData();
+  const { customers: propCustomers, setCustomers: propSetCustomers, estimates, invoices, schedulingEvents, documents, setDocuments, setGeneratedPdfDraft, setPendingSignatureCapture, preSelectedCustomerId, setPreSelectedCustomerId, businessProfile, memberships, setMemberships } = useDomainData();
+  const [isWorkOrderBuilderOpen, setIsWorkOrderBuilderOpen] = useState(false);
+  const [workOrderPrefill, setWorkOrderPrefill] = useState<Partial<WorkOrder> | undefined>(undefined);
+  const [isMembershipPickerOpen, setIsMembershipPickerOpen] = useState(false);
+  const [membershipPrefillBase, setMembershipPrefillBase] = useState<Partial<Membership> | undefined>(undefined);
+  const [editingMembership, setEditingMembership] = useState<Membership | null>(null);
+  const [isMembershipBuilderOpen, setIsMembershipBuilderOpen] = useState(false);
   const {
     takeSnapshot: onTakeSnapshot,
     openPageAIAnalysis: onOpenAIAnalysis,
@@ -209,8 +239,7 @@ export const CustomersPage: React.FC<CustomersPageProps> = ({
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
   const [isDeleteConfirmOpen, setIsDeleteConfirmOpen] = useState(false);
   const [isImportModalOpen, setIsImportModalOpen] = useState(false);
-  const [importFileError, setImportFileError] = useState<string | null>(null);
-  const [importPreviewList, setImportPreviewList] = useState<Customer[]>([]);
+  const [lastImportedCustomerIds, setLastImportedCustomerIds] = useState<string[]>([]);
 
   // Cross-navigation: opening Customers from an estimate/invoice/job's
   // "Open Customer" link (or any other page) lands here with that
@@ -245,10 +274,19 @@ export const CustomersPage: React.FC<CustomersPageProps> = ({
       c.isVIP ? "Yes" : "No"
     ]);
 
+    // Guards against CSV/Excel "formula injection" -- a text cell starting
+    // with =, +, -, @, tab, or CR can run as a live formula in whatever
+    // spreadsheet app opens this export. company/contact/address ultimately
+    // trace back to lead/customer data, which can originate from the
+    // public, unauthenticated website lead-capture form.
+    const FORMULA_INJECTION_PATTERN = /^[=+\-@\t\r]/;
     const csvContent = [
       headers.join(","),
       ...rows.map(fields => fields.map(val => {
-        const strVal = String(val);
+        let strVal = String(val);
+        if (typeof val === "string" && FORMULA_INJECTION_PATTERN.test(strVal)) {
+          strVal = `'${strVal}`;
+        }
         if (strVal.includes(",") || strVal.includes('"') || strVal.includes("\n")) {
           return `"${strVal}"`;
         }
@@ -270,92 +308,71 @@ export const CustomersPage: React.FC<CustomersPageProps> = ({
     }
   };
 
-  const handleImportCSVData = (text: string) => {
-    try {
-      const lines = text.split(/\r?\n/);
-      if (lines.length <= 1) {
-        setImportFileError("The file seems to be empty or contains no headers.");
-        return;
-      }
+  // Bulk import (spreadsheet/PDF -> real Customer records) -- see
+  // BulkImportModal + src/lib/spreadsheetImport.ts for the shared parsing
+  // engine. Any column order works; the modal auto-maps headers and lets
+  // the user fix any column before this ever runs.
+  //
+  // A row is flagged as a likely duplicate -- and skipped by default -- if
+  // its phone or email matches an existing customer already on file. Phone
+  // numbers are compared by normalized last-10-digits (same normalization
+  // CrmLinker.kt uses) since real spreadsheets store numbers however the
+  // business originally typed them.
+  const checkCustomerDuplicate = (row: Partial<Record<CustomerImportKey, string>>): DuplicateCheckResult => {
+    const phone = normalizePhoneForMatch(row.phone);
+    const email = normalizeEmailForMatch(row.email);
+    const match = customers.find(c =>
+      (phone && normalizePhoneForMatch(c.phone) === phone) ||
+      (email && normalizeEmailForMatch(c.email) === email)
+    );
+    if (match) return { isDuplicate: true, reason: `Matches existing customer "${match.contact || match.company}"` };
+    return { isDuplicate: false };
+  };
 
-      const parsedList: Customer[] = [];
-      for (let i = 1; i < lines.length; i++) {
-        const line = lines[i].trim();
-        if (!line) continue;
-
-        const fields: string[] = [];
-        let cur = "";
-        let inQuotes = false;
-        for (let charIdx = 0; charIdx < line.length; charIdx++) {
-          const char = line[charIdx];
-          if (char === '"') {
-            inQuotes = !inQuotes;
-          } else if (char === ',' && !inQuotes) {
-            fields.push(cur.trim().replace(/^["']|["']$/g, ""));
-            cur = "";
-          } else {
-            cur += char;
-          }
-        }
-        fields.push(cur.trim().replace(/^["']|["']$/g, ""));
-
-        let company = fields[0] || "";
-        let contact = fields[1] || "";
-        let phone = fields[2] || "";
-        let email = fields[3] || "";
-        let address = fields[4] || "";
-        let typeStr = fields[5] || "Residential";
-        let statusStr = fields[6] || "Active";
-        let vipStr = fields[7] || "No";
-
-        if (!contact && company) {
-          contact = company;
-        }
-        if (!contact && !company) continue;
-
-        const importedCustomer: Customer = {
-          id: "cust_csv_" + Math.random().toString(36).substring(2, 9),
+  const handleBulkImportCustomers = (rows: Array<Partial<Record<CustomerImportKey, string>>>) => {
+    const imported: Customer[] = rows
+      .map(row => {
+        const company = row.company?.trim() || "";
+        const contact = row.contact?.trim() || "";
+        if (!company && !contact) return null;
+        const typeStr = (row.type || "").toLowerCase();
+        const statusStr = (row.status || "").toLowerCase();
+        const vipStr = (row.vip || "").toLowerCase();
+        const customer: Customer = {
+          id: "cust_import_" + Math.random().toString(36).substring(2, 9),
           company: company || contact,
           contact: contact || company,
-          phone: phone || "",
-          email: email || "",
-          address: address || "No address supplied",
+          phone: row.phone?.trim() || "",
+          email: row.email?.trim() || "",
+          address: row.address?.trim() || "No address supplied",
           openJobs: 0,
           outstandingBalance: 0,
           lifetimeValue: 0,
-          status: (statusStr.toLowerCase().includes("past") || statusStr.toLowerCase().includes("due"))
-            ? "Past Due"
-            : statusStr.toLowerCase().includes("inactive")
-            ? "Inactive"
-            : "Active",
-          type: (typeStr.toLowerCase().includes("commercial") || typeStr.toLowerCase().includes("comm"))
-            ? "Commercial"
-            : "Residential",
-          isVIP: vipStr.toLowerCase() === "yes" || vipStr.toLowerCase() === "true" || vipStr.toLowerCase() === "y" || vipStr.toLowerCase() === "vip",
+          status: (statusStr.includes("past") || statusStr.includes("due")) ? "Past Due" : statusStr.includes("inactive") ? "Inactive" : "Active",
+          type: (typeStr.includes("commercial") || typeStr.includes("comm")) ? "Commercial" : "Residential",
+          isVIP: ["yes", "true", "y", "vip"].includes(vipStr),
           recentlyAdded: true
         };
-        parsedList.push(importedCustomer);
-      }
+        return customer;
+      })
+      .filter((c): c is Customer => c !== null);
 
-      if (parsedList.length === 0) {
-        setImportFileError("Could not extract any valid customer records. Please verify headers.");
-      } else {
-        setImportPreviewList(parsedList);
-        setImportFileError(null);
-      }
-    } catch (err) {
-      setImportFileError("Failed to parse the CSV file. Please check the file formatting.");
+    if (!imported.length) {
+      triggerNotification("No valid rows found -- make sure at least a Company or Contact Name column is mapped.");
+      return;
     }
+    setCustomers(prev => [...imported, ...prev]);
+    setLastImportedCustomerIds(imported.map(c => c.id));
+    triggerNotification(`✅ Imported ${imported.length} customer(s). Downloaded an import report.`);
+    if (logOperationalEvent) logOperationalEvent("Spreadsheet Imported", `Imported ${imported.length} customer records`, "📥");
   };
 
-  const loadPresetImport = (presetName: string) => {
-    let presetText = "";
-    if (presetName === "hvac") {
-      presetText = `Company Name,Contact Person,Phone,Email,Address,Customer Type,Status,VIP Status\n"Titan Air Conditioning","Ray Nelson","(555) 304-9811","ray@titanair.com","452 Industrial Parkway, Ste E","Commercial","Active","Yes"\n"Linda Geller Residential","Linda Geller","(555) 881-2356","linda.geller@gmail.com","128 Maple Lane","Residential","Active","No"\n"Metro Cold Storage Inc","Victor Stone","(555) 441-9022","vstone@metrocold.org","99 Waterfront Rd","Commercial","Past Due","No"`;
-    } else {
-      presetText = `Company Name,Contact Person,Phone,Email,Address,Customer Type,Status,VIP Status\n"Stark Remodeling","Howard Stark","(555) 902-1144","howard@starkremodel.com","10880 Malibu Point","Commercial","Active","Yes"\n"Green Acres Farms","Bruce Banner","(555) 234-9900","bruce@hulkscience.org","14 Outer Ridge Road","Residential","Active","No"`;
-    }
-    handleImportCSVData(presetText);
+  const undoLastCustomerImport = () => {
+    const count = lastImportedCustomerIds.length;
+    setCustomers(prev => prev.filter(c => !lastImportedCustomerIds.includes(c.id)));
+    setLastImportedCustomerIds([]);
+    triggerNotification(`Undone -- removed ${count} imported customer(s).`);
+    if (logOperationalEvent) logOperationalEvent("Import Undone", `Removed ${count} customer records from the last import`, "↩️");
   };
 
   // Form states
@@ -478,6 +495,66 @@ export const CustomersPage: React.FC<CustomersPageProps> = ({
     });
     onNavigateToScreen("documents");
     if (logOperationalEvent) logOperationalEvent("Customer PDF Generated", filename, "📄");
+  };
+
+  // Read-only: every call/text the Missed Call Text-Back Android app has
+  // logged for this business (it writes directly to Firestore -- see
+  // CrmLinker.kt -- the web app never writes to this collection). Matched
+  // to this customer by customerId when the app found them at call time,
+  // falling back to a normalized-last-10-digits phone match so a call that
+  // predates this customer being added (or that matched nothing at the
+  // time) still shows up once the number is on file.
+  const [allCallEvents] = useFirestoreCollection<MissedCallEvent>("missed_call_events", businessId);
+  const normalizePhoneDigits = (raw: string) => {
+    const digits = (raw || "").replace(/\D/g, "");
+    return digits.length > 10 ? digits.slice(-10) : digits;
+  };
+  const customerCallEvents = useMemo(() => {
+    if (!selectedCustomer) return [];
+    const targetDigits = normalizePhoneDigits(selectedCustomer.phone || "");
+    return allCallEvents
+      .filter(event => event.customerId === selectedCustomer.id || (targetDigits && normalizePhoneDigits(event.phoneNumber) === targetDigits))
+      .sort((a, b) => b.callTimestamp.localeCompare(a.callTimestamp));
+  }, [allCallEvents, selectedCustomer]);
+
+  // "Convert to PDF" on the Call & Text History panel -- saves into
+  // Documents tagged with this customer's name, same convention every other
+  // customer PDF here uses, so it's automatically swept up by "Compile
+  // Documents" above with no extra wiring needed there.
+  const generateCallTextHistoryPdf = async (cust: Customer, events: MissedCallEvent[]) => {
+    const bytes = await buildCallTextHistoryPdf(cust, events, businessProfile);
+    const pdfBase64 = bytesToBase64(bytes);
+    const filename = `${(cust.company || cust.contact || "Customer").replace(/[\\/:*?"<>|]+/g, "-")}-call-text-history.pdf`;
+    const docId = `doc_calltext_${cust.id}_${Date.now()}`;
+    const newDoc: DocumentItem = {
+      id: docId,
+      name: filename,
+      customer: cust.contact || cust.company,
+      employee: loggedInUser?.name || "Staff Administrator",
+      vendor: "None",
+      job: "None",
+      type: "Customer Notes",
+      folder: "Customer Notes",
+      uploadedBy: loggedInUser?.name || "Staff Administrator",
+      date: new Date().toISOString().split("T")[0],
+      size: `${Math.max(1, Math.ceil(bytes.length / 1024))} KB`,
+      status: "Draft",
+      isFavorite: false,
+      isArchived: false,
+      notes: `Call & Text History compiled from ${events.length} logged call(s).`,
+      tags: ["Customer", "Call History"],
+      estimateId: "None",
+      invoiceId: "None",
+      lastModified: new Date().toISOString().replace("T", " ").substring(0, 19)
+    };
+    if (pdfBase64.length <= MAX_INLINE_BASE64_LENGTH) {
+      (newDoc as any).pdfBase64 = pdfBase64;
+    } else {
+      triggerNotification("This PDF is too large to store inline -- the Documents record was saved, but regenerate it for a fresh copy since the file itself wasn't attached.");
+    }
+    setDocuments(prev => [...prev, newDoc]);
+    triggerNotification(`📄 Saved Call & Text History to Documents: ${filename}`);
+    if (logOperationalEvent) logOperationalEvent("Call & Text History PDF Generated", filename, "📄");
   };
 
   const handleAddCustomer = (openPdf = false) => {
@@ -663,11 +740,7 @@ export const CustomersPage: React.FC<CustomersPageProps> = ({
               </button>
             )}
             <button
-              onClick={() => {
-                setImportFileError(null);
-                setImportPreviewList([]);
-                setIsImportModalOpen(true);
-              }}
+              onClick={() => setIsImportModalOpen(true)}
               className="px-4 py-2 bg-[#EAF5FF] hover:bg-[#BDDDF8] border border-[#9EC8EF] text-[#1F3557] font-bold rounded-xl text-xs uppercase tracking-wider transition-colors cursor-pointer flex items-center gap-1.5"
             >
               <Upload className="w-3.5 h-3.5" />
@@ -854,42 +927,94 @@ export const CustomersPage: React.FC<CustomersPageProps> = ({
                 Schedule Job
               </button>
               <button
+                disabled={!selectedCustomer}
+                title={selectedCustomer ? undefined : "Select a customer first"}
                 onClick={() => selectedCustomer && onNavigateToScreen("jobs", { customerId: selectedCustomer.id })}
-                className="px-3 py-2 bg-[#EAF5FF] hover:bg-[#BDDDF8] border border-[#9EC8EF] rounded-xl text-[11px] font-bold text-[#1F3557] text-left transition-colors cursor-pointer flex items-center gap-2"
+                className="px-3 py-2 bg-[#EAF5FF] hover:bg-[#BDDDF8] border border-[#9EC8EF] rounded-xl text-[11px] font-bold text-[#1F3557] text-left transition-colors cursor-pointer flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-[#EAF5FF]"
               >
                 <Briefcase className="w-3.5 h-3.5 text-[#1F3557]" />
                 View Jobs
               </button>
               <button
+                disabled={!selectedCustomer}
+                title={selectedCustomer ? undefined : "Select a customer first"}
                 onClick={() => selectedCustomer && onNavigateToScreen("accounting", { customerId: selectedCustomer.id })}
-                className="px-3 py-2 bg-[#EAF5FF] hover:bg-[#BDDDF8] border border-[#9EC8EF] rounded-xl text-[11px] font-bold text-[#1F3557] text-left transition-colors cursor-pointer flex items-center gap-2"
+                className="px-3 py-2 bg-[#EAF5FF] hover:bg-[#BDDDF8] border border-[#9EC8EF] rounded-xl text-[11px] font-bold text-[#1F3557] text-left transition-colors cursor-pointer flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-[#EAF5FF]"
               >
                 <CreditCard className="w-3.5 h-3.5 text-[#1F3557]" />
                 Create Invoice
               </button>
               <button
-                onClick={() => selectedCustomer && onNavigateToScreen("messages", { customerId: selectedCustomer.id })}
+                onClick={() => {
+                  // A Quick Action, not a per-customer action -- WorkOrderBuilder
+                  // itself supports "a fully blank/custom Work Order" (its own
+                  // docstring), so this can open blank instead of silently doing
+                  // nothing when no customer is selected yet.
+                  setWorkOrderPrefill(selectedCustomer ? {
+                    customerId: selectedCustomer.id,
+                    customerName: selectedCustomer.contact || selectedCustomer.company,
+                    customerPhone: selectedCustomer.phone,
+                    customerEmail: selectedCustomer.email,
+                    address: selectedCustomer.address,
+                    date: new Date().toISOString().slice(0, 10)
+                  } : { date: new Date().toISOString().slice(0, 10) });
+                  setIsWorkOrderBuilderOpen(true);
+                }}
                 className="px-3 py-2 bg-[#EAF5FF] hover:bg-[#BDDDF8] border border-[#9EC8EF] rounded-xl text-[11px] font-bold text-[#1F3557] text-left transition-colors cursor-pointer flex items-center gap-2"
+              >
+                🧰 Create Work Order
+              </button>
+              <button
+                onClick={() => {
+                  // A Quick Action, not a per-customer action -- MembershipBuilder's
+                  // own form already has editable Customer Name/Phone/Email/Address
+                  // fields, so this can open blank (letting the user type or pick a
+                  // customer inside the form) instead of silently doing nothing when
+                  // nothing is selected yet (e.g. an empty customer list).
+                  setMembershipPrefillBase(selectedCustomer ? {
+                    customerId: selectedCustomer.id,
+                    customerName: selectedCustomer.contact || selectedCustomer.company,
+                    customerPhone: selectedCustomer.phone,
+                    customerEmail: selectedCustomer.email,
+                    address: selectedCustomer.address
+                  } : undefined);
+                  setIsMembershipPickerOpen(true);
+                }}
+                className="px-3 py-2 bg-[#EAF5FF] hover:bg-[#BDDDF8] border border-[#9EC8EF] rounded-xl text-[11px] font-bold text-[#1F3557] text-left transition-colors cursor-pointer flex items-center gap-2"
+              >
+                📜 Add Membership
+              </button>
+              <button
+                disabled={!selectedCustomer}
+                title={selectedCustomer ? undefined : "Select a customer first"}
+                onClick={() => selectedCustomer && onNavigateToScreen("messages", { customerId: selectedCustomer.id })}
+                className="px-3 py-2 bg-[#EAF5FF] hover:bg-[#BDDDF8] border border-[#9EC8EF] rounded-xl text-[11px] font-bold text-[#1F3557] text-left transition-colors cursor-pointer flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-[#EAF5FF]"
               >
                 <MessageSquare className="w-3.5 h-3.5 text-[#1F3557]" />
                 Message Customer
               </button>
               <button
+                disabled={!selectedCustomer}
+                title={selectedCustomer ? undefined : "Select a customer first"}
                 onClick={() => selectedCustomer && void compileCustomerDocuments(selectedCustomer)}
-                className="px-3 py-2 bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 rounded-xl text-[11px] font-bold text-emerald-800 text-left transition-colors cursor-pointer flex items-center gap-2"
+                className="px-3 py-2 bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 rounded-xl text-[11px] font-bold text-emerald-800 text-left transition-colors cursor-pointer flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-emerald-50"
               >
                 <FileText className="w-3.5 h-3.5" /> Compile Documents
               </button>
               <button
+                disabled={!selectedCustomer}
+                title={selectedCustomer ? undefined : "Select a customer first"}
                 onClick={() => selectedCustomer && onNavigateToScreen("documents", { customerId: selectedCustomer.id })}
-                className="px-3 py-2 bg-[#EAF5FF] hover:bg-[#BDDDF8] border border-[#9EC8EF] rounded-xl text-[11px] font-bold text-[#1F3557] text-left transition-colors cursor-pointer flex items-center gap-2"
+                className="px-3 py-2 bg-[#EAF5FF] hover:bg-[#BDDDF8] border border-[#9EC8EF] rounded-xl text-[11px] font-bold text-[#1F3557] text-left transition-colors cursor-pointer flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-[#EAF5FF]"
               >
                 <FolderOpen className="w-3.5 h-3.5 text-[#1F3557]" />
                 View Documents
               </button>
               <button
+                disabled={!selectedCustomer}
+                title={selectedCustomer ? undefined : "Select a customer first"}
                 onClick={() => selectedCustomer && openCollectSignatures(selectedCustomer)}
-                className="px-3 py-2 bg-[#EAF5FF] hover:bg-[#BDDDF8] border border-[#9EC8EF] rounded-xl text-[11px] font-bold text-[#1F3557] text-left transition-colors cursor-pointer flex items-center gap-2"
+                className="px-3 py-2 bg-[#EAF5FF] hover:bg-[#BDDDF8] border border-[#9EC8EF] rounded-xl text-[11px] font-bold text-[#1F3557] text-left transition-colors cursor-pointer flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-[#EAF5FF]"
               >
                 <Edit3 className="w-3.5 h-3.5 text-[#1F3557]" />
                 Collect Signatures
@@ -1191,7 +1316,7 @@ export const CustomersPage: React.FC<CustomersPageProps> = ({
                       type="text" 
                       value={formCityState}
                       onChange={e => setFormCityState(e.target.value)}
-                      placeholder="e.g. Seattle, WA"
+                      placeholder="e.g. City, State"
                       className="w-full text-xs bg-[#EAF5FF] border border-[#9EC8EF] rounded-xl px-3 py-2.5 focus:outline-none focus:border-[#4A86F7] font-semibold text-[#1F3557]"
                     />
                   </div>
@@ -1282,159 +1407,22 @@ export const CustomersPage: React.FC<CustomersPageProps> = ({
 
       {/* Import Customers Modal */}
       {isImportModalOpen && (
-        <div className="fixed inset-0 bg-[#1F3557]/60 backdrop-blur-xs flex items-center justify-center p-4 z-50 animate-fade-in">
-          <div className="bg-white rounded-3xl border-2 border-[#9EC8EF] shadow-2xl max-w-xl w-full overflow-hidden flex flex-col max-h-[90vh]">
-            <div className="bg-[#315C9F] text-white px-6 py-4 flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <Upload className="w-5 h-5 text-white" />
-                <h3 className="font-display font-extrabold text-sm uppercase tracking-wider">CSV Customer Importer</h3>
-              </div>
-              <button 
-                onClick={() => {
-                  setIsImportModalOpen(false);
-                  setImportFileError(null);
-                  setImportPreviewList([]);
-                }}
-                className="text-white/80 hover:text-white p-1 rounded-lg hover:bg-white/10 transition-colors cursor-pointer"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
+        <BulkImportModal<CustomerImportKey>
+          title="Import Customers"
+          description="Upload a spreadsheet (CSV/TSV/Excel export, or a tabular PDF) of your existing customers."
+          fields={CUSTOMER_IMPORT_FIELDS}
+          checkDuplicate={checkCustomerDuplicate}
+          rowLabel={row => row.contact || row.company || ""}
+          onConfirm={handleBulkImportCustomers}
+          onClose={() => setIsImportModalOpen(false)}
+        />
+      )}
 
-            <div className="p-6 overflow-y-auto space-y-5 text-[#1F3557]">
-              <div className="space-y-1">
-                <h4 className="text-xs font-bold">Import Instructions:</h4>
-                <p className="text-[11px] text-[#5E7393] leading-relaxed">
-                  Upload a standard comma-separated values (CSV) file. The file should contain headers like 
-                  <code className="bg-slate-100 px-1 py-0.5 rounded font-mono text-[10px] mx-1 text-slate-800">Company Name</code>, 
-                  <code className="bg-slate-100 px-1 py-0.5 rounded font-mono text-[10px] mx-1 text-slate-800">Contact Person</code>, 
-                  <code className="bg-slate-100 px-1 py-0.5 rounded font-mono text-[10px] mx-1 text-slate-800">Phone</code>, 
-                  <code className="bg-slate-100 px-1 py-0.5 rounded font-mono text-[10px] mx-1 text-slate-800">Email</code>, and 
-                  <code className="bg-slate-100 px-1 py-0.5 rounded font-mono text-[10px] mx-1 text-slate-800">Address</code>.
-                </p>
-              </div>
-
-              {/* Drag & Drop Zone */}
-              <div className="relative border-2 border-dashed border-[#9EC8EF] hover:border-[#315C9F] bg-[#EAF5FF]/30 hover:bg-[#EAF5FF]/50 rounded-2xl p-6 transition-colors text-center cursor-pointer">
-                <input
-                  type="file"
-                  accept=".csv"
-                  onChange={(e) => {
-                    const file = e.target.files?.[0];
-                    if (file) {
-                      const reader = new FileReader();
-                      reader.onload = (evt) => {
-                        const text = evt.target?.result as string;
-                        handleImportCSVData(text);
-                      };
-                      reader.readAsText(file);
-                    }
-                  }}
-                  className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
-                />
-                <div className="flex flex-col items-center gap-2">
-                  <Upload className="w-8 h-8 text-[#315C9F]" />
-                  <p className="text-xs font-extrabold">Click to select or drag & drop a CSV file</p>
-                  <p className="text-[10px] text-[#5E7393]">Supported files: .csv (Max 5MB)</p>
-                </div>
-              </div>
-
-              {/* Preset Simulators */}
-              <div className="bg-[#EAF5FF]/50 p-3 rounded-2xl border border-[#9EC8EF]/40 space-y-2 text-left">
-                <span className="text-[10px] uppercase font-bold text-[#5E7393] block">No CSV on hand? Load instant test dataset:</span>
-                <div className="flex flex-wrap gap-2">
-                  <button
-                    type="button"
-                    onClick={() => loadPresetImport("construction")}
-                    className="px-3 py-1.5 bg-[#C7E3FA] hover:bg-[#BDDDF8] text-[#1F3557] text-[10.5px] font-bold rounded-xl transition-all border border-[#9EC8EF]/40 flex items-center gap-1 cursor-pointer"
-                  >
-                    <Plus className="w-3 h-3 text-[#1F3557]" /> Stark Remodeling Preset (2 Leads)
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => loadPresetImport("hvac")}
-                    className="px-3 py-1.5 bg-[#C7E3FA] hover:bg-[#BDDDF8] text-[#1F3557] text-[10.5px] font-bold rounded-xl transition-all border border-[#9EC8EF]/40 flex items-center gap-1 cursor-pointer"
-                  >
-                    <Plus className="w-3 h-3 text-[#1F3557]" /> Ray Nelson HVAC Preset (3 Leads)
-                  </button>
-                </div>
-              </div>
-
-              {/* Error box */}
-              {importFileError && (
-                <div className="bg-rose-50 border border-rose-200 text-rose-800 p-3 rounded-xl flex items-center gap-2 text-xs">
-                  <AlertTriangle className="w-4 h-4 text-rose-500 shrink-0" />
-                  <span className="font-semibold">{importFileError}</span>
-                </div>
-              )}
-
-              {/* Previews */}
-              {importPreviewList.length > 0 && (
-                <div className="space-y-2.5 text-left">
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs font-bold">
-                      Previewing parsed customers ({importPreviewList.length}):
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => setImportPreviewList([])}
-                      className="text-[10.5px] font-bold text-rose-600 hover:underline cursor-pointer"
-                    >
-                      Clear Preview
-                    </button>
-                  </div>
-                  
-                  <div className="border border-[#9EC8EF]/40 rounded-xl overflow-hidden max-h-40 overflow-y-auto divide-y divide-[#9EC8EF]/20 bg-slate-50">
-                    {importPreviewList.map((parsed, idx) => (
-                      <div key={idx} className="p-2.5 text-[11px] flex items-center justify-between gap-4">
-                        <div className="min-w-0">
-                          <p className="font-bold truncate">{parsed.company}</p>
-                          <p className="text-[10px] text-[#5E7393] font-medium mt-0.5 truncate">Contact: {parsed.contact} | {parsed.email}</p>
-                        </div>
-                        <div className="flex items-center gap-1.5 shrink-0">
-                          <span className="text-[9px] px-1.5 py-0.5 bg-blue-100 text-[#1F3557] rounded font-bold uppercase">{parsed.type}</span>
-                          <span className="text-[9px] px-1.5 py-0.5 bg-emerald-100 text-emerald-800 rounded font-bold uppercase">{parsed.status}</span>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {/* Footer */}
-            <div className="bg-slate-50 border-t border-[#9EC8EF]/40 px-6 py-4 flex justify-end gap-3 shrink-0">
-              <button
-                type="button"
-                onClick={() => {
-                  setIsImportModalOpen(false);
-                  setImportFileError(null);
-                  setImportPreviewList([]);
-                }}
-                className="px-4 py-2 bg-white hover:bg-slate-100 border border-slate-200 text-[#5E7393] font-bold rounded-xl text-xs uppercase tracking-wider transition-colors cursor-pointer"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                disabled={importPreviewList.length === 0}
-                onClick={() => {
-                  setCustomers(prev => [...importPreviewList, ...prev]);
-                  if (logOperationalEvent) {
-                    logOperationalEvent("CSV Imported", `Imported ${importPreviewList.length} customer records into CRM database`, "📥");
-                  }
-                  setIsImportModalOpen(false);
-                  setImportPreviewList([]);
-                }}
-                className={`px-4 py-2 text-white font-bold rounded-xl text-xs uppercase tracking-wider transition-colors cursor-pointer flex items-center gap-1 ${
-                  importPreviewList.length > 0 ? "bg-[#315C9F] hover:bg-[#1F3557]" : "bg-slate-300 cursor-not-allowed"
-                }`}
-              >
-                <CheckCircle className="w-3.5 h-3.5" />
-                Confirm Import ({importPreviewList.length})
-              </button>
-            </div>
-          </div>
+      {lastImportedCustomerIds.length > 0 && (
+        <div className="fixed bottom-6 left-6 bg-white border-2 border-[#9EC8EF] shadow-lg rounded-2xl px-4 py-3 flex items-center gap-3 z-50 text-xs animate-fade-in">
+          <span className="font-bold text-[#1F3557]">Imported {lastImportedCustomerIds.length} customer(s).</span>
+          <button onClick={undoLastCustomerImport} className="font-bold text-rose-600 hover:underline cursor-pointer">Undo</button>
+          <button onClick={() => setLastImportedCustomerIds([])} className="text-[#5E7393] hover:text-[#1F3557] cursor-pointer"><X className="w-3.5 h-3.5" /></button>
         </div>
       )}
 
@@ -1565,7 +1553,7 @@ export const CustomersPage: React.FC<CustomersPageProps> = ({
                           type="text" 
                           value={formCityState}
                           onChange={e => setFormCityState(e.target.value)}
-                          placeholder="e.g. Seattle, WA"
+                          placeholder="e.g. City, State"
                           className="w-full text-xs bg-[#EAF5FF] border border-[#9EC8EF] rounded-xl px-3 py-2.5 focus:outline-none focus:border-[#4A86F7] font-semibold text-[#1F3557]"
                         />
                       </div>
@@ -1761,6 +1749,50 @@ export const CustomersPage: React.FC<CustomersPageProps> = ({
                     })()}
                   </div>
 
+                  {/* Call & Text History -- populated by the Missed Call
+                      Text-Back Android app (see missed-call-text-back-app),
+                      which runs in the background on the owner's phone even
+                      when the browser is closed. This is the same record
+                      regardless of where the customer card is opened from. */}
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[9px] uppercase font-bold text-[#5E7393] flex items-center gap-1.5">
+                        <MessageCircle className="w-3 h-3 text-[#315C9F]" />Call &amp; Text History
+                      </span>
+                      {customerCallEvents.length > 0 && (
+                        <button
+                          onClick={() => void generateCallTextHistoryPdf(selectedCustomer, customerCallEvents)}
+                          className="px-2 py-1 bg-white hover:bg-[#EAF5FF] border border-[#9EC8EF] rounded-lg text-[9px] font-bold text-[#315C9F] uppercase cursor-pointer flex items-center gap-1"
+                        >
+                          <FileText className="w-3 h-3" />Convert to PDF
+                        </button>
+                      )}
+                    </div>
+                    <div className="bg-[#EAF5FF]/40 rounded-2xl border border-[#9EC8EF]/30 divide-y divide-[#9EC8EF]/30 max-h-64 overflow-y-auto">
+                      {customerCallEvents.length === 0 ? (
+                        <p className="text-[10px] text-[#5E7393] font-semibold p-3">No calls or texts on file yet. Missed calls this customer makes get auto-texted back and logged here automatically once Missed Call Text-Back is set up on the owner's phone.</p>
+                      ) : (
+                        customerCallEvents.map(event => (
+                          <div key={event.id} className="p-2.5 space-y-1">
+                            <div className="flex items-center gap-1.5 text-[10px] font-bold text-[#1F3557]">
+                              {event.direction === "missed" && <PhoneMissed className="w-3 h-3 text-rose-600 shrink-0" />}
+                              {event.direction === "incoming" && <PhoneIncoming className="w-3 h-3 text-emerald-600 shrink-0" />}
+                              {event.direction === "outgoing" && <PhoneOutgoing className="w-3 h-3 text-[#315C9F] shrink-0" />}
+                              <span className="capitalize">{event.direction} Call</span>
+                              <span className="text-[9px] font-semibold text-[#5E7393] ml-auto">{event.callTimestamp}</span>
+                            </div>
+                            {event.autoReplySent && event.autoReplyMessage && (
+                              <div className="flex items-start gap-1.5 pl-4.5 text-[10px] text-[#5E7393]">
+                                <MessageCircle className="w-3 h-3 mt-0.5 shrink-0" />
+                                <span className="italic">"{event.autoReplyMessage}"</span>
+                              </div>
+                            )}
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
+
                   {/* Metrics */}
                   <div className="grid grid-cols-3 gap-3">
                     <div className="p-3 bg-slate-50 rounded-2xl border border-slate-100 text-center">
@@ -1777,6 +1809,74 @@ export const CustomersPage: React.FC<CustomersPageProps> = ({
                       <span className="text-[8px] uppercase font-bold text-[#5E7393] block">Lifetime Value</span>
                       <span className="text-sm font-black font-mono block mt-1">${selectedCustomer.lifetimeValue.toLocaleString()}</span>
                     </div>
+                  </div>
+
+                  {/* Customer Portal */}
+                  <div className="space-y-2">
+                    <span className="text-[9px] uppercase font-bold text-[#5E7393] block">Customer Portal</span>
+                    <CustomerPortalControls customer={selectedCustomer} />
+                  </div>
+
+                  {/* Review Requests */}
+                  <div className="space-y-2">
+                    <span className="text-[9px] uppercase font-bold text-[#5E7393] block">Review Requests</span>
+                    <ReviewRequestControls customer={selectedCustomer} />
+                  </div>
+
+                  {/* Memberships / Service Agreements */}
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[9px] uppercase font-bold text-[#5E7393] block">Memberships</span>
+                      <button
+                        onClick={() => {
+                          setMembershipPrefillBase({
+                            customerId: selectedCustomer.id,
+                            customerName: selectedCustomer.contact || selectedCustomer.company,
+                            customerPhone: selectedCustomer.phone,
+                            customerEmail: selectedCustomer.email,
+                            address: selectedCustomer.address
+                          });
+                          setIsMembershipPickerOpen(true);
+                        }}
+                        className="text-[10px] font-black text-[#315C9F]"
+                      >
+                        + Add Membership
+                      </button>
+                    </div>
+                    {memberships.filter(m => m.customerId === selectedCustomer.id).length === 0 ? (
+                      <p className="rounded-xl border border-dashed border-[#9EC8EF] p-3 text-center text-[11px] text-slate-400">No memberships yet.</p>
+                    ) : (
+                      <div className="space-y-2">
+                        {memberships.filter(m => m.customerId === selectedCustomer.id).map(m => (
+                          <div key={m.id} className="rounded-xl border border-[#9EC8EF] bg-[#EAF5FF] p-3">
+                            <div className="flex items-center justify-between">
+                              <span className="text-xs font-black text-[#1F3557]">{m.planName}</span>
+                              <span className={`rounded-full px-2 py-0.5 text-[9px] font-black uppercase ${m.status === "Active" ? "bg-emerald-100 text-emerald-700" : m.status === "Paused" ? "bg-amber-100 text-amber-700" : "bg-slate-200 text-slate-600"}`}>{m.status}</span>
+                            </div>
+                            <div className="mt-1 grid grid-cols-3 gap-1 text-[10px] text-[#5E7393]">
+                              <span>Price: ${m.price.toFixed(2)}</span>
+                              <span>Next Service: {m.nextMaintenanceDate || "—"}</span>
+                              <span>Next Payment: {m.nextPaymentDate || "—"}</span>
+                            </div>
+                            <div className="mt-2 flex flex-wrap gap-1.5">
+                              <button onClick={() => { setEditingMembership(m); setIsMembershipBuilderOpen(true); }} className="rounded-lg bg-white px-2 py-1 text-[10px] font-bold text-[#315C9F] border border-[#9EC8EF]">View / Edit</button>
+                              {m.status === "Active" && (
+                                <button onClick={() => setMemberships(prev => prev.map(x => x.id === m.id ? { ...x, status: "Paused" } : x))} className="rounded-lg bg-white px-2 py-1 text-[10px] font-bold text-amber-700 border border-amber-200">Pause</button>
+                              )}
+                              {m.status === "Paused" && (
+                                <button onClick={() => setMemberships(prev => prev.map(x => x.id === m.id ? { ...x, status: "Active" } : x))} className="rounded-lg bg-white px-2 py-1 text-[10px] font-bold text-emerald-700 border border-emerald-200">Renew</button>
+                              )}
+                              {(m.status === "Canceled" || m.status === "Expired") && (
+                                <button onClick={() => setMemberships(prev => prev.map(x => x.id === m.id ? { ...x, status: "Active" } : x))} className="rounded-lg bg-white px-2 py-1 text-[10px] font-bold text-emerald-700 border border-emerald-200">Renew</button>
+                              )}
+                              {m.status !== "Canceled" && (
+                                <button onClick={() => setMemberships(prev => prev.map(x => x.id === m.id ? { ...x, status: "Canceled" } : x))} className="rounded-lg bg-white px-2 py-1 text-[10px] font-bold text-rose-600 border border-rose-200">Cancel</button>
+                              )}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
 
                   {/* Action Shortcuts */}
@@ -1872,6 +1972,9 @@ export const CustomersPage: React.FC<CustomersPageProps> = ({
         </div>
       )}
 
+      <WorkOrderBuilder isOpen={isWorkOrderBuilderOpen} onClose={() => setIsWorkOrderBuilderOpen(false)} prefill={workOrderPrefill} />
+      <CreateMembershipPicker isOpen={isMembershipPickerOpen} onClose={() => setIsMembershipPickerOpen(false)} prefillBase={membershipPrefillBase} />
+      <MembershipBuilder isOpen={isMembershipBuilderOpen} onClose={() => setIsMembershipBuilderOpen(false)} editingMembership={editingMembership} onSaved={() => setEditingMembership(null)} />
     </div>
   );
 };

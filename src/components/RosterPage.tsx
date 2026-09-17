@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useEffect } from "react";
-import { doc, getDoc, setDoc } from "firebase/firestore";
+import { doc, getDoc, setDoc, deleteDoc } from "firebase/firestore";
 import { db } from "../firebase";
 import { useDomainData } from "../context/DomainDataContext";
 import { useNavTelemetry } from "../context/NavTelemetryContext";
@@ -12,6 +12,17 @@ import { composeEmail, composeSms, callNumber } from "../lib/deviceHandoff";
 import { isManagerRole } from "../lib/notificationsService";
 import { GpsPrivacyNotice } from "./GpsPrivacyNotice";
 import { RecentRoutesSection } from "./RecentRoutesSection";
+import { CreateWorkOrderPicker } from "./CreateWorkOrderPicker";
+import { BulkImportModal } from "./BulkImportModal";
+import { normalizeEmailForMatch, type ImportFieldSpec, type DuplicateCheckResult } from "../lib/spreadsheetImport";
+
+type EmployeeImportKey = "name" | "email" | "phone" | "role";
+const EMPLOYEE_IMPORT_FIELDS: ImportFieldSpec<EmployeeImportKey>[] = [
+  { key: "name", label: "Name", aliases: ["name", "employee name", "full name", "first name"], required: true },
+  { key: "email", label: "Email", aliases: ["email", "email address", "e-mail"] },
+  { key: "phone", label: "Phone", aliases: ["phone", "phone number", "cell", "mobile"] },
+  { key: "role", label: "Role", aliases: ["role", "position", "title", "job title"] }
+];
 
 function genInviteCode(role: string): string {
   const randomStr = Math.random().toString(36).substring(2, 8).toUpperCase();
@@ -24,16 +35,16 @@ type InviteMode = "" | "select" | "custom";
 
 export const ONBOARDING_ROLE_TEMPLATES: Array<[string, string, string[]]> = [
   ["owner", "Owner", MODULE_CATALOG.map(m => m.id)],
-  ["general_manager", "General Manager", ["customers","leads","estimates","jobs","scheduling","dispatch","routes","inventory","documents","messages","timeclock","ai_assistant","settings"]],
-  ["office_manager", "Office Manager", ["dashboard","revenue","accounting","customers","leads","estimates","invoices","scheduling","dispatch","routes","jobs","timeclock","inventory","documents","pdf_editor","esign","messages","roster","training","reports","settings"]],
-  ["operations_manager", "Operations Manager", ["scheduling","dispatch","routes","jobs","inventory","documents","messages"]],
-  ["dispatcher", "Dispatcher", ["dispatch","routes","scheduling","jobs","customers"]],
+  ["general_manager", "General Manager", ["customers","leads","estimates","jobs","scheduling","dispatch","routes","employee_locations","inventory","documents","messages","timeclock","ai_assistant","settings"]],
+  ["office_manager", "Office Manager", ["dashboard","revenue","accounting","customers","leads","estimates","invoices","scheduling","dispatch","routes","employee_locations","jobs","timeclock","inventory","documents","pdf_editor","esign","messages","roster","training","reports","settings"]],
+  ["operations_manager", "Operations Manager", ["scheduling","dispatch","routes","employee_locations","jobs","inventory","documents","messages"]],
+  ["dispatcher", "Dispatcher", ["dispatch","routes","employee_locations","scheduling","jobs","customers"]],
   ["scheduler", "Scheduler", ["scheduling","customers","jobs","messages"]],
   ["sales_manager", "Sales Manager", ["customers","leads","estimates","messages","ai_assistant"]],
   ["sales_representative", "Sales Representative", ["customers","leads","estimates","messages","ai_assistant"]],
   ["estimator", "Estimator", ["customers","leads","estimates","documents","pdf_editor","esign"]],
-  ["project_manager", "Project Manager", ["customers","scheduling","dispatch","routes","jobs","inventory","documents","messages"]],
-  ["field_supervisor", "Field Supervisor", ["jobs","scheduling","dispatch","routes","inventory","documents","messages"]],
+  ["project_manager", "Project Manager", ["customers","scheduling","dispatch","routes","employee_locations","jobs","inventory","documents","messages"]],
+  ["field_supervisor", "Field Supervisor", ["jobs","scheduling","dispatch","routes","employee_locations","inventory","documents","messages"]],
   ["technician", "Technician", ["jobs","timeclock","messages","documents"]],
   ["apprentice", "Apprentice", ["jobs","timeclock","messages"]],
   ["installer", "Installer", ["jobs","timeclock","inventory","documents","messages"]],
@@ -61,6 +72,8 @@ export const RosterPage: React.FC = () => {
 
   const [search, setSearch] = useState("");
   const [editingEmployee, setEditingEmployee] = useState<EmployeeRecord | null>(null);
+  const [isWorkOrderPickerOpen, setIsWorkOrderPickerOpen] = useState(false);
+  const [workOrderEmployee, setWorkOrderEmployee] = useState<string>("");
   const [isInviting, setIsInviting] = useState(false);
   const [availableRoles, setAvailableRoles] = useState<InviteRole[]>(DEFAULT_INVITE_ROLES);
   const [inviteMode, setInviteMode] = useState<InviteMode>("");
@@ -71,6 +84,22 @@ export const RosterPage: React.FC = () => {
   const [requireTimeClockVerification, setRequireTimeClockVerification] = useState(false);
   const [inviteGpsTrackingEnabled, setInviteGpsTrackingEnabled] = useState(false);
   const [generatedInviteCode, setGeneratedInviteCode] = useState<string | null>(null);
+  const [isBulkImportOpen, setIsBulkImportOpen] = useState(false);
+  const [bulkInviteResults, setBulkInviteResults] = useState<Array<{ name: string; role: string; code: string }>>([]);
+
+  // A row is a likely duplicate if its email (or, lacking one, its exact
+  // name) already matches a real employee already on the roster -- no
+  // point re-inviting someone who already has an account.
+  const checkEmployeeDuplicate = (row: Partial<Record<EmployeeImportKey, string>>): DuplicateCheckResult => {
+    const email = normalizeEmailForMatch(row.email);
+    const name = (row.name || "").trim().toLowerCase();
+    const match = employees.find(e =>
+      (email && normalizeEmailForMatch(e.email) === email) ||
+      (!email && name && `${e.firstName} ${e.lastName}`.trim().toLowerCase() === name)
+    );
+    if (match) return { isDuplicate: true, reason: `Matches existing employee "${match.firstName} ${match.lastName}"` };
+    return { isDuplicate: false };
+  };
   const managerRole = (loggedInUser?.role || "").toLowerCase();
   const canManageRoles = !loggedInUser?.isEmployee || managerRole.includes("owner") || managerRole.includes("manager") || managerRole.includes("admin");
 
@@ -225,6 +254,80 @@ export const RosterPage: React.FC = () => {
     }
   };
 
+  // Bulk import: a real employee record only exists once that person has
+  // actually signed up with a real Firebase Auth account (see firestore.rules
+  // -- employees/{email} and user_profiles are keyed off a real uid, and
+  // that's deliberate: it's the same boundary the security hardening this
+  // app went through pins businessEmail/role on). So importing a whole team
+  // from a spreadsheet doesn't fabricate `employees` docs for people who
+  // haven't signed up yet -- instead it bulk-generates one real,
+  // already-role-assigned invite code per row (same write handleGenerateInvite
+  // does, just looped), so the owner can hand every hire their own code at
+  // once instead of running this dialog 500 times by hand.
+  const handleBulkImportEmployees = async (rows: Array<Partial<Record<EmployeeImportKey, string>>>) => {
+    if (!businessId) {
+      triggerNotification("Missing business account — please sign in again.");
+      return;
+    }
+    const fallbackRole = availableRoles.find(r => r.id === "technician") || availableRoles[0];
+    const results: Array<{ name: string; role: string; code: string }> = [];
+    for (const row of rows) {
+      const name = row.name?.trim();
+      if (!name) continue;
+      const roleQuery = (row.role || "").trim().toLowerCase();
+      const matchedRole = roleQuery ? availableRoles.find(r => r.name.toLowerCase() === roleQuery || r.name.toLowerCase().includes(roleQuery)) : undefined;
+      const role = matchedRole || fallbackRole;
+      const permissions = MODULE_CATALOG.filter(m => {
+        const flags = getPermissionFlags(role.modulePermissions, m.id);
+        return flags.view || flags.edit || flags.delete;
+      }).map(m => m.id);
+      const code = genInviteCode(role.name);
+      try {
+        await setDoc(doc(db, "employee_invites", code), {
+          code,
+          role: role.name,
+          businessEmail: businessId,
+          permissions,
+          granularPermissions: role.modulePermissions,
+          requireTimeClockVerification: false,
+          gpsTrackingEnabled: false,
+          status: "pending",
+          createdAt: new Date().toISOString(),
+          // Display-only convenience so the owner can match a code back to
+          // the row it came from -- redemption itself still only trusts the
+          // account that actually signs up with this code (App.tsx's
+          // invite-signup flow), never these fields.
+          prefilledName: name,
+          prefilledEmail: row.email?.trim() || "",
+          prefilledPhone: row.phone?.trim() || ""
+        });
+        results.push({ name, role: role.name, code });
+      } catch (err) {
+        console.error("Error generating bulk invite for", name, err);
+      }
+    }
+    if (!results.length) {
+      triggerNotification("No invite codes were generated -- make sure at least the Name column is mapped.");
+      return;
+    }
+    setBulkInviteResults(results);
+    triggerNotification(`✅ Generated ${results.length} invite code(s). Copy them below to send out.`);
+    if (logOperationalEvent) logOperationalEvent("Bulk Invites Generated", `Generated ${results.length} employee invite codes from spreadsheet`, "📥");
+  };
+
+  const undoLastBulkInvite = async () => {
+    const codes = bulkInviteResults.map(r => r.code);
+    try {
+      await Promise.all(codes.map(code => deleteDoc(doc(db, "employee_invites", code))));
+      triggerNotification(`Undone -- removed ${codes.length} invite code(s). Anyone who already used one keeps their account.`);
+      if (logOperationalEvent) logOperationalEvent("Import Undone", `Removed ${codes.length} unused invite codes from the last import`, "↩️");
+    } catch (err) {
+      console.error("Error undoing bulk invites:", err);
+      triggerNotification("Couldn't remove all the invite codes -- check your connection and try again.");
+    }
+    setBulkInviteResults([]);
+  };
+
   const statusColor = (status: string) =>
     status === "Clocked In"
       ? "bg-emerald-500/10 text-emerald-600 border-emerald-500/20"
@@ -242,12 +345,22 @@ export const RosterPage: React.FC = () => {
             <h2 className="text-lg font-sans font-extrabold text-[#1F3557] uppercase tracking-wider">Roster</h2>
             <p className="text-xs text-[#5E7393] font-sans font-semibold mt-0.5">Real employee directory — {employees.length} team member{employees.length === 1 ? "" : "s"}</p>
           </div>
-          {canManageRoles && <button
-            onClick={() => { setIsInviting(true); setGeneratedInviteCode(null); }}
-            className="px-3.5 py-2 bg-[#315C9F] hover:bg-[#1F3557] text-white text-xs font-bold rounded-xl uppercase tracking-wide flex items-center gap-1.5 cursor-pointer"
-          >
-            <UserPlus className="w-4 h-4" /> Invite Employee
-          </button>}
+          {canManageRoles && (
+            <div className="flex flex-wrap gap-2">
+              <button
+                onClick={() => setIsBulkImportOpen(true)}
+                className="px-3.5 py-2 bg-[#EAF5FF] hover:bg-[#BDDDF8] border border-[#9EC8EF] text-[#1F3557] text-xs font-bold rounded-xl uppercase tracking-wide flex items-center gap-1.5 cursor-pointer"
+              >
+                <UserPlus className="w-4 h-4" /> Import Team
+              </button>
+              <button
+                onClick={() => { setIsInviting(true); setGeneratedInviteCode(null); }}
+                className="px-3.5 py-2 bg-[#315C9F] hover:bg-[#1F3557] text-white text-xs font-bold rounded-xl uppercase tracking-wide flex items-center gap-1.5 cursor-pointer"
+              >
+                <UserPlus className="w-4 h-4" /> Invite Employee
+              </button>
+            </div>
+          )}
         </div>
 
         <div className="relative mt-4">
@@ -312,6 +425,7 @@ export const RosterPage: React.FC = () => {
                   <button disabled={!emp.phone} onClick={() => composeSms({ to: emp.phone })} className="px-2 py-1 bg-white hover:bg-[#EAF5FF] disabled:opacity-40 disabled:cursor-not-allowed border border-[#9EC8EF] rounded-lg text-[9px] font-bold text-[#315C9F] uppercase cursor-pointer">Text</button>
                   <button onClick={() => composeEmail({ to: emp.email })} className="px-2 py-1 bg-white hover:bg-[#EAF5FF] border border-[#9EC8EF] rounded-lg text-[9px] font-bold text-[#315C9F] uppercase cursor-pointer">Email</button>
                 </div>
+                <button onClick={() => { setWorkOrderEmployee(`${emp.firstName} ${emp.lastName}`.trim()); setIsWorkOrderPickerOpen(true); }} className="w-full px-2 py-1.5 bg-white hover:bg-[#EAF5FF] border border-dashed border-[#315C9F] rounded-lg text-[9px] font-black text-[#315C9F] uppercase cursor-pointer">🧰 Create Work Order</button>
               </div>
             );
           })}
@@ -489,6 +603,68 @@ export const RosterPage: React.FC = () => {
                 <button onClick={() => setIsInviting(false)} className="w-full py-2 bg-slate-100 text-slate-600 rounded-xl font-bold mt-2">Done</button>
               </>
             )}
+          </div>
+        </div>
+      )}
+      <CreateWorkOrderPicker
+        isOpen={isWorkOrderPickerOpen}
+        onClose={() => setIsWorkOrderPickerOpen(false)}
+        prefillBase={{ assignedEmployees: workOrderEmployee ? [workOrderEmployee] : undefined }}
+      />
+
+      {isBulkImportOpen && (
+        <BulkImportModal<EmployeeImportKey>
+          title="Import Team"
+          description="Upload a spreadsheet (CSV/TSV/Excel export, or a tabular PDF) of your team. This generates one real, role-assigned invite code per person -- each one still has to actually sign up with their code before they become a real employee record, same as inviting someone by hand."
+          fields={EMPLOYEE_IMPORT_FIELDS}
+          checkDuplicate={checkEmployeeDuplicate}
+          rowLabel={row => row.name || ""}
+          onConfirm={rows => void handleBulkImportEmployees(rows)}
+          onClose={() => setIsBulkImportOpen(false)}
+          confirmLabel="Generate Invite Codes"
+        />
+      )}
+
+      {bulkInviteResults.length > 0 && (
+        <div className="fixed inset-0 bg-[#1F3557]/60 backdrop-blur-xs flex items-center justify-center p-4 z-50 animate-fade-in">
+          <div className="bg-white rounded-3xl border-2 border-[#9EC8EF] shadow-2xl max-w-lg w-full overflow-hidden flex flex-col max-h-[90vh]">
+            <div className="bg-[#315C9F] text-white px-6 py-4 flex items-center justify-between shrink-0">
+              <h3 className="text-sm font-black uppercase">Invite Codes Generated ({bulkInviteResults.length})</h3>
+              <button onClick={() => setBulkInviteResults([])} className="text-white/80 hover:text-white p-1 rounded-lg hover:bg-white/10 cursor-pointer"><X className="w-4 h-4" /></button>
+            </div>
+            <div className="p-5 overflow-y-auto space-y-2">
+              <p className="text-[11px] text-[#5E7393]">Send each person their own code -- they'll enter it when they sign up.</p>
+              <div className="border border-[#9EC8EF]/40 rounded-xl overflow-hidden divide-y divide-[#9EC8EF]/20">
+                {bulkInviteResults.map(r => (
+                  <div key={r.code} className="p-2.5 flex items-center justify-between gap-3 text-xs">
+                    <div className="min-w-0">
+                      <p className="font-bold truncate">{r.name}</p>
+                      <p className="text-[10px] text-[#5E7393]">{r.role}</p>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <span className="font-mono font-black text-[#1F3557]">{r.code}</span>
+                      <button
+                        onClick={() => navigator.clipboard.writeText(`${r.name}: ${r.code}`)}
+                        className="text-[#315C9F] cursor-pointer"
+                        title="Copy"
+                      >
+                        <Copy className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <button
+                onClick={() => navigator.clipboard.writeText(bulkInviteResults.map(r => `${r.name} (${r.role}): ${r.code}`).join("\n"))}
+                className="w-full py-2 bg-[#EAF5FF] hover:bg-[#BDDDF8] border border-[#9EC8EF] text-[#1F3557] rounded-xl font-bold text-xs cursor-pointer"
+              >
+                Copy All
+              </button>
+            </div>
+            <div className="bg-slate-50 border-t border-[#9EC8EF]/40 px-6 py-4 shrink-0 flex gap-2">
+              <button onClick={() => void undoLastBulkInvite()} className="flex-1 py-2 bg-white border border-rose-200 text-rose-600 rounded-xl font-bold cursor-pointer">Undo</button>
+              <button onClick={() => setBulkInviteResults([])} className="flex-1 py-2 bg-slate-100 text-slate-600 rounded-xl font-bold cursor-pointer">Done</button>
+            </div>
           </div>
         </div>
       )}

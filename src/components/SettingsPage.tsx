@@ -43,13 +43,17 @@ import {
   X,
   Archive,
   ArrowRight,
-  UserPlus
+  UserPlus,
+  Star,
+  Send
 } from "lucide-react";
 import { RolePermissionEditorModal } from "./RolePermissionEditorModal";
 import { ONBOARDING_ROLE_TEMPLATES } from "./RosterPage";
 import { GpsPrivacyNotice } from "./GpsPrivacyNotice";
 import { defaultGranularFromModuleList } from "../types/permissions";
+import { STATE_SALES_TAX_DEFAULTS, SALES_TAX_DATASET_VERSION } from "../data/stateSalesTaxDefaults";
 import type { SelectedRole, WorkspaceTheme } from "../App";
+import { workspaceThemeFromSetting, workspaceThemeSettingValue } from "../App";
 
 // Types for SettingsPage
 import { StructuredAddressFields } from "./StructuredAddressFields";
@@ -111,6 +115,12 @@ const INITIAL_DEFAULTS = {
     nextPayday: ""
   },
   taxes: {
+    // Selected state (postal abbreviation) and the dataset version its
+    // stateTaxRate was prefilled from -- lets the UI detect when a future
+    // dataset update has a newer default for this state without silently
+    // overwriting a rate the owner may have already customized.
+    state: "",
+    stateTaxRateDatasetVersion: "",
     stateTaxRate: 0,
     countyTaxRate: 0,
     taxOnServices: true,
@@ -258,7 +268,7 @@ export default function SettingsPage({
 }: SettingsPageProps) {
   const { loggedInUser, simulatedRole, businessId } = useAuth();
   const activeRole = simulatedRole || loggedInUser?.role || "Owner";
-  const { recentRoster, setRecentRoster, recentAiActions, setRecentAiActions, employees, setEmployees } = useDomainData();
+  const { recentRoster, setRecentRoster, recentAiActions, setRecentAiActions, employees, setEmployees, reviewAutomationSettings, setReviewAutomationSettings, reviewRequests, customers } = useDomainData();
   const { triggerNotification, navigateToScreen: onNavigateToScreen } = useNavTelemetry();
 
   // Completed employee records are the primary roster source. Include active
@@ -304,13 +314,12 @@ export default function SettingsPage({
               { ...defaults, ...(stored[category] || {}) }
             ])
           ) as typeof INITIAL_DEFAULTS;
-          // Migrate the abandoned first-pass preset names without ever
-          // altering the original Light Mode Basic appearance.
-          merged.appearance.theme = stored?.appearance?.theme === "Dark Mode Dynamic"
-            ? "Dark Mode Dynamic"
-            : stored?.appearance?.theme === "Dark Mode Basic" || stored?.appearance?.theme === "Basic Dark"
-              ? "Dark Mode Basic"
-              : "Light Mode Basic";
+          // Normalize through the same canonical helpers App.tsx uses (handles
+          // the abandoned "Light Mode Extreme"/"Basic Dark" preset names too)
+          // instead of a second, incomplete copy of this logic -- the old
+          // inline version here never recognized "Light Mode Dynamic" and
+          // silently fell back to "Light Mode Basic" on every reload.
+          merged.appearance.theme = workspaceThemeSettingValue(workspaceThemeFromSetting(stored?.appearance?.theme));
           setLocalConfig(merged);
           setSavedConfig(merged);
           const matchedTheme = THEME_OPTIONS.find(option => option.value === merged.appearance.theme);
@@ -402,6 +411,7 @@ export default function SettingsPage({
     { id: "job_defaults", label: "Job Defaults", icon: <FileText className="w-4 h-4 text-[#315C9F]" />, group: "Module Defaults" },
     { id: "document_defaults", label: "Document Defaults", icon: <FileCode className="w-4 h-4 text-[#315C9F]" />, group: "Module Defaults" },
     { id: "message_defaults", label: "Message Defaults", icon: <Volume2 className="w-4 h-4 text-[#315C9F]" />, group: "Module Defaults" },
+    { id: "review_automation", label: "Automate Reviews", icon: <Star className="w-4 h-4 text-[#315C9F]" />, group: "Module Defaults" },
     { id: "training_defaults", label: "Training Defaults", icon: <Sliders className="w-4 h-4 text-[#315C9F]" />, group: "Module Defaults" },
 
     { id: "ai_settings", label: "AI Settings", icon: <Sparkles className="w-4 h-4 text-[#315C9F]" />, group: "System Control" },
@@ -460,6 +470,15 @@ export default function SettingsPage({
       const nextTheme = matchedTheme?.id || "light-basic";
       setWorkspaceTheme(nextTheme);
       localStorage.setItem("ownerslocal_workspace_theme", value);
+      // Saved immediately, not gated behind the page's general "Save
+      // Changes" button (merge: true only touches this one field) -- a
+      // theme pick that only lived in local state until some unrelated
+      // field was also saved is exactly what made picking a theme here
+      // look like it "didn't stick" on refresh.
+      if (businessId) {
+        setDoc(doc(db, "business_profiles", businessId), { companySettings: { appearance: { theme: value } } }, { merge: true })
+          .catch(err => console.error("Couldn't save workspace theme:", err));
+      }
     }
   };
 
@@ -1561,28 +1580,108 @@ export default function SettingsPage({
               {activeCategory === "taxes" && (
                 <div className="space-y-4">
                   <h3 className="text-xs font-extrabold text-[#342D7E] uppercase tracking-wider">Corporate & Local Sales Taxes</h3>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <div className="space-y-1">
-                      <label className="text-[10px] uppercase font-bold text-slate-500">State Sales Tax Rate (%)</label>
-                      <input
-                        type="number"
-                        step="0.01"
-                        value={localConfig.taxes.stateTaxRate}
-                        onChange={(e) => handleConfigChange("taxes", "stateTaxRate", Number(e.target.value))}
-                        className="w-full px-3 py-2 bg-white border border-[#A9CDEE] rounded-xl text-xs font-bold text-slate-800 focus:outline-none"
-                      />
-                    </div>
-                    <div className="space-y-1">
-                      <label className="text-[10px] uppercase font-bold text-slate-500">County Sales Tax Rate (%)</label>
-                      <input
-                        type="number"
-                        step="0.01"
-                        value={localConfig.taxes.countyTaxRate}
-                        onChange={(e) => handleConfigChange("taxes", "countyTaxRate", Number(e.target.value))}
-                        className="w-full px-3 py-2 bg-white border border-[#A9CDEE] rounded-xl text-xs font-bold text-slate-800 focus:outline-none"
-                      />
-                    </div>
-                  </div>
+                  {(() => {
+                    const selectedStateData = STATE_SALES_TAX_DEFAULTS.find(s => s.abbreviation === localConfig.taxes.state);
+                    const hasNewerDefault = !!selectedStateData
+                      && localConfig.taxes.stateTaxRateDatasetVersion
+                      && localConfig.taxes.stateTaxRateDatasetVersion !== SALES_TAX_DATASET_VERSION
+                      && selectedStateData.statewideDefaultRatePercent !== localConfig.taxes.stateTaxRate;
+                    return (
+                      <>
+                        <div className="space-y-1">
+                          <label className="text-[10px] uppercase font-bold text-slate-500">State</label>
+                          <select
+                            value={localConfig.taxes.state}
+                            onChange={(e) => {
+                              const abbreviation = e.target.value;
+                              const match = STATE_SALES_TAX_DEFAULTS.find(s => s.abbreviation === abbreviation);
+                              setLocalConfig(prev => ({
+                                ...prev,
+                                taxes: {
+                                  ...prev.taxes,
+                                  state: abbreviation,
+                                  // Prefills the editable rate from the statewide default --
+                                  // never a guaranteed final customer rate, just a starting
+                                  // point (see the label below and STATE_SALES_TAX_DEFAULTS's
+                                  // own header comment). Only happens on an actual state
+                                  // change here, never as a background overwrite.
+                                  stateTaxRate: match ? match.statewideDefaultRatePercent : prev.taxes.stateTaxRate,
+                                  stateTaxRateDatasetVersion: match ? SALES_TAX_DATASET_VERSION : prev.taxes.stateTaxRateDatasetVersion
+                                }
+                              }));
+                            }}
+                            className="w-full px-3 py-2 bg-white border border-[#A9CDEE] rounded-xl text-xs font-bold text-slate-800 focus:outline-none cursor-pointer"
+                          >
+                            <option value="">Select a state…</option>
+                            {STATE_SALES_TAX_DEFAULTS.map(s => (
+                              <option key={s.abbreviation} value={s.abbreviation}>{s.state}</option>
+                            ))}
+                          </select>
+                        </div>
+
+                        {hasNewerDefault && selectedStateData && (
+                          <div className="flex items-center justify-between gap-3 bg-amber-50 border border-amber-200 rounded-xl p-3">
+                            <p className="text-[10.5px] text-amber-700 font-sans leading-relaxed">
+                              An updated statewide default is available for {selectedStateData.state}: {selectedStateData.statewideDefaultRatePercent}% (yours is currently {localConfig.taxes.stateTaxRate}%).
+                            </p>
+                            <button
+                              type="button"
+                              onClick={() => handleConfigChange("taxes", "stateTaxRate", selectedStateData.statewideDefaultRatePercent)}
+                              className="shrink-0 px-2.5 py-1 bg-amber-100 hover:bg-amber-200 text-amber-800 border border-amber-300 rounded-lg text-[10px] font-bold cursor-pointer"
+                            >
+                              Use Updated Rate
+                            </button>
+                          </div>
+                        )}
+
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                          <div className="space-y-1">
+                            <label className="text-[10px] uppercase font-bold text-slate-500">
+                              State Sales Tax Rate (%) {selectedStateData && <span className="normal-case font-medium text-slate-400">— statewide default, not a guaranteed final rate</span>}
+                            </label>
+                            <input
+                              type="number"
+                              step="0.001"
+                              value={localConfig.taxes.stateTaxRate}
+                              onChange={(e) => handleConfigChange("taxes", "stateTaxRate", Number(e.target.value))}
+                              className="w-full px-3 py-2 bg-white border border-[#A9CDEE] rounded-xl text-xs font-bold text-slate-800 focus:outline-none"
+                            />
+                          </div>
+                          <div className="space-y-1">
+                            <label className="text-[10px] uppercase font-bold text-slate-500">County / Local Sales Tax Rate (%)</label>
+                            <input
+                              type="number"
+                              step="0.001"
+                              value={localConfig.taxes.countyTaxRate}
+                              onChange={(e) => handleConfigChange("taxes", "countyTaxRate", Number(e.target.value))}
+                              className="w-full px-3 py-2 bg-white border border-[#A9CDEE] rounded-xl text-xs font-bold text-slate-800 focus:outline-none"
+                            />
+                            <p className="text-[9.5px] text-slate-400 font-sans">City/county/special-district rates vary by exact address — enter yours manually.</p>
+                          </div>
+                        </div>
+
+                        {selectedStateData?.note && (
+                          <div className="flex items-start gap-2 bg-[#F5FAFF] border border-[#A9CDEE]/50 rounded-xl p-3">
+                            <Info className="h-3.5 w-3.5 text-[#315C9F] mt-0.5 shrink-0" />
+                            <p className="text-[10.5px] text-slate-600 font-sans leading-relaxed">{selectedStateData.note}</p>
+                          </div>
+                        )}
+                        {selectedStateData && !selectedStateData.hasStatewideGeneralSalesTax && (
+                          <div className="flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-xl p-3">
+                            <Info className="h-3.5 w-3.5 text-amber-600 mt-0.5 shrink-0" />
+                            <p className="text-[10.5px] text-amber-700 font-sans leading-relaxed">
+                              {selectedStateData.state} has no general statewide sales tax
+                              {selectedStateData.localSalesTaxMayApply ? ", but local jurisdictions may still impose one — check your county/city rate." : "."}
+                            </p>
+                          </div>
+                        )}
+
+                        <p className="text-[9.5px] text-slate-400 font-sans">
+                          Sales tax defaults last updated {SALES_TAX_DATASET_VERSION} (Tax Foundation, midyear 2026).
+                        </p>
+                      </>
+                    );
+                  })()}
                   <div className="space-y-2 bg-white p-4 rounded-xl border border-[#A9CDEE]">
                     <label className="flex items-center gap-3 cursor-pointer">
                       <input
@@ -1980,6 +2079,112 @@ export default function SettingsPage({
                       onChange={(e) => handleConfigChange("message", "autoReplyText", e.target.value)}
                       className="w-full h-16 px-3 py-2 bg-white border border-[#A9CDEE] rounded-xl text-xs font-bold text-slate-800 focus:outline-none"
                     />
+                  </div>
+                </div>
+              )}
+
+              {/* AUTOMATE REVIEWS */}
+              {activeCategory === "review_automation" && (
+                <div className="space-y-4">
+                  <h3 className="text-xs font-extrabold text-[#342D7E] uppercase tracking-wider">Automate Reviews</h3>
+                  <label className="flex items-center gap-2 rounded-xl border border-[#A9CDEE] bg-white p-3">
+                    <input
+                      type="checkbox"
+                      checked={reviewAutomationSettings.enabled}
+                      onChange={(e) => setReviewAutomationSettings(prev => ({ ...prev, enabled: e.target.checked }))}
+                    />
+                    <span className="text-xs font-bold text-slate-700">Turn on automatic review requests</span>
+                  </label>
+
+                  <div className="space-y-1">
+                    <label className="text-[10px] uppercase font-bold text-slate-500">Send the request when</label>
+                    <select
+                      value={reviewAutomationSettings.trigger}
+                      onChange={(e) => setReviewAutomationSettings(prev => ({ ...prev, trigger: e.target.value as typeof prev.trigger }))}
+                      className="w-full px-3 py-2 bg-white border border-[#A9CDEE] rounded-xl text-xs font-bold text-slate-800 focus:outline-none"
+                    >
+                      <option value="manual">Manual Send Only (no automatic sending)</option>
+                      <option value="job_completed">Job Completed</option>
+                      <option value="invoice_paid">Invoice Paid</option>
+                      <option value="days_after_completion">X Days After Completion</option>
+                    </select>
+                  </div>
+
+                  {reviewAutomationSettings.trigger === "days_after_completion" && (
+                    <div className="space-y-1">
+                      <label className="text-[10px] uppercase font-bold text-slate-500">Days after job completion</label>
+                      <input
+                        type="number"
+                        min={0}
+                        value={reviewAutomationSettings.daysAfterCompletion}
+                        onChange={(e) => setReviewAutomationSettings(prev => ({ ...prev, daysAfterCompletion: Math.max(0, Number(e.target.value)) }))}
+                        className="w-40 px-3 py-2 bg-white border border-[#A9CDEE] rounded-xl text-xs font-bold text-slate-800 focus:outline-none"
+                      />
+                    </div>
+                  )}
+
+                  <div className="space-y-1">
+                    <label className="text-[10px] uppercase font-bold text-slate-500">Edit Message</label>
+                    <textarea
+                      value={reviewAutomationSettings.message}
+                      onChange={(e) => setReviewAutomationSettings(prev => ({ ...prev, message: e.target.value }))}
+                      placeholder="Write exactly what you want customers to see -- there's no pre-written text."
+                      className="w-full h-24 px-3 py-2 bg-white border border-[#A9CDEE] rounded-xl text-xs font-bold text-slate-800 focus:outline-none"
+                    />
+                  </div>
+
+                  <div className="space-y-1">
+                    <label className="text-[10px] uppercase font-bold text-slate-500">Review Link</label>
+                    <input
+                      type="text"
+                      value={reviewAutomationSettings.reviewLink}
+                      onChange={(e) => setReviewAutomationSettings(prev => ({ ...prev, reviewLink: e.target.value }))}
+                      placeholder="https://g.page/r/your-business/review"
+                      className="w-full px-3 py-2 bg-white border border-[#A9CDEE] rounded-xl text-xs font-bold text-slate-800 focus:outline-none"
+                    />
+                  </div>
+
+                  <div className="space-y-1">
+                    <label className="text-[10px] uppercase font-bold text-slate-500">Never send to these customers</label>
+                    <select
+                      value=""
+                      onChange={(e) => {
+                        const id = e.target.value;
+                        if (id && !reviewAutomationSettings.excludedCustomerIds.includes(id)) {
+                          setReviewAutomationSettings(prev => ({ ...prev, excludedCustomerIds: [...prev.excludedCustomerIds, id] }));
+                        }
+                      }}
+                      className="w-full px-3 py-2 bg-white border border-[#A9CDEE] rounded-xl text-xs font-bold text-slate-800 focus:outline-none"
+                    >
+                      <option value="">Add a customer to exclude…</option>
+                      {customers.filter((c: any) => !reviewAutomationSettings.excludedCustomerIds.includes(c.id)).map((c: any) => (
+                        <option key={c.id} value={c.id}>{c.contact || c.company}</option>
+                      ))}
+                    </select>
+                    <div className="flex flex-wrap gap-1.5 pt-1">
+                      {reviewAutomationSettings.excludedCustomerIds.map((id: string) => {
+                        const cust = customers.find((c: any) => c.id === id);
+                        return (
+                          <span key={id} className="flex items-center gap-1 rounded-lg bg-rose-50 border border-rose-200 px-2 py-1 text-[10px] font-bold text-rose-700">
+                            {cust?.contact || cust?.company || id}
+                            <button onClick={() => setReviewAutomationSettings(prev => ({ ...prev, excludedCustomerIds: prev.excludedCustomerIds.filter(x => x !== id) }))}><X className="w-3 h-3" /></button>
+                          </span>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  <div className="space-y-2 pt-2 border-t border-[#A9CDEE]/50">
+                    <h4 className="text-xs font-extrabold text-[#342D7E] uppercase tracking-wider flex items-center gap-1.5"><Send className="w-3.5 h-3.5" />Review Requests</h4>
+                    <div className="max-h-64 overflow-y-auto space-y-1.5">
+                      {reviewRequests.length === 0 && <p className="text-xs text-slate-400">No review requests yet.</p>}
+                      {reviewRequests.map((r: any) => (
+                        <div key={r.id} className="flex items-center justify-between rounded-lg bg-white border border-[#A9CDEE]/60 px-3 py-2 text-xs">
+                          <span className="font-bold text-slate-700">{r.customerName}</span>
+                          <span className="rounded-full px-2 py-0.5 text-[9px] font-black uppercase bg-[#E3F3FF] text-[#315C9F]">{r.status}</span>
+                        </div>
+                      ))}
+                    </div>
                   </div>
                 </div>
               )}

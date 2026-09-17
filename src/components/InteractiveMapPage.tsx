@@ -56,26 +56,14 @@ import {
   ExternalLink
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
-import { APIProvider, Map, Marker, Polyline, useMap } from "@vis.gl/react-google-maps";
+import { APIProvider, AdvancedMarker, Map, Marker, Polyline, useMap } from "@vis.gl/react-google-maps";
 import { composeEmail, composeSms, callNumber } from "../lib/deviceHandoff";
-import { subscribeToCollection } from "../lib/firestoreService";
 import { fetchRecentRoutes, ShiftRoute } from "../lib/timeClockService";
 import { GpsPrivacyNotice } from "./GpsPrivacyNotice";
+import { formatFixAge } from "../lib/gpsFormatting";
+import { useActiveTechnicians } from "../hooks/useActiveTechnicians";
 
 const DFW_FALLBACK = { lat: 32.7767, lng: -96.7970 };
-
-// Human-readable age of a real GPS fix ("Live", "3m ago", ...) -- never
-// invented for a fix that doesn't exist, callers only pass a real timestamp.
-function formatFixAge(iso: string): string {
-  const ms = Date.now() - new Date(iso).getTime();
-  if (!Number.isFinite(ms) || ms < 0) return "Live";
-  if (ms < 90000) return "Live";
-  const minutes = Math.round(ms / 60000);
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.round(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  return `${Math.round(hours / 24)}d ago`;
-}
 
 const FitMapToPins: React.FC<{ pins: Array<{ lat: number; lng: number }> }> = ({ pins }) => {
   const map = useMap();
@@ -105,6 +93,8 @@ export function geocodeAddress(address: string, id: string = ""): { lat: number;
 
 export interface InteractiveMapPageProps {
   businessAddresses?: string[];
+  /** Set by navigateToScreen("routes", { technicianId }) -- e.g. the "View on Map" button from Employee Locations -- to land here with that technician already selected in the Technician Location filter. */
+  initialTechnicianId?: string;
 }
 
 // Territory Schema
@@ -124,7 +114,8 @@ interface ServiceTerritory {
 const TERRITORY_COLORS = ["#3b82f6", "#8b5cf6", "#10b981", "#f59e0b", "#ec4899", "#06b6d4"];
 
 export const InteractiveMapPage: React.FC<InteractiveMapPageProps> = ({
-  businessAddresses
+  businessAddresses,
+  initialTechnicianId
 }) => {
   const { loggedInUser, simulatedRole } = useAuth();
   const activeRole = simulatedRole || loggedInUser?.role || "Owner";
@@ -153,6 +144,13 @@ export const InteractiveMapPage: React.FC<InteractiveMapPageProps> = ({
   const { navigateToScreen: onNavigateToScreen, logOperationalEvent, triggerNotification } = useNavTelemetry();
   const apiKey = (process.env.GOOGLE_MAPS_PLATFORM_KEY || "").trim();
   const hasValidKey = apiKey !== "";
+  // google.maps.Marker (the plain <Marker> below) is deprecated in favor of
+  // AdvancedMarkerElement, but AdvancedMarkerElement hard-requires a real
+  // Cloud Map ID to render at all -- it silently no-ops without one. Only
+  // switch to it when a business has actually configured GOOGLE_MAPS_MAP_ID
+  // (see .env.example); otherwise keep the legacy marker so pins that work
+  // today don't stop rendering for every business that hasn't set one.
+  const mapId = (process.env.GOOGLE_MAPS_MAP_ID || "").trim();
   const [mapsApiLoaded, setMapsApiLoaded] = useState(false);
   const [mapsApiError, setMapsApiError] = useState(false);
   const [mapsApiDiagnostic, setMapsApiDiagnostic] = useState<string | null>(null);
@@ -299,6 +297,16 @@ export const InteractiveMapPage: React.FC<InteractiveMapPageProps> = ({
   // whatever filteredPins ends up containing.
   const [selectedTechnicianId, setSelectedTechnicianId] = useState("All");
 
+  // Arriving here via the "View on Map" button from Employee Locations
+  // (navigateToScreen("routes", { technicianId })) lands straight on that
+  // technician instead of the unfiltered "All Technicians" view.
+  useEffect(() => {
+    if (!initialTechnicianId) return;
+    setSelectedTechnicianId(initialTechnicianId);
+    setShowTechnicians(true);
+    setFilterType("Technician");
+  }, [initialTechnicianId]);
+
   // Real past-shift routes for whichever technician is selected above --
   // fetched on demand (not for every technician up front), and always the
   // real ShiftRoute records timeClockService.ts writes while GPS tracking
@@ -362,108 +370,10 @@ export const InteractiveMapPage: React.FC<InteractiveMapPageProps> = ({
   const [isMultiSelectMode, setIsMultiSelectMode] = useState(false);
   const [selectedBasketIds, setSelectedBasketIds] = useState<string[]>([]);
 
-  // Real technicians — one per real employee. Name and clocked-in/on-break/
-  // off-duty status come from the real employees + time_clock_logs
-  // collections. Position comes from the most real fix available: a live
-  // GPS update reported while clocked in (see activeShifts below and the
-  // watchPosition effect in App.tsx) when one exists, otherwise the single
-  // fix captured at their last clock event. Nothing here is ever animated
-  // with fabricated movement — a technician's dot only moves when a real
-  // device fix says it did.
-  const [activeShifts, setActiveShifts] = useState<Array<{
-    id: string;
-    employeeEmail: string;
-    lastLocation?: { lat: number; lng: number; accuracy?: number; heading?: number | null; speed?: number | null; capturedAt: string };
-    lastLocationAt?: string;
-  }>>([]);
-
-  useEffect(() => {
-    if (!businessId) {
-      setActiveShifts([]);
-      return;
-    }
-    return subscribeToCollection("active_shifts", businessId, docs => setActiveShifts(docs as any));
-  }, [businessId]);
-
-  const [activeTechnicians, setActiveTechnicians] = useState<Array<{
-    id: string;
-    name: string;
-    vehicle: string;
-    status: "Available" | "Traveling" | "Lunch" | "Offline" | "Clocked Out";
-    lat: number;
-    lng: number;
-    jobId?: string;
-    routeProgress?: number; // 0 to 100
-    routePath?: Array<{ lat: number; lng: number }>;
-    lastLocationAt?: string; // real timestamp of the fix behind lat/lng, when known
-    speedMph?: number; // real device-reported speed from the live GPS fix, when the device provided one
-  }>>([]);
-
-  const parseGpsString = (gps: string): { lat: number; lng: number } | null => {
-    const match = gps.match(/(\d+(?:\.\d+)?)\s*°\s*([NS])\s*,\s*(\d+(?:\.\d+)?)\s*°\s*([EW])/);
-    if (!match) return null;
-    const [, latStr, latDir, lngStr, lngDir] = match;
-    return {
-      lat: parseFloat(latStr) * (latDir === "S" ? -1 : 1),
-      lng: parseFloat(lngStr) * (lngDir === "W" ? -1 : 1)
-    };
-  };
-
-  useEffect(() => {
-    setActiveTechnicians(prev => employees.map(er => {
-      const existing = prev.find(t => t.id === er.email);
-      const myLogs = timeClockLogs.filter(l => l.employeeEmail === er.email);
-      const lastLog = [...myLogs].sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())[0];
-      const realStatus: "Available" | "Lunch" | "Offline" =
-        !lastLog || lastLog.type === "Clock Out" ? "Offline" :
-        lastLog.type === "Break Start" ? "Lunch" : "Available";
-      const myShift = activeShifts.find(s => s.employeeEmail === er.email);
-      const liveFix = myShift?.lastLocation;
-      const lastRealFix = liveFix || (lastLog ? parseGpsString(lastLog.gps) : null);
-      const fallbackFix = geocodeAddress(businessAddresses?.[0] || "Dallas, TX", er.email);
-      // The device's own real reported speed (Geolocation API coords.speed,
-      // meters/second) -- only present on a live fix, and only when the
-      // device actually reported one. Converted to mph; never guessed or
-      // interpolated when absent.
-      const speedMph = liveFix?.speed != null ? liveFix.speed * 2.23694 : undefined;
-      return {
-        id: er.email,
-        name: `${er.firstName} ${er.lastName}`.trim(),
-        // The vehicle this employee actually typed in at their last
-        // clock-in (TimeClockLog.vehicle) -- real, not a separate dispatch
-        // field that nothing in this app ever sets.
-        vehicle: lastLog?.vehicle || "Unassigned",
-        // Preserve an in-progress local dispatch ("Traveling" to a job)
-        // rather than overwrite it with the plain clocked-in state.
-        status: existing?.jobId ? "Traveling" : realStatus,
-        lat: existing?.jobId ? existing.lat : (lastRealFix?.lat ?? existing?.lat ?? fallbackFix.lat),
-        lng: existing?.jobId ? existing.lng : (lastRealFix?.lng ?? existing?.lng ?? fallbackFix.lng),
-        jobId: existing?.jobId,
-        routeProgress: existing?.routeProgress,
-        routePath: existing?.routePath,
-        lastLocationAt: existing?.jobId ? existing.lastLocationAt : (myShift?.lastLocationAt ?? existing?.lastLocationAt),
-        speedMph
-      };
-    }));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [employees, timeClockLogs, businessAddresses, activeShifts]);
-
-  // Vehicles are real — one per technician who's clocked in and typed a
-  // vehicle name at clock-in (no separate fleet CRUD exists). Speed is that
-  // technician's own real device-reported speed. There is no fuel-telemetry
-  // integration of any kind (no OBD-II/fleet API), so fuel is never shown
-  // rather than invented -- same reasoning as removing the old jitter
-  // animation for technician position.
-  const vehicles = useMemo(() => activeTechnicians
-    .filter(t => t.vehicle !== "Unassigned" && t.status !== "Offline")
-    .map(t => ({
-      id: `veh_${t.id}`,
-      name: t.vehicle,
-      driver: t.name,
-      driverId: t.id,
-      speedMph: t.speedMph,
-      assignedJobs: schedulingEvents.filter(e => e.assignedEmployee === t.name && e.status !== "Completed").length
-    })), [activeTechnicians, schedulingEvents]);
+  // Real technicians — one per real employee, position/status/speed all
+  // real (never simulated). Shared with the Employee Locations page via
+  // this hook so both read the identical data; see its own doc comment.
+  const { activeTechnicians, setActiveTechnicians, vehicles } = useActiveTechnicians(businessAddresses);
 
   // Service territories start empty. Only owner-created, real territories belong here.
   const [serviceTerritories, setServiceTerritories] = useState<ServiceTerritory[]>([]);
@@ -1780,6 +1690,14 @@ export const InteractiveMapPage: React.FC<InteractiveMapPageProps> = ({
               </select>
             </div>
 
+            <button
+              onClick={() => onNavigateToScreen?.("employee_locations")}
+              className="px-3 py-2 rounded-xl text-[10px] font-black border border-emerald-500/40 text-emerald-400 hover:bg-emerald-500/10 flex items-center gap-1.5"
+              title="Full GPS employee locations interface -- roster status, GPS permissions, and route history"
+            >
+              <Navigation className="w-3.5 h-3.5" /> Open Employee Locations
+            </button>
+
             {selectedTechnicianId !== "All" && (
               <div className="flex items-center gap-2">
                 <span className="text-slate-400">Past Route:</span>
@@ -1855,6 +1773,7 @@ export const InteractiveMapPage: React.FC<InteractiveMapPageProps> = ({
                 >
                 <Map
                   id="gmp_mcp_codeassist_v1_aistudio"
+                  mapId={mapId || undefined}
                   defaultCenter={resolvedDefaultCenter || DFW_FALLBACK}
                   defaultZoom={11}
                   onCameraChanged={(e) => handleMapCameraChanged(e?.detail?.center)}
@@ -1874,24 +1793,39 @@ export const InteractiveMapPage: React.FC<InteractiveMapPageProps> = ({
                       strokeWeight={4}
                     />
                   )}
-                  {/* Standard markers do not require a cloud Map ID and are
-                      substantially more reliable on mobile browsers. */}
-                  {filteredPins.map(pin => (
-                    <Marker
-                      key={`${pin.type}_${pin.id}`}
-                      position={{ lat: pin.lat, lng: pin.lng }}
-                      title={pin.title}
-                      onClick={() => {
-                        if (isMultiSelectMode) {
-                          setSelectedBasketIds(prev =>
-                            prev.includes(pin.id) ? prev.filter(x => x !== pin.id) : [...prev, pin.id]
-                          );
-                        } else {
-                          openLocationEditor(pin);
-                        }
-                      }}
-                    />
-                  ))}
+                  {/* AdvancedMarker when a real Cloud Map ID is configured
+                      (see mapId above) -- same position/title/click behavior
+                      either way, just a different underlying Google Maps API.
+                      Falls back to the legacy standard Marker (still
+                      substantially more reliable on mobile browsers) when no
+                      Map ID is set, since AdvancedMarker can't render at all
+                      without one. */}
+                  {filteredPins.map(pin => {
+                    const handlePinClick = () => {
+                      if (isMultiSelectMode) {
+                        setSelectedBasketIds(prev =>
+                          prev.includes(pin.id) ? prev.filter(x => x !== pin.id) : [...prev, pin.id]
+                        );
+                      } else {
+                        openLocationEditor(pin);
+                      }
+                    };
+                    return mapId ? (
+                      <AdvancedMarker
+                        key={`${pin.type}_${pin.id}`}
+                        position={{ lat: pin.lat, lng: pin.lng }}
+                        title={pin.title}
+                        onClick={handlePinClick}
+                      />
+                    ) : (
+                      <Marker
+                        key={`${pin.type}_${pin.id}`}
+                        position={{ lat: pin.lat, lng: pin.lng }}
+                        title={pin.title}
+                        onClick={handlePinClick}
+                      />
+                    );
+                  })}
                 </Map>
               </APIProvider>
             ) : (
@@ -2394,6 +2328,13 @@ export const InteractiveMapPage: React.FC<InteractiveMapPageProps> = ({
                     selectedPin.type === "Lead" ? "bg-purple-500/10 text-purple-400 border-purple-500/20" :
                     selectedPin.type === "Estimate" ? "bg-yellow-500/10 text-yellow-400 border-yellow-500/20" :
                     selectedPin.type === "Job" ? "bg-orange-500/10 text-orange-400 border-orange-500/20" :
+                    // These two fell through to the generic gray default
+                    // before, even though every marker/legend/stat-card for
+                    // Technician and Vehicle elsewhere on this page already
+                    // uses emerald/cyan -- this badge is the one place that
+                    // disagreed.
+                    selectedPin.type === "Technician" ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20" :
+                    selectedPin.type === "Vehicle" ? "bg-cyan-500/10 text-cyan-400 border-cyan-500/20" :
                     "bg-slate-800 text-slate-300 border-white/5"
                   }`}>
                     {selectedPin.type} Profile
@@ -2970,7 +2911,7 @@ export const InteractiveMapPage: React.FC<InteractiveMapPageProps> = ({
                         type="text"
                         value={editCityState}
                         onChange={(e) => setEditCityState(e.target.value)}
-                        placeholder="e.g. Seattle, WA"
+                        placeholder="e.g. City, State"
                         className="w-full px-3 py-2 bg-slate-800/80 border border-white/10 rounded-xl text-xs text-white focus:border-blue-500 focus:outline-none transition-colors"
                       />
                     </div>

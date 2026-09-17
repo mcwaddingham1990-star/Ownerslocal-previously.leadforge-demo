@@ -27,13 +27,23 @@ export function buildScanSnapshotDocument(params: {
    * scan files under "Employee Snapshot" instead, scoped to them via the
    * `employee` field below (already set from uploadedBy). */
   folder?: string;
+  /**
+   * Stable id override. Omit for a fresh one-off scan (the default,
+   * timestamp+random). A caller that retries the same confirmed scan after a
+   * client-side error (network blip on the ack, same class of retry the
+   * underlying transaction/purchase record already guards against with its
+   * own stable id) should pass one derived from that same stable id, so the
+   * retry overwrites the identical document instead of filing a second copy
+   * of the same photo.
+   */
+  id?: string;
 }): DocumentItem {
   const date = params.date || new Date().toISOString().slice(0, 10);
   const vendor = sanitizeFilenamePart(params.vendor?.trim() || "Unknown Vendor");
   const ext = extensionFor(params.mimeType);
   const now = new Date().toISOString();
   return {
-    id: `doc_scan_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    id: params.id || `doc_scan_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
     name: `${date} ${vendor}.${ext}`,
     customer: "None",
     employee: params.uploadedBy || "AI Scan",

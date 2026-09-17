@@ -2,6 +2,7 @@ import React, { useState, useMemo, useRef, useEffect } from "react";
 import { useAuth } from "../context/AuthContext";
 import { useDomainData } from "../context/DomainDataContext";
 import { useNavTelemetry } from "../context/NavTelemetryContext";
+import { authedFetch } from "../lib/apiClient";
 import {
   MessageSquare,
   Users,
@@ -42,7 +43,9 @@ import {
   BookOpen,
   UserCheck,
   Building,
-  DollarSign
+  DollarSign,
+  Phone,
+  MessageCircle
 } from "lucide-react";
 import { Customer } from "./CustomersPage";
 import { DocumentItem } from "./DocumentsPage";
@@ -50,6 +53,7 @@ import { geocodeAddress } from "./InteractiveMapPage";
 import { collection, doc, setDoc, deleteDoc, query, where, onSnapshot } from "firebase/firestore";
 import { db } from "../firebase";
 import { hasPermission } from "../types/permissions";
+import { composeSms, callNumber } from "../lib/deviceHandoff";
 
 // Let's define the Types
 export interface MessageAttachment {
@@ -112,7 +116,7 @@ export const MessagesPage: React.FC = () => {
   // conversation is owner-only by default, unless a role has explicitly
   // been granted Delete on the Messages module.
   const canDeleteMessages = activeRole === "Owner" || hasPermission(loggedInUser?.granularPermissions, "messages", "delete");
-  const { documents, setDocuments, customers: customersList, recentRoster, employees, schedulingEvents, estimates, invoices, preSelectedCustomerId, setPreSelectedCustomerId } = useDomainData();
+  const { documents, setDocuments, customers: customersList, recentRoster, employees, schedulingEvents, estimates, invoices } = useDomainData();
   const {
     openPlaceholderPage: onOpenPlaceholder,
     takeSnapshot: onTakeSnapshot,
@@ -232,6 +236,12 @@ export const MessagesPage: React.FC = () => {
   // Modals for creating conversations
   const [isNewMsgModalOpen, setIsNewMsgModalOpen] = useState(false);
   const [isNewGroupModalOpen, setIsNewGroupModalOpen] = useState(false);
+  // Real customer contact -- picks a customer, then hands off to the
+  // device's own phone/messaging app (see deviceHandoff.ts). Deliberately
+  // separate from the "New message" flow above, which only ever creates an
+  // internal team thread and never reaches a customer.
+  const [isContactCustomerOpen, setIsContactCustomerOpen] = useState(false);
+  const [contactCustomerId, setContactCustomerId] = useState("");
 
   // Snapshot AI simulation state
   const [isSnapshotAiOpen, setIsSnapshotAiOpen] = useState(false);
@@ -249,24 +259,11 @@ export const MessagesPage: React.FC = () => {
 
   // Draft Message attachments options
   const [newConvTitle, setNewConvTitle] = useState("");
-  const [newConvType, setNewConvType] = useState<any>("Customer Chat");
   const [newConvRecipient, setNewConvRecipient] = useState("");
   const [newConvJobId, setNewConvJobId] = useState("");
   const [newConvEstimateId, setNewConvEstimateId] = useState("");
   const [newConvPriority, setNewConvPriority] = useState<"High" | "Normal" | "Low">("Normal");
 
-  useEffect(() => {
-    if (!preSelectedCustomerId) return;
-    const customer = customersList.find(c => c.id === preSelectedCustomerId);
-    if (customer) {
-      setNewConvRecipient(`customer:${customer.id}`);
-      setNewConvTitle(`Chat with ${customer.contact || customer.company}`);
-      setNewConvType("Customer Chat");
-      setIsNewMsgModalOpen(true);
-    }
-    setPreSelectedCustomerId(undefined);
-  }, [preSelectedCustomerId, customersList, setPreSelectedCustomerId]);
-  
   // Roster or staff for group setup, from the real team roster
   const mockStaff = useMemo(() => {
     const byName = new Map<string, { name: string; role: string }>();
@@ -490,7 +487,7 @@ export const MessagesPage: React.FC = () => {
 
     let aiContent = "Couldn't reach the AI right now — check your connection and try again.";
     try {
-      const res = await fetch("/api/ai/ask", {
+      const res = await authedFetch("/api/ai/ask", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -667,14 +664,9 @@ export const MessagesPage: React.FC = () => {
       return;
     }
 
-    const selectedCustomer = !isGroup && newConvRecipient.startsWith("customer:")
-      ? customersList.find(c => c.id === newConvRecipient.slice("customer:".length))
-      : undefined;
-    const recipientName = selectedCustomer
-      ? selectedCustomer.contact || selectedCustomer.company
-      : newConvRecipient.replace(/^staff:/, "").trim();
+    const recipientName = newConvRecipient.replace(/^staff:/, "").trim();
     if (!isGroup && !recipientName) {
-      triggerRealTimeNotification("Please select a customer or team member.");
+      triggerRealTimeNotification("Please select a team member.");
       return;
     }
 
@@ -684,7 +676,7 @@ export const MessagesPage: React.FC = () => {
     const newC: Conversation = {
       id: "conv_" + Date.now(),
       title: newConvTitle,
-      type: isGroup ? "Team Chat" : selectedCustomer ? "Customer Chat" : "Direct Message",
+      type: isGroup ? "Team Chat" : "Direct Message",
       participants: isGroup ? [currentUserName, ...newConvRecipient.split(",").map(x => x.trim())] : [currentUserName, recipientName],
       unreadCount: 0,
       lastMessage: "Conversation created.",
@@ -693,8 +685,6 @@ export const MessagesPage: React.FC = () => {
       isRead: true,
       isArchived: false,
       priority: newConvPriority,
-      customerId: selectedCustomer?.id,
-      customerName: selectedCustomer ? selectedCustomer.contact || selectedCustomer.company : undefined,
       jobId: linkedJob?.id,
       jobName: linkedJob ? `${linkedJob.eventType} — ${linkedJob.customer}` : undefined,
       estimateId: linkedEstimate?.id,
@@ -727,14 +717,18 @@ export const MessagesPage: React.FC = () => {
         <div className="rounded-2xl border border-[#A9CDEE] bg-[#E3F3FF] p-8 text-center">
           <MessageSquare className="mx-auto h-8 w-8 text-[#315C9F]" />
           <h2 className="mt-3 text-base font-extrabold text-[#342D7E]">No conversations yet</h2>
-          <p className="mt-1 text-xs text-slate-500">Your customer and team conversations will appear here after you start one.</p>
-          <button onClick={() => setIsNewMsgModalOpen(true)} className="mt-5 inline-flex items-center gap-2 rounded-xl bg-[#4A9BFF] px-4 py-2.5 text-xs font-black uppercase text-white hover:bg-[#3583E6]"><Send className="h-4 w-4" /> New message</button>
+          <p className="mt-1 text-xs text-slate-500">Your team conversations will appear here after you start one.</p>
+          <div className="mt-5 flex flex-wrap items-center justify-center gap-2">
+            <button onClick={() => setIsNewMsgModalOpen(true)} className="inline-flex items-center gap-2 rounded-xl bg-[#4A9BFF] px-4 py-2.5 text-xs font-black uppercase text-white hover:bg-[#3583E6]"><Send className="h-4 w-4" /> New message</button>
+            <button onClick={() => setIsContactCustomerOpen(true)} className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-4 py-2.5 text-xs font-black uppercase text-white hover:bg-emerald-700"><Phone className="h-4 w-4" /> Contact Customer</button>
+          </div>
         </div>
         {isNewMsgModalOpen && (
           <div onClick={() => setIsNewMsgModalOpen(false)} className="fixed inset-0 z-[1000] flex items-center justify-center bg-slate-900/40 p-3 backdrop-blur-xs">
             <div onClick={e => e.stopPropagation()} className="w-full max-w-md space-y-4 rounded-3xl border border-[#9EC8EF] bg-white p-6 text-left shadow-2xl">
               <div className="flex items-center justify-between border-b pb-2"><h4 className="text-xs font-extrabold uppercase tracking-wider text-[#342D7E]">Start a conversation</h4><button onClick={() => setIsNewMsgModalOpen(false)} className="p-1 font-bold text-slate-400">✕</button></div>
-              <label className="block text-[9px] font-bold uppercase text-slate-500">Customer or team member<select value={newConvRecipient} onChange={e => { const value=e.target.value; setNewConvRecipient(value); const customer=value.startsWith("customer:")?customersList.find(c=>c.id===value.slice(9)):undefined; const name=customer?(customer.contact||customer.company):value.replace(/^staff:/,""); setNewConvTitle(name?`Chat with ${name}`:""); }} className="mt-1 w-full rounded-xl border border-[#A9CDEE] bg-white px-3 py-2.5 text-xs text-[#1F3557]"><option value="">Select recipient…</option><optgroup label="Customers">{customersList.map(c=><option key={c.id} value={`customer:${c.id}`}>{c.contact || c.company}{c.contact&&c.company?` — ${c.company}`:""}</option>)}</optgroup><optgroup label="Team">{mockStaff.filter(s=>s.name!==currentUserName).map(s=><option key={s.name} value={`staff:${s.name}`}>{s.name} — {s.role}</option>)}</optgroup></select></label>
+              <label className="block text-[9px] font-bold uppercase text-slate-500">Team member<select value={newConvRecipient} onChange={e => { const value=e.target.value; setNewConvRecipient(value); const name=value.replace(/^staff:/,""); setNewConvTitle(name?`Chat with ${name}`:""); }} className="mt-1 w-full rounded-xl border border-[#A9CDEE] bg-white px-3 py-2.5 text-xs text-[#1F3557]"><option value="">Select team member…</option>{mockStaff.filter(s=>s.name!==currentUserName).map(s=><option key={s.name} value={`staff:${s.name}`}>{s.name} — {s.role}</option>)}</select></label>
+              <p className="text-[9px] text-slate-400 -mt-2">Messages here are internal, between your team — they never reach a customer. Use "Contact Customer" to actually call or text one.</p>
               <label className="block text-[9px] font-bold uppercase text-slate-500">Related job (optional)<select value={newConvJobId} onChange={e => setNewConvJobId(e.target.value)} className="mt-1 w-full rounded-xl border border-[#A9CDEE] bg-white px-3 py-2.5 text-xs text-[#1F3557]"><option value="">No job link</option>{schedulingEvents.filter(job => job.eventType === "Job").map(job => <option key={job.id} value={job.id}>{job.customer} · {job.jobNumber || job.id}</option>)}</select></label>
               <label className="block text-[9px] font-bold uppercase text-slate-500">Related estimate (optional)<select value={newConvEstimateId} onChange={e => setNewConvEstimateId(e.target.value)} className="mt-1 w-full rounded-xl border border-[#A9CDEE] bg-white px-3 py-2.5 text-xs text-[#1F3557]"><option value="">No estimate link</option>{estimates.map(estimate => <option key={estimate.id} value={estimate.id}>{estimate.customerName} · {estimate.number}</option>)}</select></label>
               <label className="block text-[9px] font-bold uppercase text-slate-500">Conversation title<input value={newConvTitle} onChange={e=>setNewConvTitle(e.target.value)} className="mt-1 w-full rounded-xl border border-[#A9CDEE] bg-slate-50 px-3 py-2.5 text-xs" /></label>
@@ -785,6 +779,13 @@ export const MessagesPage: React.FC = () => {
             className="px-3 py-2 bg-[#4A9BFF] hover:bg-[#3583E6] text-white text-xs font-bold rounded-xl transition-colors cursor-pointer flex items-center gap-1.5"
           >
             <Users className="w-3.5 h-3.5" /> New Group
+          </button>
+
+          <button
+            onClick={() => { setContactCustomerId(""); setIsContactCustomerOpen(true); }}
+            className="px-3 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-xl transition-colors cursor-pointer flex items-center gap-1.5 shadow-sm"
+          >
+            <Phone className="w-3.5 h-3.5" /> Contact Customer
           </button>
 
           <button
@@ -1612,22 +1613,21 @@ export const MessagesPage: React.FC = () => {
               </div>
 
               <div className="space-y-1">
-                <label className="text-[9px] uppercase tracking-wider text-slate-400 font-bold">Recipient / Staff Node</label>
+                <label className="text-[9px] uppercase tracking-wider text-slate-400 font-bold">Team Member</label>
                 <select
                   value={newConvRecipient}
                   onChange={(e) => {
                     const value = e.target.value;
                     setNewConvRecipient(value);
-                    const customer = value.startsWith("customer:") ? customersList.find(c => c.id === value.slice("customer:".length)) : undefined;
-                    const name = customer ? customer.contact || customer.company : value.replace(/^staff:/, "");
+                    const name = value.replace(/^staff:/, "");
                     setNewConvTitle(name ? `Chat with ${name}` : "");
                   }}
                   className="w-full text-xs bg-white text-[#1F3557] border border-[#A9CDEE] rounded-xl px-2.5 py-2.5 cursor-pointer focus:outline-none"
                 >
-                  <option className="bg-white text-[#1F3557]" value="">Select customer or team member...</option>
-                  <optgroup label="Customers">{customersList.map(c => <option key={c.id} value={`customer:${c.id}`}>{c.contact || c.company}{c.contact && c.company ? ` — ${c.company}` : ""}</option>)}</optgroup>
-                  <optgroup label="Team">{mockStaff.filter(s => s.name !== currentUserName).map(s => <option key={s.name} value={`staff:${s.name}`}>{s.name} — {s.role}</option>)}</optgroup>
+                  <option className="bg-white text-[#1F3557]" value="">Select team member...</option>
+                  {mockStaff.filter(s => s.name !== currentUserName).map(s => <option key={s.name} value={`staff:${s.name}`}>{s.name} — {s.role}</option>)}
                 </select>
+                <p className="text-[9px] text-slate-400">Internal, between your team -- never reaches a customer. Use "Contact Customer" to call or text one.</p>
               </div>
 
               <div className="space-y-1">
@@ -1687,7 +1687,7 @@ export const MessagesPage: React.FC = () => {
                 <label className="text-[9px] uppercase tracking-wider text-slate-400 font-bold">Group Channel Name</label>
                 <input
                   type="text"
-                  placeholder="e.g., Seattle Excavation Crew"
+                  placeholder="e.g., North Side Excavation Crew"
                   value={newConvTitle}
                   onChange={(e) => setNewConvTitle(e.target.value)}
                   className="w-full text-xs bg-slate-50 border border-[#A9CDEE] rounded-xl px-3 py-2.5 focus:outline-none"
@@ -1728,6 +1728,69 @@ export const MessagesPage: React.FC = () => {
           </div>
         </div>
       )}
+
+      {/* CONTACT CUSTOMER: pick a real customer, then hand off to the device's own phone/messaging app -- this is the actual outbound channel, not the in-app chat above. */}
+      {isContactCustomerOpen && (() => {
+        const contactCustomer = customersList.find(c => c.id === contactCustomerId);
+        return (
+          <div
+            onClick={() => setIsContactCustomerOpen(false)}
+            className="fixed inset-0 z-[1000] flex items-center justify-center bg-slate-900/40 backdrop-blur-xs cursor-pointer"
+          >
+            <div
+              onClick={(e) => e.stopPropagation()}
+              className="bg-white rounded-3xl border border-[#9EC8EF] shadow-2xl p-6 w-full max-w-md text-left space-y-4 animate-scale-up cursor-default"
+            >
+              <div className="flex items-center justify-between border-b pb-2">
+                <h4 className="text-xs font-extrabold text-[#342D7E] uppercase tracking-wider flex items-center gap-1.5">
+                  <Phone className="w-4 h-4 text-emerald-600" /> Contact Customer
+                </h4>
+                <button onClick={() => setIsContactCustomerOpen(false)} className="text-slate-400 hover:text-slate-600 font-bold text-sm p-1 cursor-pointer">✕</button>
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-[9px] uppercase tracking-wider text-slate-400 font-bold">Customer</label>
+                <select
+                  value={contactCustomerId}
+                  onChange={(e) => setContactCustomerId(e.target.value)}
+                  className="w-full text-xs bg-white text-[#1F3557] border border-[#A9CDEE] rounded-xl px-2.5 py-2.5 cursor-pointer focus:outline-none"
+                >
+                  <option value="">Select a customer...</option>
+                  {customersList.map(c => (
+                    <option key={c.id} value={c.id}>{c.contact || c.company}{c.contact && c.company ? ` — ${c.company}` : ""}</option>
+                  ))}
+                </select>
+              </div>
+
+              {contactCustomer && (
+                <div className="rounded-xl border border-[#A9CDEE] bg-[#EAF5FF] p-3 space-y-2.5">
+                  <p className="text-xs font-bold text-[#1F3557]">{contactCustomer.contact || contactCustomer.company}</p>
+                  {!contactCustomer.phone && (
+                    <p className="text-[10px] text-amber-700 font-semibold">No phone number on file for this customer.</p>
+                  )}
+                  <div className="grid grid-cols-2 gap-2.5">
+                    <button
+                      disabled={!contactCustomer.phone}
+                      onClick={() => { callNumber(contactCustomer.phone); setIsContactCustomerOpen(false); }}
+                      className="py-2.5 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-200 disabled:text-slate-400 disabled:cursor-not-allowed text-white font-bold rounded-xl text-xs uppercase flex items-center justify-center gap-1.5"
+                    >
+                      <Phone className="w-3.5 h-3.5" /> Call
+                    </button>
+                    <button
+                      disabled={!contactCustomer.phone}
+                      onClick={() => { composeSms({ to: contactCustomer.phone }); setIsContactCustomerOpen(false); }}
+                      className="py-2.5 bg-[#4A9BFF] hover:bg-[#3583E6] disabled:bg-slate-200 disabled:text-slate-400 disabled:cursor-not-allowed text-white font-bold rounded-xl text-xs uppercase flex items-center justify-center gap-1.5"
+                    >
+                      <MessageCircle className="w-3.5 h-3.5" /> Text
+                    </button>
+                  </div>
+                  <p className="text-[9px] text-slate-500">Opens your own phone's call/messaging app -- sent from your real number, not from inside this app.</p>
+                </div>
+              )}
+            </div>
+          </div>
+        );
+      })()}
 
       {/* MODAL 3: ADVANCED FILTERS CONFIGURATION */}
       {showFiltersModal && (

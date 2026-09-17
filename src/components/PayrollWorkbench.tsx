@@ -216,7 +216,7 @@ export const PayrollWorkbench: React.FC<Props> = ({ employees }) => {
 
         <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 text-[10px] text-slate-600 flex gap-2">
           <Building2 className="w-4 h-4 shrink-0 text-[#315C9F]" />
-          <span><strong>Money-movement guardrail:</strong> approval creates a balanced batch; submission moves funds only after an authorized ACH provider is configured server-side. Plaid/Stripe credentials never enter the browser.</span>
+          <span><strong>Money-movement guardrail:</strong> approval creates a balanced batch; submission moves funds only after an authorized ACH provider is configured server-side. Stripe credentials never enter the browser.</span>
         </div>
       </div>
     </section>

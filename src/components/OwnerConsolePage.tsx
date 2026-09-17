@@ -949,7 +949,12 @@ export const OwnerConsolePage: React.FC<OwnerConsolePageProps> = ({
                     }
                     const header = "id,date,time,module,action,reason,status,approvedBy\n";
                     const rows = recentAiActions.map((a: any) => [a.id, a.date, a.time, a.module, a.action, a.reason, a.status, a.approvedBy]
-                      .map((v) => `"${String(v ?? "").replace(/"/g, '""')}"`).join(","));
+                      .map((v) => {
+                        let text = String(v ?? "");
+                        // Guards against CSV/Excel "formula injection" (see src/lib/csv.ts).
+                        if (/^[=+\-@\t\r]/.test(text)) text = `'${text}`;
+                        return `"${text.replace(/"/g, '""')}"`;
+                      }).join(","));
                     const csv = header + rows.join("\n");
                     const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
                     const url = URL.createObjectURL(blob);

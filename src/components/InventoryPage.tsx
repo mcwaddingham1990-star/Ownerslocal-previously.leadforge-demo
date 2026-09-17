@@ -1,11 +1,12 @@
 import React, { useState, useMemo, useEffect, useRef } from "react";
-import * as XLSX from "xlsx";
+import ExcelJS from "exceljs";
 import { useAuth } from "../context/AuthContext";
 import { useDomainData } from "../context/DomainDataContext";
 import { useNavTelemetry } from "../context/NavTelemetryContext";
 import { hasPermission } from "../types/permissions";
 import { downscaleImageToBase64 } from "../lib/imageCompression";
 import { buildScanSnapshotDocument, SNAPSHOT_PHOTO_MAX_BASE64_LENGTH } from "../lib/scanSnapshotDocument";
+import { authedFetch } from "../lib/apiClient";
 import {
   Search,
   Plus,
@@ -51,6 +52,9 @@ import {
 } from "lucide-react";
 import { SchedulingEvent } from "./SchedulingPage";
 import { postTransactionEntry } from "../lib/accountingEngine";
+import { CreatePurchaseOrderPicker } from "./CreatePurchaseOrderPicker";
+import { PurchaseOrderBuilder } from "./PurchaseOrderBuilder";
+import type { PurchaseOrder } from "../types/purchaseOrder";
 
 export type { ScannedLineItem, ScannedReceipt } from "../types/scannedReceipt";
 import type { ScannedLineItem, ScannedReceipt } from "../types/scannedReceipt";
@@ -117,6 +121,38 @@ const CATEGORY_SHORTCUTS_STORAGE_KEY = "owners-inventory-category-shortcuts";
 // company cash.
 const MATERIAL_EXPENSE_CATEGORIES = MATERIAL_CATEGORY_SET;
 
+/**
+ * Converts an uploaded Excel file's first sheet into the same plain,
+ * comma-joined line format handleImport already expects (it does its own
+ * naive `line.split(",")` below -- no quoting -- so this matches that,
+ * rather than producing a fully quoted/escaped CSV that parser can't read
+ * anyway). Cell values are read as plain text/numbers -- formulas resolve
+ * to their last calculated result, not the formula itself.
+ */
+async function excelFileToImportLines(buffer: ArrayBuffer): Promise<string> {
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.load(buffer);
+  const worksheet = workbook.worksheets[0];
+  if (!worksheet) return "";
+  const lines: string[] = [];
+  worksheet.eachRow({ includeEmpty: false }, (row) => {
+    const cells = (row.values as unknown[]).slice(1).map((value) => {
+      if (value == null) return "";
+      if (value instanceof Date) return value.toISOString();
+      if (typeof value === "object") {
+        const rich = value as { text?: string; result?: unknown; richText?: Array<{ text: string }> };
+        if (typeof rich.text === "string") return rich.text;
+        if (Array.isArray(rich.richText)) return rich.richText.map((t) => t.text).join("");
+        if (rich.result != null) return String(rich.result);
+        return "";
+      }
+      return String(value);
+    });
+    lines.push(cells.join(","));
+  });
+  return lines.join("\n");
+}
+
 export const TimeClockPage: React.FC = () => null; // Placeholder to avoid compilation issues if imported directly
 export const TimeClockPageProps: any = null;
 
@@ -132,8 +168,12 @@ export const InventoryPage: React.FC<InventoryPageProps> = () => {
     setTransactions,
     setJournalEntries,
     saveTransaction,
-    setDocuments
+    setDocuments,
+    purchaseOrders
   } = useDomainData();
+  const [isPurchaseOrderPickerOpen, setIsPurchaseOrderPickerOpen] = useState(false);
+  const [editingPurchaseOrder, setEditingPurchaseOrder] = useState<PurchaseOrder | null>(null);
+  const [isPurchaseOrderBuilderOpen, setIsPurchaseOrderBuilderOpen] = useState(false);
   const {
     openPlaceholderPage: onOpenPlaceholder,
     takeSnapshot: onTakeSnapshot,
@@ -369,9 +409,20 @@ export const InventoryPage: React.FC<InventoryPageProps> = () => {
   };
 
   const handleExport = () => {
-    const csvContent = "data:text/csv;charset=utf-8," 
+    // Guards against CSV/Excel "formula injection" and escapes embedded
+    // quotes (neither was handled before) -- item names/vendors/etc. can be
+    // freehand text, including from an AI-scanned receipt/label.
+    const csvCell = (value: string | number) => {
+      let text = String(value ?? "");
+      if (typeof value === "string" && /^[=+\-@\t\r]/.test(text)) text = `'${text}`;
+      return `"${text.replace(/"/g, '""')}"`;
+    };
+    const csvContent = "data:text/csv;charset=utf-8,"
       + ["Name,Category,Vendor,SKU,Barcode,Quantity,Unit,UnitCost,SellingPrice,Location"].join(",") + "\n"
-      + inventoryList.map(item => `"${item.name}","${item.category}","${item.vendor}","${item.sku}","${item.barcode}",${item.quantity},"${item.unit}",${item.unitCost},${item.sellingPrice},"${item.location}"`).join("\n");
+      + inventoryList.map(item => [
+          csvCell(item.name), csvCell(item.category), csvCell(item.vendor), csvCell(item.sku), csvCell(item.barcode),
+          item.quantity, csvCell(item.unit), item.unitCost, item.sellingPrice, csvCell(item.location)
+        ].join(",")).join("\n");
     const encodedUri = encodeURI(csvContent);
     const link = document.createElement("a");
     link.setAttribute("href", encodedUri);
@@ -802,7 +853,7 @@ export const InventoryPage: React.FC<InventoryPageProps> = () => {
     setSnapshotStage("processing");
     setOcrError(null);
     try {
-      const res = await fetch("/api/ai/scan-receipt", {
+      const res = await authedFetch("/api/ai/scan-receipt", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ imageBase64, mimeType })
@@ -1087,6 +1138,13 @@ export const InventoryPage: React.FC<InventoryPageProps> = () => {
               }`}
             >
               <History className="w-3.5 h-3.5" /> Purchase History
+            </button>
+
+            <button
+              onClick={() => setIsPurchaseOrderPickerOpen(true)}
+              className="px-3 py-2 bg-[#E3F3FF] text-[#342D7E] border border-[#A9CDEE] hover:bg-[#D5EAFF] text-xs font-bold rounded-xl flex items-center gap-1.5 transition-all cursor-pointer"
+            >
+              🧾 New PO
             </button>
 
             <button
@@ -1995,6 +2053,25 @@ export const InventoryPage: React.FC<InventoryPageProps> = () => {
                       {selectedItem.notes}
                     </div>
                   )}
+
+                  {(() => {
+                    const relatedPOs = purchaseOrders.filter(po => po.items.some(i => i.inventoryId === selectedItem.id));
+                    return (
+                      <div className="border-t border-[#A9CDEE]/20 pt-3 space-y-1.5">
+                        <span className="text-[9px] text-slate-400 block uppercase font-bold">Purchase Orders ({relatedPOs.length})</span>
+                        {relatedPOs.length === 0 ? (
+                          <p className="text-slate-400 text-[11px]">No purchase orders for this item yet.</p>
+                        ) : (
+                          relatedPOs.map(po => (
+                            <button key={po.id} onClick={() => { setEditingPurchaseOrder(po); setIsPurchaseOrderBuilderOpen(true); }} className="flex w-full items-center justify-between rounded-lg bg-blue-50 p-2 text-left text-[11px]">
+                              <span className="font-bold text-[#342D7E]">{po.poNumber} — {po.vendor}</span>
+                              <span className="text-slate-500">{po.status}</span>
+                            </button>
+                          ))
+                        )}
+                      </div>
+                    );
+                  })()}
                 </div>
 
                 {/* HISTORICAL QUANTITY ADJUSTMENT JOURNAL */}
@@ -2558,17 +2635,20 @@ export const InventoryPage: React.FC<InventoryPageProps> = () => {
                       const fileExt = file.name.split('.').pop()?.toLowerCase();
                       if (fileExt === 'xlsx' || fileExt === 'xls') {
                         const fileReader = new FileReader();
-                        fileReader.onload = (event) => {
+                        fileReader.onload = async (event) => {
                           try {
-                            const data = new Uint8Array(event.target?.result as ArrayBuffer);
-                            const workbook = XLSX.read(data, { type: 'array' });
-                            const firstSheetName = workbook.SheetNames[0];
-                            const worksheet = workbook.Sheets[firstSheetName];
-                            const csv = XLSX.utils.sheet_to_csv(worksheet);
-                            setImportText(csv);
+                            const buffer = event.target?.result as ArrayBuffer;
+                            const importLines = await excelFileToImportLines(buffer);
+                            setImportText(importLines);
                             triggerToast(`📂 Excel sheet loaded: ${file.name}`);
                           } catch (err) {
-                            triggerToast("⚠️ Failed to parse Excel spreadsheet file.");
+                            // Legacy .xls (pre-2007 binary format) isn't readable this way --
+                            // give a specific, actionable message instead of a generic failure.
+                            triggerToast(
+                              fileExt === 'xls'
+                                ? "⚠️ Old .xls files aren't supported -- open it in Excel/Sheets and save as .xlsx, then try again."
+                                : "⚠️ Failed to parse Excel spreadsheet file."
+                            );
                           }
                         };
                         fileReader.readAsArrayBuffer(file);
@@ -2825,6 +2905,8 @@ export const InventoryPage: React.FC<InventoryPageProps> = () => {
         </div>
       )}
 
+      <CreatePurchaseOrderPicker isOpen={isPurchaseOrderPickerOpen} onClose={() => setIsPurchaseOrderPickerOpen(false)} />
+      <PurchaseOrderBuilder isOpen={isPurchaseOrderBuilderOpen} onClose={() => setIsPurchaseOrderBuilderOpen(false)} editingPurchaseOrder={editingPurchaseOrder} onSaved={() => setEditingPurchaseOrder(null)} />
     </div>
   );
 };

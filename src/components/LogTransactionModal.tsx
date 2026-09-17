@@ -3,12 +3,13 @@ import { Camera, Keyboard, X, AlertTriangle, Loader2, DollarSign } from "lucide-
 import { Transaction } from "../types/domain";
 import { downscaleImageToBase64 } from "../lib/imageCompression";
 import { buildScanSnapshotDocument, SNAPSHOT_PHOTO_MAX_BASE64_LENGTH } from "../lib/scanSnapshotDocument";
+import { authedFetch } from "../lib/apiClient";
 import { useDomainData } from "../context/DomainDataContext";
 
 interface LogTransactionModalProps {
   type: "income" | "expense";
   createdBy?: string;
-  onSave: (t: Omit<Transaction, "id">) => Promise<void>;
+  onSave: (t: Omit<Transaction, "id"> & { id?: string }) => Promise<void>;
   onClose: () => void;
 }
 
@@ -31,8 +32,15 @@ const INCOME_CATEGORIES = ["Job Payment", "Check Deposit", "Deposit", "Refund", 
  * user confirming the form, typed or scanned.
  */
 export function LogTransactionModal({ type, createdBy, onSave, onClose }: LogTransactionModalProps) {
-  const { setDocuments } = useDomainData();
+  const { setDocuments, schedulingEvents } = useDomainData();
+  const jobs = React.useMemo(() => schedulingEvents.filter(e => e.eventType === "Job"), [schedulingEvents]);
   const [mode, setMode] = useState<Mode>("choose");
+  // One stable id per form-fill, reused unchanged across a retry (see
+  // handleSave's catch below) -- a retry after a save that actually
+  // succeeded server-side but errored on the client (network blip on the
+  // ack) then safely re-applies the same transaction instead of creating a
+  // duplicate income/expense record with a fresh random id.
+  const pendingIdRef = useRef<string | null>(null);
   const [source, setSource] = useState<"manual" | "ai_scan">("manual");
   const [scanError, setScanError] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -46,17 +54,22 @@ export function LogTransactionModal({ type, createdBy, onSave, onClose }: LogTra
   const [description, setDescription] = useState("");
   const [category, setCategory] = useState("");
   const [date, setDate] = useState(todayStr());
+  // Optional job link (expenses only) so Jobs' cost breakdown can roll this
+  // up as an "other cost" alongside labor and materials.
+  const [jobId, setJobId] = useState("");
 
   const categories = type === "income" ? INCOME_CATEGORIES : EXPENSE_CATEGORIES;
   const label = type === "income" ? "Income" : "Expense";
   const descLabel = type === "income" ? "Payer / Source" : "Vendor";
 
   const startManual = () => {
+    pendingIdRef.current = null;
     setSource("manual");
     setAmount("");
     setDescription("");
     setCategory("");
     setDate(todayStr());
+    setJobId("");
     setScanError(null);
     setMode("form");
   };
@@ -65,12 +78,13 @@ export function LogTransactionModal({ type, createdBy, onSave, onClose }: LogTra
     const file = e.target.files?.[0];
     e.target.value = "";
     if (!file) return;
+    pendingIdRef.current = null;
     setMode("processing");
     setScanError(null);
     try {
       const { base64, mimeType } = await downscaleImageToBase64(file);
       setScannedPhoto({ base64, mimeType });
-      const res = await fetch("/api/ai/scan-financial-document", {
+      const res = await authedFetch("/api/ai/scan-financial-document", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ imageBase64: base64, mimeType })
@@ -88,6 +102,7 @@ export function LogTransactionModal({ type, createdBy, onSave, onClose }: LogTra
       }
       setCategory("");
       setDate(data.date || todayStr());
+      setJobId("");
       setMode("form");
     } catch (err) {
       setScanError(err instanceof Error ? err.message : "Scan failed. Make sure GEMINI_API_KEY is configured on the server.");
@@ -96,6 +111,7 @@ export function LogTransactionModal({ type, createdBy, onSave, onClose }: LogTra
       setDescription("");
       setCategory("");
       setDate(todayStr());
+      setJobId("");
       setMode("form");
     }
   };
@@ -106,8 +122,10 @@ export function LogTransactionModal({ type, createdBy, onSave, onClose }: LogTra
     if (!parsedAmount || parsedAmount <= 0 || !description.trim() || isSaving) return;
     setIsSaving(true);
     setSaveError(null);
+    if (!pendingIdRef.current) pendingIdRef.current = `txn_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     try {
       await onSave({
+        id: pendingIdRef.current,
         type,
         source,
         amount: parsedAmount,
@@ -115,16 +133,26 @@ export function LogTransactionModal({ type, createdBy, onSave, onClose }: LogTra
         category: category || undefined,
         date,
         createdAt: new Date().toISOString(),
-        createdBy
+        createdBy,
+        jobId: type === "expense" && jobId ? jobId : undefined
       });
+      const savedTxnId = pendingIdRef.current;
+      pendingIdRef.current = null;
       if (scannedPhoto && scannedPhoto.base64.length <= SNAPSHOT_PHOTO_MAX_BASE64_LENGTH) {
+        // Stable id derived from the transaction's own stable id -- a second
+        // handleSave firing for the same submission (a fast double-click
+        // before the isSaving guard re-renders, or a retry) reuses the same
+        // transaction id (see pendingIdRef above) and so lands here with the
+        // same savedTxnId too, overwriting the identical snapshot document
+        // instead of filing a duplicate copy of the same photo.
         setDocuments(prev => [buildScanSnapshotDocument({
           photoBase64: scannedPhoto.base64,
           mimeType: scannedPhoto.mimeType,
           vendor: description.trim(),
           date,
           docType: type === "income" ? "Checks" : "Receipts",
-          uploadedBy: createdBy
+          uploadedBy: createdBy,
+          id: savedTxnId ? `doc_scan_${savedTxnId}` : undefined
         }), ...prev]);
       }
     } catch (err) {
@@ -195,11 +223,13 @@ export function LogTransactionModal({ type, createdBy, onSave, onClose }: LogTra
               </div>
             )}
             <div className="space-y-1">
-              <label className="text-[9px] uppercase tracking-wider text-slate-400 font-extrabold">Amount</label>
+              <label htmlFor="log-txn-amount" className="text-[9px] uppercase tracking-wider text-slate-400 font-extrabold">Amount</label>
               <input
+                id="log-txn-amount"
                 type="number"
                 min="0"
                 step="0.01"
+                required
                 value={amount}
                 onChange={(e) => setAmount(e.target.value)}
                 placeholder="0.00"
@@ -207,9 +237,11 @@ export function LogTransactionModal({ type, createdBy, onSave, onClose }: LogTra
               />
             </div>
             <div className="space-y-1">
-              <label className="text-[9px] uppercase tracking-wider text-slate-400 font-extrabold">{descLabel}</label>
+              <label htmlFor="log-txn-description" className="text-[9px] uppercase tracking-wider text-slate-400 font-extrabold">{descLabel}</label>
               <input
+                id="log-txn-description"
                 type="text"
+                required
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
                 placeholder={type === "income" ? "e.g. Jane Smith" : "e.g. Home Depot"}
@@ -218,8 +250,9 @@ export function LogTransactionModal({ type, createdBy, onSave, onClose }: LogTra
             </div>
             <div className="grid grid-cols-2 gap-2.5">
               <div className="space-y-1">
-                <label className="text-[9px] uppercase tracking-wider text-slate-400 font-extrabold">Category</label>
+                <label htmlFor="log-txn-category" className="text-[9px] uppercase tracking-wider text-slate-400 font-extrabold">Category</label>
                 <select
+                  id="log-txn-category"
                   value={category}
                   onChange={(e) => setCategory(e.target.value)}
                   className="w-full bg-slate-50 border border-slate-200 rounded-xl px-2 py-2 font-semibold focus:outline-none focus:border-blue-400"
@@ -229,15 +262,32 @@ export function LogTransactionModal({ type, createdBy, onSave, onClose }: LogTra
                 </select>
               </div>
               <div className="space-y-1">
-                <label className="text-[9px] uppercase tracking-wider text-slate-400 font-extrabold">Date</label>
+                <label htmlFor="log-txn-date" className="text-[9px] uppercase tracking-wider text-slate-400 font-extrabold">Date</label>
                 <input
+                  id="log-txn-date"
                   type="date"
+                  required
                   value={date}
                   onChange={(e) => setDate(e.target.value)}
                   className="w-full bg-slate-50 border border-slate-200 rounded-xl px-2 py-2 font-semibold focus:outline-none focus:border-blue-400"
                 />
               </div>
             </div>
+            {type === "expense" && jobs.length > 0 && (
+              <div className="space-y-1">
+                <label htmlFor="log-txn-job" className="text-[9px] uppercase tracking-wider text-slate-400 font-extrabold">Job (optional)</label>
+                <select
+                  id="log-txn-job"
+                  value={jobId}
+                  onChange={(e) => setJobId(e.target.value)}
+                  className="w-full bg-slate-50 border border-slate-200 rounded-xl px-2 py-2 font-semibold focus:outline-none focus:border-blue-400"
+                >
+                  <option value="">Not job-specific</option>
+                  {jobs.map((j) => <option key={j.id} value={j.id}>{j.jobNumber || j.title || j.customer}</option>)}
+                </select>
+                <p className="text-[9.5px] text-slate-400 font-sans">Links this cost to the job's Job Costing breakdown.</p>
+              </div>
+            )}
           </form>
         )}
 

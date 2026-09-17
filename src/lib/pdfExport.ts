@@ -3,7 +3,7 @@
 // sample document). Used by every "Generate PDF" / "Compile Documents"
 // button across Estimates, Accounting (Invoices), Customers, and Documents.
 import { PDFDocument, StandardFonts, rgb, PDFFont, PDFPage, RGB } from "pdf-lib";
-import type { Estimate, Customer, DocumentItem, Lead } from "../types/domain";
+import type { Estimate, Customer, DocumentItem, Lead, MissedCallEvent } from "../types/domain";
 import type { Invoice, InvoiceLineItem } from "../types/accounting";
 
 export interface BusinessProfile {
@@ -318,6 +318,45 @@ export async function buildCustomerProfilePdf(customer: Customer, related: { est
   return doc.save();
 }
 
+const directionLabel: Record<MissedCallEvent["direction"], string> = {
+  missed: "Missed Call",
+  incoming: "Incoming Call",
+  outgoing: "Outgoing Call"
+};
+
+/** Real record of a customer's call/text history from the Missed Call Text-Back app (see CrmLinker.kt), oldest first, for the Customer Card's "Convert to PDF" button. */
+export async function buildCallTextHistoryPdf(customer: Customer, events: MissedCallEvent[], business: BusinessProfile): Promise<Uint8Array> {
+  const doc = await PDFDocument.create();
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  const bold = await doc.embedFont(StandardFonts.HelveticaBold);
+  const writer = new PdfWriter(doc, font, bold, doc.addPage([PAGE_W, PAGE_H]));
+  await drawLetterhead(writer, business, "CALL & TEXT HISTORY", customer.id);
+
+  writer.heading(customer.company || customer.contact);
+  writer.text(customer.contact, { gap: 1 });
+  writer.text(customer.phone || "—", { gap: 8 });
+
+  const sorted = [...events].sort((a, b) => a.callTimestamp.localeCompare(b.callTimestamp));
+  if (!sorted.length) {
+    writer.text("No calls or texts on file yet.", { color: SLATE, gap: 4 });
+    return doc.save();
+  }
+
+  for (const event of sorted) {
+    writer.rule();
+    writer.text(`${directionLabel[event.direction] || "Call"} — ${event.callTimestamp}`, { font: bold, gap: 2 });
+    writer.text(`Number: ${event.phoneNumber}`, { gap: 2 });
+    if (event.autoReplySent && event.autoReplyMessage) {
+      writer.text(`Auto-reply text sent: "${event.autoReplyMessage}"`, { color: SLATE, gap: 2 });
+    }
+    if (event.createdNewLead) {
+      writer.text("A new lead was created from this call.", { color: SLATE, gap: 2 });
+    }
+  }
+
+  return doc.save();
+}
+
 /** Generic real formatted document -- used for job summaries, completion notes/checklists, and any other free-text section folded into a compiled PDF. */
 export async function buildTextDocumentPdf(title: string, sections: Array<{ heading?: string; body: string }>, business: BusinessProfile): Promise<Uint8Array> {
   const doc = await PDFDocument.create();
@@ -332,15 +371,88 @@ export async function buildTextDocumentPdf(title: string, sections: Array<{ head
   return doc.save();
 }
 
-/** Renders a blank-canvas document (header/free-text objects/clauses/footer) built in the PDF Editor's freeform mode -- used only when no source PDF was imported or generated to start from. */
-export async function buildFreeformDocumentPdf(opts: { filename: string; header: string; bodyTexts: string[]; clauses: string[]; footer: string }, business: BusinessProfile): Promise<Uint8Array> {
+export interface FreeformCanvasObject {
+  kind: "text" | "image" | "link" | "video";
+  page: number;
+  x: number; y: number; w: number; h: number;
+  value: string;
+  fontSize?: number;
+  fontFamily?: string;
+  /** Hex string, e.g. "#1F3557" -- matches the color picker in the PDF Editor's canvas toolbar. */
+  color?: string;
+}
+
+// The PDF Editor's on-screen canvas paper is a fixed-aspect box sized in CSS
+// pixels (see selfiesave-editor.css's .paper max-width) that visually
+// matches US Letter -- these two constants convert an object's editor x/y/w/h
+// into real PDF points (72/inch) so a saved template positions and sizes
+// content the same place the user actually put it, instead of flattening
+// everything into sequential flowed text.
+const EDITOR_PAPER_W = 816;
+const EDITOR_PAPER_H = 1056;
+
+function hexToRgb(hex?: string): RGB | null {
+  if (!hex) return null;
+  const match = /^#?([0-9a-f]{6})$/i.exec(hex.trim());
+  if (!match) return null;
+  const n = parseInt(match[1], 16);
+  return rgb(((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255);
+}
+
+/** Renders a blank-canvas document (header/positioned objects/clauses/footer)
+ * built in the PDF Editor's freeform mode -- used only when no source PDF
+ * was imported or generated to start from. Each object keeps the position,
+ * size, font size, and color it was given on screen (converted from editor
+ * pixels to PDF points), and image objects are actually embedded -- this is
+ * what makes "Create Template" produce a real, reusable template PDF
+ * instead of a flattened wall of plain text. */
+export async function buildFreeformDocumentPdf(opts: { filename: string; header: string; footer: string; clauses: string[]; objects: FreeformCanvasObject[] }, business: BusinessProfile): Promise<Uint8Array> {
   const doc = await PDFDocument.create();
   const font = await doc.embedFont(StandardFonts.Helvetica);
   const bold = await doc.embedFont(StandardFonts.HelveticaBold);
   const writer = new PdfWriter(doc, font, bold, doc.addPage([PAGE_W, PAGE_H]));
   await drawLetterhead(writer, business, opts.filename || "Document", "");
   if (opts.header) writer.text(opts.header, { font: bold, gap: 8 });
-  opts.bodyTexts.filter(Boolean).forEach(value => writer.text(value, { gap: 8 }));
+
+  const pageCount = Math.max(1, ...opts.objects.map(o => o.page || 1));
+  while (writer.pages.length < pageCount) writer.newPage();
+  const scaleX = PAGE_W / EDITOR_PAPER_W;
+  const scaleY = PAGE_H / EDITOR_PAPER_H;
+
+  for (const obj of opts.objects) {
+    if (!obj.value) continue;
+    const page = writer.pages[(obj.page || 1) - 1] || writer.pages[0];
+    const x = obj.x * scaleX;
+    const w = Math.max(10, obj.w * scaleX);
+    const h = Math.max(10, obj.h * scaleY);
+    const pdfY = PAGE_H - obj.y * scaleY - h; // editor y is top-down; pdf-lib draws from bottom-left
+
+    if (obj.kind === "text") {
+      const size = Math.max(6, (obj.fontSize || 12) * Math.min(scaleX, scaleY));
+      const useFont = /bold/i.test(obj.fontFamily || "") ? bold : font;
+      const color = hexToRgb(obj.color) || NAVY;
+      const lines = String(obj.value).split(/\r?\n/).flatMap(line => writer.wrapLine(line, useFont, size, w));
+      lines.forEach((line, i) => {
+        const lineY = pdfY + h - size - i * (size * 1.2);
+        if (lineY < MARGIN - 20) return;
+        page.drawText(line, { x, y: lineY, size, font: useFont, color });
+      });
+    } else if (obj.kind === "image" && /^data:image\/(png|jpe?g)/.test(obj.value)) {
+      try {
+        const isPng = obj.value.startsWith("data:image/png");
+        const bytes = base64ToBytes(obj.value.split(",")[1] || "");
+        const image = isPng ? await doc.embedPng(bytes) : await doc.embedJpg(bytes);
+        page.drawImage(image, { x, y: pdfY, width: w, height: h });
+      } catch {
+        // Unreadable image data -- skip rather than fail the whole export.
+      }
+    } else if (obj.kind === "link" && /^https?:/.test(obj.value)) {
+      page.drawText(obj.value, { x, y: pdfY + h / 2, size: 10, font, color: rgb(0.09, 0.4, 0.85) });
+    }
+  }
+
+  writer.page = writer.pages[writer.pages.length - 1];
+  writer.y = MARGIN + 40;
   opts.clauses.forEach((clause, i) => writer.text(`${i + 1}. ${clause}`, { gap: 4 }));
   if (opts.footer) writer.text(opts.footer, { color: SLATE, gap: 0 });
   return doc.save();

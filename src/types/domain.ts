@@ -5,6 +5,22 @@
 // imports (e.g. `import { Customer } from "./components/CustomersPage"`)
 // keep working.
 
+/** Where a Lead (and everything it eventually turns into -- Customer,
+ * Estimate, Job, Invoice) came from. Shared so Customer/Estimate/
+ * SchedulingEvent/Invoice can each carry the same source value through the
+ * whole workflow instead of each redefining this union. */
+export type LeadSource =
+  | "Google Business Profile"
+  | "Website"
+  | "Facebook"
+  | "Instagram"
+  | "Referral"
+  | "Phone Call"
+  | "Walk-In"
+  | "Manual Entry"
+  | "Customer Portal"
+  | "Other";
+
 export interface Customer {
   id: string;
   company: string;
@@ -23,6 +39,23 @@ export interface Customer {
   requireFollowUp?: boolean;
   pendingConfirmation?: boolean;
   createdFrom?: "schedule_job" | "create_job";
+  /** Customer Portal access -- one secure link per customer, tied to this
+   * same real Customer record (no separate/duplicate customer data). The
+   * token alone (no login) gates portal access, same model as a document's
+   * remote-signing link (see signingOptions.remoteToken); portalEnabled
+   * lets the business turn access off without losing/regenerating the
+   * link, and "revoke" just replaces portalToken with a new one. */
+  portalEnabled?: boolean;
+  portalToken?: string;
+  portalTokenCreatedAt?: string;
+  /** Marketing attribution -- the original Lead source this customer came
+   * from (or "Manual Entry" when there was never a Lead at all, e.g. an
+   * estimate typed in for a walk-in). Carried forward onto every Estimate/
+   * Job/Invoice this customer generates so the whole Lead -> Customer ->
+   * Estimate -> Job -> Invoice -> Revenue chain can be rolled up by source
+   * without re-deriving it from scratch each time. */
+  source?: LeadSource;
+  sourceLeadId?: string;
 }
 
 export interface Lead {
@@ -31,16 +64,7 @@ export interface Lead {
   company: string;
   phone: string;
   email: string;
-  source:
-    | "Google Business Profile"
-    | "Website"
-    | "Facebook"
-    | "Instagram"
-    | "Referral"
-    | "Phone Call"
-    | "Walk-In"
-    | "Manual Entry"
-    | "Other";
+  source: LeadSource;
   salesRep: string;
   status:
     | "New"
@@ -56,6 +80,40 @@ export interface Lead {
   addedDaysAgo: number;
   address?: string;
   notes?: string;
+  /** Set when a "Request Service" submission from the Customer Portal came
+   * from an existing Customer -- links back to that real record (display/
+   * navigation only) instead of the Lead being a separate, duplicate
+   * customer. Existing leads (not from the portal) leave this unset. */
+  sourceCustomerId?: string;
+  /** Photos the customer attached when requesting service, same inline-
+   * base64 convention as every other small attached image in this app. */
+  photos?: string[];
+}
+
+/**
+ * One call or its follow-up text, written by the Missed Call Text-Back
+ * Android app (see missed-call-text-back-app/.../data/CrmLinker.kt) straight
+ * to Firestore over the REST API -- the web app only ever reads this
+ * collection, never writes to it. `direction` covers every call the phone's
+ * call log records, not just missed ones: "missed" is the one that actually
+ * triggers `autoReplyMessage`/`autoReplySent`; "incoming"/"outgoing" are
+ * answered calls logged for the record with no auto-text. Two-way inbound
+ * texting (a customer replying) isn't wired up yet -- that needs a real SMS
+ * provider (e.g. Twilio) with its own phone number, which nothing here has
+ * been given credentials for.
+ */
+export interface MissedCallEvent {
+  id: string;
+  businessId: string;
+  phoneNumber: string;
+  direction: "missed" | "incoming" | "outgoing";
+  customerId: string | null;
+  leadId: string | null;
+  createdNewLead: boolean;
+  autoReplyMessage: string;
+  autoReplySent: boolean;
+  callTimestamp: string;
+  createdAt: string;
 }
 
 export interface Estimate {
@@ -63,6 +121,12 @@ export interface Estimate {
   number: string;
   customerName: string;
   company: string;
+  /** Links this estimate to a real Customer record when known -- optional
+   * since older estimates and some creation paths only ever captured the
+   * customer's name. The Customer Portal and anything else that needs to
+   * securely scope "this customer's own estimates" should prefer this over
+   * name-matching when it's present. */
+  customerId?: string;
   status: "Draft" | "Pending" | "Sent" | "Viewed" | "Accepted" | "Declined" | "Expired" | "Completed";
   salesRep: string;
   amount: number;
@@ -75,6 +139,14 @@ export interface Estimate {
    * the general scope-of-work `notes`, and specifically what gets pulled
    * into the generated PDF as the job-specifics section. */
   projectSpecifics?: string;
+  /** Optional itemized breakdown (e.g. from Price Book "Add To"). When
+   * present, `amount` is kept as the sum of these lines rather than a
+   * separately-typed number -- every existing estimate with no lineItems
+   * keeps working exactly as before, amount alone. */
+  lineItems?: Array<{ id: string; description: string; quantity: number; unitPrice: number; priceBookModelId?: string }>;
+  /** Marketing attribution, carried over from the Lead/Customer this estimate came from (see Customer.source). */
+  source?: LeadSource;
+  sourceLeadId?: string;
 }
 
 export interface InventoryItem {
@@ -139,6 +211,16 @@ export interface DocumentItem {
   tags: string[];
   estimateId: string;
   invoiceId: string;
+  workOrderId?: string;
+  membershipId?: string;
+  purchaseOrderId?: string;
+  /** Explicit opt-in for the Customer Portal/app -- a document is NEVER
+   * shown there just because it's tagged with a matching customer name; it
+   * has to be marked true (staff toggle, or auto-set true by the specific
+   * Generate PDF flows that are inherently customer-facing -- estimates,
+   * invoices, work orders, service agreements). Internal attachments
+   * (completion photos, snapshots, uploads) default to unset/false. */
+  customerVisible?: boolean;
   receiptAmount?: number;
   lastModified: string;
   url?: string;
@@ -311,7 +393,7 @@ export interface AppNotification {
 export interface Transaction {
   id: string;
   type: "income" | "expense";
-  source: "manual" | "ai_scan" | "payroll" | "invoice_payment";
+  source: "manual" | "ai_scan" | "payroll" | "invoice_payment" | "recurring_membership";
   amount: number;
   description: string; // vendor/payer name, or a payroll period label
   category?: string;
@@ -321,11 +403,19 @@ export interface Transaction {
   inventoryItemId?: string; // links inventory purchases/adjustments to their expense entry
   /** Links a cash receipt to the invoice it paid so Revenue and Accounting share one economic event. */
   invoiceId?: string;
+  /** Links an expense to the job it was incurred for (same convention as Invoice.jobId / MileageLog.jobId), so Jobs' cost breakdown can roll it up as an "other cost" alongside labor and materials. Payroll-sourced transactions intentionally don't use this — labor cost is computed directly from time_clock_logs instead, to avoid double-counting. */
+  jobId?: string;
+  /** Set when this income transaction was auto-generated by a recurring Membership/Service Agreement billing cycle (manual/invoice billing method). */
+  membershipId?: string;
+  /** Links an expense to the Purchase Order it was recorded from ("Record Expense" at receiving time), same display/navigation-only convention as every other source*Id link. */
+  purchaseOrderId?: string;
+  /** Set on a Customer Portal invoice payment -- the Stripe Checkout Session id that produced it, so the webhook that applies the payment can tell "already recorded" from "new" if Stripe ever redelivers the same event. */
+  stripeSessionId?: string;
 }
 
 export interface SchedulingEvent {
   id: string;
-  eventType: string; // Estimate, Consultation, Meeting, Job, Project Review, Site Visit, Follow-Up, Inspection, Delivery, Training, PTO, Vacation, Sick Day, Vehicle Maintenance, Equipment Maintenance, Inventory Delivery, Reminder, Task, Custom
+  eventType: string; // Estimate, Consultation, Meeting, Job, Work Order, Project Review, Site Visit, Follow-Up, Inspection, Delivery, Training, PTO, Vacation, Sick Day, Vehicle Maintenance, Equipment Maintenance, Inventory Delivery, Reminder, Task, Custom
   customType?: string;
   date: string; // YYYY-MM-DD
   startTime: string; // HH:MM (24-hour)
@@ -357,8 +447,69 @@ export interface SchedulingEvent {
   budget?: number;
   laborRate?: number;
   checklist?: Array<{ id: string; label: string; completed: boolean; completedAt?: string; completedBy?: string }>;
-  materials?: Array<{ inventoryId: string; name: string; quantity: number; unitCost: number }>;
+  /** inventoryId is optional -- a Purchase Order's custom (non-Inventory) line, once received, lands here too so Job Costing counts every real material cost, not only the ones picked from Inventory. */
+  materials?: Array<{ inventoryId?: string; name: string; quantity: number; unitCost: number }>;
   activity?: Array<{ id: string; timestamp: string; action: string; by: string; detail?: string }>;
+  /** Set when this calendar entry (eventType "Work Order") was auto-created so a scheduled Work Order shows up on Scheduling/Dispatch/Map without those pages needing any Work Order-specific code -- see WorkOrderBuilder.tsx. */
+  sourceWorkOrderId?: string;
   createdAt?: string;
   updatedAt?: string;
+  /** Marketing attribution, carried over from the Estimate/Customer this job came from (see Customer.source). */
+  source?: LeadSource;
+  sourceLeadId?: string;
+  /** Stamped once by the Event Engine's job-completion cascade the moment status first becomes "Completed" -- used to fire a "Review Request X days after completion" without depending on which page/action actually set the status. */
+  completedAt?: string;
+  /** Excludes this one job from Automated Review Requests even when automation is turned on business-wide. */
+  reviewRequestExcluded?: boolean;
+  /** Defaults to visible -- unlike Documents, a Job is the customer's own
+   * appointment/work, so hiding it needs an explicit opt-out (set false),
+   * not an opt-in. Only relevant when eventType is "Job"; other calendar
+   * entry types are never customer-facing at all regardless of this flag. */
+  customerVisible?: boolean;
+}
+
+/**
+ * A real, standalone job-flow document -- distinct from an Estimate (a
+ * single-amount bid) and a Job (the scheduling/dispatch record). Only
+ * `date` and `jobDescription` are ever required to save one; everything
+ * else is optional, so a Work Order can be created from scratch with zero
+ * dependency on an Estimate or Job existing first.
+ *
+ * Anything copied in from an Estimate/Job (customer info, address, line
+ * items, a Flat Rate Pricing Model, etc.) becomes this document's own
+ * independent copy the moment it's saved -- editing a Work Order never
+ * writes back to the Estimate, Job, Invoice, or master Price Book model it
+ * came from. See WorkOrderBuilder.tsx.
+ */
+export interface WorkOrder {
+  id: string;
+  workOrderNumber?: string;
+  date: string; // YYYY-MM-DD -- required
+  jobDescription: string; // required
+  customerId?: string;
+  customerName?: string;
+  customerPhone?: string;
+  customerEmail?: string;
+  address?: string;
+  /** Independent-copy link back to where this Work Order was built from, for display/navigation only -- never a live reference that gets re-synced. */
+  sourceEstimateId?: string;
+  sourceJobId?: string;
+  /** Set when this is a recurring maintenance visit auto-generated from a Membership/Service Agreement -- display/navigation only, same independent-copy rule as sourceEstimateId/sourceJobId. */
+  sourceMembershipId?: string;
+  assignedEmployees?: string[];
+  scheduledDate?: string;
+  scheduledTime?: string;
+  priority?: "Low" | "Medium" | "High" | "Urgent";
+  notes?: string;
+  materials?: Array<{ inventoryId?: string; name: string; quantity: number; unitCost: number }>;
+  /** Labor/tasks and any Flat Rate Pricing Models added -- each one an independent copy, never a live link back to the master Price Book model. */
+  lineItems?: Array<{ id: string; description: string; quantity: number; unitPrice: number; priceBookModelId?: string }>;
+  status?: "Draft" | "Scheduled" | "In Progress" | "Completed" | "Cancelled";
+  estimatedValue?: number;
+  createdAt: string;
+  updatedAt?: string;
+  createdBy?: string;
+  activity?: Array<{ id: string; timestamp: string; action: string; by: string; detail?: string }>;
+  /** Defaults to visible, same reasoning as SchedulingEvent.customerVisible -- a Work Order is the customer's own order; opt out to hide one, don't opt in. */
+  customerVisible?: boolean;
 }

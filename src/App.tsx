@@ -4,18 +4,33 @@ import { useVisualViewportBottomRight } from "./hooks/useVisualViewportBottomRig
 import { db, auth } from "./firebase";
 import { doc, setDoc, getDoc, getDocFromServer, writeBatch } from "firebase/firestore";
 import { fullAccessGranular, defaultGranularFromModuleList, hasPermission, GranularPermissions } from "./types/permissions";
-import { RevenueEvent, EmployeeRecord, TimeClockLog, Transaction } from "./types/domain";
-import { Account, JournalEntry, Invoice, Bill, Vendor, BankAccount, RecurringTransaction, MileageLog, Budget, SalesTaxRate, DEFAULT_CHART_OF_ACCOUNTS, computeAccountBalance } from "./types/accounting";
+import { RevenueEvent, EmployeeRecord, TimeClockLog, Transaction, WorkOrder } from "./types/domain";
+import { PriceBookFolder, PriceBookModel } from "./types/priceBook";
+import { Membership } from "./types/membership";
+import { PurchaseOrder } from "./types/purchaseOrder";
+import { ReviewRequest, ReviewAutomationSettings, DEFAULT_REVIEW_AUTOMATION_SETTINGS } from "./types/reviewRequest";
+import type { CustomerSession } from "./types/customerAccount";
+import { CustomerLoginPanel } from "./components/CustomerLoginPanel";
+import { CustomerAppShell } from "./components/CustomerAppShell";
+import { useStripeConnectStatus } from "./hooks/useStripeConnectStatus";
+import { Account, JournalEntry, Invoice, Bill, Vendor, BankAccount, RecurringTransaction, MileageLog, Budget, SalesTaxRate, DEFAULT_CHART_OF_ACCOUNTS } from "./types/accounting";
 import type { GeneratedPdfDraft, EstimatePrefill } from "./types/generatedPdf";
 import { buildStyleGuidance } from "./lib/aiStyle";
-import { postTransactionEntry, invoiceTotal } from "./lib/accountingEngine";
+import { authedFetch } from "./lib/apiClient";
+import { postTransactionEntry, invoiceTotal, accountMovementInRange, computeAccountBalances, computeLedgerTotals, expenseBreakdownByAccount, ledgerItemsForAccount } from "./lib/accountingEngine";
 import { registerForPushNotifications } from "./lib/pushNotifications";
 import { buildTextDocumentPdf, bytesToBase64 } from "./lib/pdfExport";
 import { MAX_INLINE_BASE64_LENGTH } from "./lib/firestoreDocumentLimits";
 import { downloadCsv } from "./lib/csv";
 import { getRemoteSigningTokenFromUrl } from "./lib/remoteSigningClient";
+import { getCustomerPortalTokenFromUrl } from "./lib/customerPortalClient";
 import { updateLiveLocation } from "./lib/timeClockService";
+import { computePayrollHoursForRange } from "./lib/payrollHours";
+import { computeJobCosting } from "./lib/jobCostingEngine";
+import { PriceBookModal } from "./components/PriceBookModal";
 import RemoteSigningPage from "./components/RemoteSigningPage";
+import CustomerPortalPage from "./components/CustomerPortalPage";
+import { MarketingAttributionView } from "./components/MarketingAttributionView";
 import { TimeClockApprovalModal } from "./components/TimeClockApprovalModal";
 import { RolePermissionEditorModal, MODULE_CATALOG } from "./components/RolePermissionEditorModal";
 import { LogTransactionModal } from "./components/LogTransactionModal";
@@ -106,7 +121,7 @@ import {
   Legend
 } from "recharts";
 import { LineChart, Line, BarChart, Bar, PieChart, Pie, Cell, ComposedChart } from "recharts";
-import { DollarSign, TrendingUp, TrendingDown, Search, Filter, Landmark, Box, CreditCard, Camera, Star } from "lucide-react";
+import { DollarSign, TrendingUp, TrendingDown, Search, Filter, Landmark, Box, CreditCard, Camera, Star, Receipt } from "lucide-react";
 
 import { CustomersPage, Customer, INITIAL_CUSTOMERS } from "./components/CustomersPage";
 import { LeadsPage, INITIAL_LEADS, Lead } from "./components/LeadsPage";
@@ -119,9 +134,11 @@ import { JobsPage } from "./components/JobsPage";
 import { TimeClockPage } from "./components/TimeClockPage";
 import { InventoryPage, INITIAL_INVENTORY, InventoryItem } from "./components/InventoryPage";
 import { InteractiveMapPage } from "./components/InteractiveMapPage";
+import { EmployeeLocationsPage } from "./components/EmployeeLocationsPage";
 import { DocumentsPage, DocumentItem } from "./components/DocumentsPage";
 import { AccountingPage } from "./components/AccountingPage";
-import { PlaidConnectButton } from "./components/PlaidConnectButton";
+import { PaymentsPage } from "./components/PaymentsPage";
+import { BillingPage } from "./components/BillingPage";
 import { RosterPage } from "./components/RosterPage";
 import { MessagesPage } from "./components/MessagesPage";
 import { TrainingPage } from "./components/TrainingPage";
@@ -558,7 +575,7 @@ const validPersonName = (value: unknown): string => {
 
 export type WorkspaceTheme = "light-basic" | "light-extreme" | "dark-basic" | "dark-dynamic";
 
-const workspaceThemeFromSetting = (value?: string): WorkspaceTheme => {
+export const workspaceThemeFromSetting = (value?: string): WorkspaceTheme => {
   // "Light Mode Dynamic" was previously labeled "Light Mode Extreme" --
   // accept the old saved string so existing businesses don't get bumped
   // back to Light Mode Basic after the rename.
@@ -568,7 +585,7 @@ const workspaceThemeFromSetting = (value?: string): WorkspaceTheme => {
   return "light-basic";
 };
 
-const workspaceThemeSettingValue = (theme: WorkspaceTheme): string => {
+export const workspaceThemeSettingValue = (theme: WorkspaceTheme): string => {
   if (theme === "light-extreme") return "Light Mode Dynamic";
   if (theme === "dark-dynamic") return "Dark Mode Dynamic";
   if (theme === "dark-basic") return "Dark Mode Basic";
@@ -643,27 +660,27 @@ export const DEFAULT_ROLES_DATA: Record<string, { name: string; description: str
   owner: {
     name: "Owner",
     description: "Everything",
-    permissions: ["dashboard", "leads", "jobs", "customers", "messages", "scheduling", "dispatch", "timeclock", "routes", "estimates", "documents", "ai_assistant", "inventory", "settings", "training"]
+    permissions: ["dashboard", "leads", "jobs", "customers", "messages", "scheduling", "dispatch", "timeclock", "routes", "employee_locations", "estimates", "documents", "ai_assistant", "inventory", "settings", "training"]
   },
   general_manager: {
     name: "General Manager",
     description: "Everything except ownership and account deletion",
-    permissions: ["dashboard", "leads", "jobs", "customers", "messages", "scheduling", "dispatch", "timeclock", "routes", "estimates", "documents", "ai_assistant", "inventory", "settings", "training"]
+    permissions: ["dashboard", "leads", "jobs", "customers", "messages", "scheduling", "dispatch", "timeclock", "routes", "employee_locations", "estimates", "documents", "ai_assistant", "inventory", "settings", "training"]
   },
   office_manager: {
     name: "Office Manager",
     description: "Day-to-day office and field operations",
-    permissions: ["dashboard", "revenue", "accounting", "customers", "leads", "estimates", "scheduling", "dispatch", "routes", "jobs", "timeclock", "inventory", "documents", "messages", "roster", "training", "settings"]
+    permissions: ["dashboard", "revenue", "accounting", "customers", "leads", "estimates", "scheduling", "dispatch", "routes", "employee_locations", "jobs", "timeclock", "inventory", "documents", "messages", "roster", "training", "settings"]
   },
   operations_manager: {
     name: "Operations Manager",
     description: "Dashboard, Scheduling, Dispatch, Routes, Jobs, Inventory, etc.",
-    permissions: ["dashboard", "scheduling", "dispatch", "routes", "jobs", "inventory", "documents", "messages", "training", "settings"]
+    permissions: ["dashboard", "scheduling", "dispatch", "routes", "employee_locations", "jobs", "inventory", "documents", "messages", "training", "settings"]
   },
   dispatcher: {
     name: "Dispatcher",
     description: "Dispatch, Routes, Map, Jobs, Sched",
-    permissions: ["dashboard", "scheduling", "dispatch", "routes", "jobs", "customers", "messages", "settings"]
+    permissions: ["dashboard", "scheduling", "dispatch", "routes", "employee_locations", "jobs", "customers", "messages", "settings"]
   },
   scheduler: {
     name: "Scheduler",
@@ -688,12 +705,12 @@ export const DEFAULT_ROLES_DATA: Record<string, { name: string; description: str
   project_manager: {
     name: "Project Manager",
     description: "Dashboard, Customers, Scheduling, Dispatch, Routes, Jobs, Inventory, Documents, Messages",
-    permissions: ["dashboard", "customers", "scheduling", "dispatch", "routes", "jobs", "inventory", "documents", "messages", "settings"]
+    permissions: ["dashboard", "customers", "scheduling", "dispatch", "routes", "employee_locations", "jobs", "inventory", "documents", "messages", "settings"]
   },
   field_supervisor: {
     name: "Field Supervisor",
     description: "Dashboard, Jobs, Scheduling, Dispatch, Routes, Inventory, Documents, Messages, Training",
-    permissions: ["dashboard", "jobs", "scheduling", "dispatch", "routes", "inventory", "documents", "messages", "training", "settings"]
+    permissions: ["dashboard", "jobs", "scheduling", "dispatch", "routes", "employee_locations", "inventory", "documents", "messages", "training", "settings"]
   },
   technician: {
     name: "Technician",
@@ -758,7 +775,7 @@ export const DEFAULT_ROLES_DATA: Record<string, { name: string; description: str
   it_administrator: {
     name: "IT Administrator",
     description: "Everything except Owner company settings",
-    permissions: ["dashboard", "leads", "jobs", "customers", "messages", "scheduling", "dispatch", "timeclock", "routes", "estimates", "documents", "ai_assistant", "inventory", "training", "settings"]
+    permissions: ["dashboard", "leads", "jobs", "customers", "messages", "scheduling", "dispatch", "timeclock", "routes", "employee_locations", "estimates", "documents", "ai_assistant", "inventory", "training", "settings"]
   }
 };
 
@@ -818,17 +835,34 @@ const BRAND_ICON_DATA_URL = "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/
 const SIGNIN_BUTTON_URL = "https://raw.githubusercontent.com/mcwaddingham1990-star/Leadforgeos/main/Src/Assets/Signinbuttom.png";
 const GO_BUTTON_URL = "https://raw.githubusercontent.com/mcwaddingham1990-star/Leadforgeos/main/Src/Assets/Gobutton.png";
 
+// Real per-module URLs (/app/<screenId>) so refresh, bookmarking, and
+// browser Back/Forward all work -- additive only: this just keeps
+// window.location's path in sync with activeScreen (see the useState
+// initializer and the two useEffects near activeScreen's declaration
+// below). Existing role/permission gating is untouched -- an id restored
+// from a URL the current user can't actually see still renders the same
+// "Restricted Access" fallback it always would if activeScreen held that
+// id for any other reason, and an unrecognized id falls back to OS_SCREENS[0]
+// exactly like an unrecognized sessionStorage value already did.
+function screenIdFromPath(): string | null {
+  const match = window.location.pathname.match(/^\/app\/([a-zA-Z0-9_]+)\/?$/);
+  return match ? match[1] : null;
+}
+
 // Operating System Screens mapping
 const OS_SCREENS = [
   { id: "dashboard", label: "Dashboard", url: "https://raw.githubusercontent.com/mcwaddingham1990-star/Leadforgeos/main/Src/Screens/Lightmodescreens/Lightdashboard.jpg", icon: "📊", top: "12%", bottom: "17%" },
   { id: "revenue", label: "Revenue", url: "", icon: "📈", top: "12%", bottom: "17%" },
   { id: "accounting", label: "Accounting", url: "", icon: "🧮", top: "12%", bottom: "17%" },
+  { id: "payments", label: "Payments", url: "", icon: "💳", top: "12%", bottom: "17%" },
+  { id: "billing", label: "Billing", url: "", icon: "🧾", top: "12%", bottom: "17%" },
   { id: "customers", label: "Customers", url: "https://raw.githubusercontent.com/mcwaddingham1990-star/Leadforgeos/main/Src/Screens/Lightmodescreens/Lightcustomers.jpg", icon: "👥", top: "27%", bottom: "32%" },
   { id: "leads", label: "Leads", url: "https://raw.githubusercontent.com/mcwaddingham1990-star/Leadforgeos/main/Src/Screens/Lightmodescreens/Lightleads.jpg", icon: "🎯", top: "17%", bottom: "22%" },
   { id: "estimates", label: "Estimates & Bids", url: "https://raw.githubusercontent.com/mcwaddingham1990-star/Leadforgeos/main/Src/Screens/Lightmodescreens/Lightestimatesbids.jpg", icon: "📝", top: "57%", bottom: "62%" },
   { id: "scheduling", label: "Scheduling", url: "https://raw.githubusercontent.com/mcwaddingham1990-star/Leadforgeos/main/Src/Screens/Lightmodescreens/Lightscheduling.jpg", icon: "📅", top: "37%", bottom: "42%" },
   { id: "dispatch", label: "Dispatch", url: "https://raw.githubusercontent.com/mcwaddingham1990-star/Leadforgeos/main/Src/Screens/Lightmodescreens/Lightdispatch.jpg", icon: "🚚", top: "42%", bottom: "47%" },
   { id: "routes", label: "Interactive Map & Routes", url: "https://raw.githubusercontent.com/mcwaddingham1990-star/Leadforgeos/main/Src/Screens/Lightmodescreens/Lightroutes.jpg", icon: "🗺️", top: "52%", bottom: "57%" },
+  { id: "employee_locations", label: "Employee Locations", url: "", icon: "📍", top: "52%", bottom: "57%" },
   { id: "jobs", label: "Jobs", url: "https://raw.githubusercontent.com/mcwaddingham1990-star/Leadforgeos/main/Src/Screens/Lightmodescreens/Lightjobs.jpg", icon: "💼", top: "22%", bottom: "27%" },
   { id: "timeclock", label: "Time Clock", url: "https://raw.githubusercontent.com/mcwaddingham1990-star/Leadforgeos/main/Src/Screens/Lightmodescreens/Lighttimeclock.jpg", icon: "⏱️", top: "47%", bottom: "52%" },
   { id: "payroll", label: "Payroll", url: "", icon: "💵", top: "47%", bottom: "52%" },
@@ -847,29 +881,50 @@ const OS_SCREENS = [
   { id: "owner_console", label: "Owner Console", url: "", icon: "🛠️", top: "82%", bottom: "87%" }
 ];
 
-// The real expense categories shown in the Revenue page's statement table
-// ("Expenses by Category" view). "Bills" comes from the bills collection;
-// "Material Expenses" is a bucket of several transaction categories; every
-// other entry matches a transaction's `category` field exactly.
-const EXPENSE_CATEGORY_NAMES = [
-  "Bills", "Material Expenses", "Fuel", "Vehicle Maintenance", "Equipment", "Tools",
-  "Insurance", "Taxes", "Marketing", "Software & Subs", "Utilities", "Office Supplies", "Custom Expense"
-] as const;
 
 /**
- * Buckets the real revenueEvents log (written by the Event Engine's
- * job-completion cascade) and real transactions log (manual/scanned/payroll
- * entries — see LogTransactionModal + handleRunPayroll) into real calendar
- * periods for the revenue chart, plus real prior-period/current-period
- * totals for the comparison badge and summary cards. Accrued Taxes is
+ * A bill's real expense cost for the Revenue graph -- prefers the amount
+ * Accounting's own ledger actually posted as an expense (postBillCreatedEntry
+ * in accountingEngine.ts), which correctly excludes any inventory-linked
+ * portion (that slice debits Inventory instead -- see that function's own
+ * comment), over the bill's raw totalCost/estimatedCost which includes it.
+ * Without this, a bill for received inventory items counted as an expense
+ * here AND as inventory asset value in Accounting, so the two pages'
+ * expense/profit totals disagreed on exactly those bills. Falls back to the
+ * old raw-total calculation only when no matching "bill" journal entry
+ * exists at all (e.g. a very old bill from before this was posted), so no
+ * historical bill silently drops out of this total.
+ */
+function billExpenseAmounts(bills: Bill[], journalEntries: JournalEntry[]): Map<string, number> {
+  const fromLedger = new Map<string, number>();
+  journalEntries.forEach((je) => {
+    if (je.source !== "bill" || !je.sourceId) return;
+    const nonInventoryDebits = je.lines.filter((l) => l.debit > 0 && l.accountId !== "acct_inventory").reduce((s, l) => s + l.debit, 0);
+    fromLedger.set(je.sourceId, nonInventoryDebits);
+  });
+  const amounts = new Map<string, number>();
+  bills.forEach((bill) => {
+    amounts.set(bill.id, fromLedger.get(bill.id) ?? (bill.totalCost ?? bill.estimatedCost ?? bill.lineItems.reduce((sum, item) => sum + item.quantity * item.unitPrice, 0)));
+  });
+  return amounts;
+}
+
+/**
+ * Buckets the canonical ledger (journalEntries, grouped by real Chart of
+ * Accounts accounts) into real calendar periods for the revenue chart, plus
+ * real prior-period/current-period totals for the comparison badge and
+ * summary cards. Deriving every number here from account movements --
+ * instead of separately re-filtering raw revenueEvents/transactions/bills
+ * arrays the way this function used to -- is what makes this chart's totals
+ * agree with Accounting & Bookkeeping's P&L for the exact same range: both
+ * read the same journal entries through the same accounts. Accrued Taxes is
  * deliberately not derived here — there's no real tax engine anywhere in
  * the app to compute a real liability from.
  */
 function getRevenueChartData(
   filter: string,
-  revenueEvents: RevenueEvent[],
-  transactions: Transaction[] = [],
-  bills: Bill[] = []
+  accounts: Account[],
+  journalEntries: JournalEntry[] = []
 ): {
   series: Array<{ time: string; Revenue: number; Expenses: number; TotalExpenses: number; Bills: number; MaterialExpenses: number; Payroll: number; OtherExpenses: number; Profit: number }>;
   currentTotal: number;
@@ -879,37 +934,25 @@ function getRevenueChartData(
   priorExpenseTotal: number;
 } {
   const now = new Date();
-  const expenseTx = transactions.filter((t) => t.type === "expense");
-  const payrollTx = expenseTx.filter((t) => t.category === "Payroll");
-  const materialOperationalCategories = new Set(["Material Expenses", "Materials", "Equipment", "Fuel", "Office Supplies", "Tools", "Supplies", "Inventory"]);
-  const materialTx = expenseTx.filter((t) => materialOperationalCategories.has(t.category || ""));
-  const otherExpenseTx = expenseTx.filter((t) => t.category !== "Payroll" && !materialOperationalCategories.has(t.category || ""));
-  const billCosts = bills.filter((bill) => bill.status !== "void").map((bill) => ({
-    amount: bill.totalCost ?? bill.estimatedCost ?? bill.lineItems.reduce((sum, item) => sum + item.quantity * item.unitPrice, 0),
-    date: bill.issuedDate
-  }));
-  const allExpenseCosts = [...expenseTx, ...billCosts];
+  const revenueAccountIds = accounts.filter((a) => a.type === "revenue").map((a) => a.id);
+  const expenseAccountIds = accounts.filter((a) => a.type === "expense").map((a) => a.id);
+  // Same "Material Expenses" umbrella the Dashboard/Revenue breakdowns use --
+  // everything else expense-type (other than Bills/Payroll, each broken out
+  // as their own named series) rolls into OtherExpenses.
+  const materialAccountIds = ["acct_cogs_materials", "acct_equipment_expense", "acct_tools_expense"].filter((id) => expenseAccountIds.includes(id));
+  const otherExpenseAccountIds = expenseAccountIds.filter((id) => id !== "acct_bills_expense" && id !== "acct_payroll_expense" && !materialAccountIds.includes(id));
 
-  // Real revenue = job-completion events (revenueEvents) + manually-logged
-  // or scanned income transactions (e.g. a photographed check) — both are
-  // real money in, and logging one should actually move these totals.
-  const incomeTx = transactions.filter((t) => t.type === "income");
-  const revenueSource: Array<{ amount: number; date: string }> = [...revenueEvents, ...incomeTx];
-
-  const sumInRange = (items: Array<{ amount: number; date: string }>, start: Date, end: Date) =>
-    items
-      .filter((e) => {
-        const d = new Date(e.date);
-        return d >= start && d < end;
-      })
-      .reduce((sum, e) => sum + e.amount, 0);
+  const ledgerRevenueInRange = (start: Date, end: Date) =>
+    revenueAccountIds.reduce((s, id) => s + accountMovementInRange(id, "revenue", journalEntries, start, end), 0);
+  const ledgerExpenseInRange = (start: Date, end: Date) =>
+    expenseAccountIds.reduce((s, id) => s + accountMovementInRange(id, "expense", journalEntries, start, end), 0);
 
   const buildRow = (time: string, start: Date, end: Date) => {
-    const Revenue = sumInRange(revenueSource, start, end);
-    const Bills = sumInRange(billCosts, start, end);
-    const MaterialExpenses = sumInRange(materialTx, start, end);
-    const Payroll = sumInRange(payrollTx, start, end);
-    const OtherExpenses = sumInRange(otherExpenseTx, start, end);
+    const Revenue = ledgerRevenueInRange(start, end);
+    const Bills = accountMovementInRange("acct_bills_expense", "expense", journalEntries, start, end);
+    const Payroll = accountMovementInRange("acct_payroll_expense", "expense", journalEntries, start, end);
+    const MaterialExpenses = materialAccountIds.reduce((s, id) => s + accountMovementInRange(id, "expense", journalEntries, start, end), 0);
+    const OtherExpenses = otherExpenseAccountIds.reduce((s, id) => s + accountMovementInRange(id, "expense", journalEntries, start, end), 0);
     const TotalExpenses = Bills + MaterialExpenses + Payroll + OtherExpenses;
     return { time, Revenue, Expenses: TotalExpenses, TotalExpenses, Bills, MaterialExpenses, Payroll, OtherExpenses, Profit: Revenue - TotalExpenses };
   };
@@ -940,8 +983,8 @@ function getRevenueChartData(
       currentExpenseTotal: filter === "Day"
         ? series.reduce((s, d) => s + d.Expenses, 0)
         : (series[series.length - 1]?.Expenses || 0),
-      currentPayrollTotal: sumInRange(payrollTx, periodStart, periodEnd),
-      priorExpenseTotal: sumInRange(allExpenseCosts, new Date(periodStart.getTime() - periodDuration), periodStart)
+      currentPayrollTotal: accountMovementInRange("acct_payroll_expense", "expense", journalEntries, periodStart, periodEnd),
+      priorExpenseTotal: ledgerExpenseInRange(new Date(periodStart.getTime() - periodDuration), periodStart)
     };
   };
 
@@ -962,8 +1005,7 @@ function getRevenueChartData(
     const periodStart = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 29);
     const periodEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
     const series = buildDays(30, (d) => d.toLocaleDateString(undefined, { month: "numeric", day: "numeric" }));
-    const priorTotal = sumInRange(
-      revenueSource,
+    const priorTotal = ledgerRevenueInRange(
       new Date(now.getFullYear(), now.getMonth(), now.getDate() - 59),
       new Date(now.getFullYear(), now.getMonth(), now.getDate() - 29)
     );
@@ -974,8 +1016,7 @@ function getRevenueChartData(
     const periodStart = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 6);
     const periodEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
     const dailyRows = buildDays(7, (d) => d.toLocaleDateString(undefined, { month: "numeric", day: "numeric" }));
-    const priorTotal = sumInRange(
-      revenueSource,
+    const priorTotal = ledgerRevenueInRange(
       new Date(now.getFullYear(), now.getMonth(), now.getDate() - 13),
       periodStart
     );
@@ -986,8 +1027,7 @@ function getRevenueChartData(
     const periodStart = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 13);
     const periodEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
     const dailyRows = buildDays(14, (d) => d.toLocaleDateString(undefined, { month: "numeric", day: "numeric" }));
-    const priorTotal = sumInRange(
-      revenueSource,
+    const priorTotal = ledgerRevenueInRange(
       new Date(now.getFullYear(), now.getMonth(), now.getDate() - 27),
       periodStart
     );
@@ -1005,7 +1045,7 @@ function getRevenueChartData(
       dailyRows.push(buildRow(dayStart.toLocaleDateString(undefined, { month: "numeric", day: "numeric" }), dayStart, dayEnd));
     }
     const priorMonthStart = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-    const priorTotal = sumInRange(revenueSource, priorMonthStart, periodStart);
+    const priorTotal = ledgerRevenueInRange(priorMonthStart, periodStart);
     return withTotals(cumulative(dailyRows), periodStart, periodEnd, priorTotal);
   }
 
@@ -1019,8 +1059,7 @@ function getRevenueChartData(
     }
     const periodStart = new Date(now.getFullYear(), quarterStartMonth, 1);
     const periodEnd = new Date(now.getFullYear(), quarterStartMonth + 3, 1);
-    const priorTotal = sumInRange(
-      revenueSource,
+    const priorTotal = ledgerRevenueInRange(
       new Date(now.getFullYear(), quarterStartMonth - 3, 1),
       periodStart
     );
@@ -1036,8 +1075,7 @@ function getRevenueChartData(
     }
     const periodStart = new Date(now.getFullYear(), 0, 1);
     const periodEnd = new Date(now.getFullYear() + 1, 0, 1);
-    const priorTotal = sumInRange(
-      revenueSource,
+    const priorTotal = ledgerRevenueInRange(
       new Date(now.getFullYear() - 1, 0, 1),
       periodStart
     );
@@ -1045,8 +1083,8 @@ function getRevenueChartData(
   }
 
   // Total: group the complete ledger by year, then show lifetime running totals.
-  const allDates = [...revenueSource, ...expenseTx, ...billCosts]
-    .map((item) => new Date(item.date))
+  const allDates = journalEntries
+    .map((entry) => new Date(entry.date))
     .filter((date) => !Number.isNaN(date.getTime()));
   const firstYear = allDates.length ? Math.min(...allDates.map((date) => date.getFullYear())) : now.getFullYear();
   const years: ReturnType<typeof buildRow>[] = [];
@@ -1081,7 +1119,8 @@ function getRevenueStepSeries(
   filter: string,
   revenueEvents: RevenueEvent[],
   transactions: Transaction[] = [],
-  bills: Bill[] = []
+  bills: Bill[] = [],
+  journalEntries: JournalEntry[] = []
 ): { points: RevenueStepPoint[]; periodStart: Date; periodEnd: Date } {
   const now = new Date();
   let periodStart: Date;
@@ -1122,12 +1161,12 @@ function getRevenueStepSeries(
     const time = new Date(t.date).getTime();
     if (inRange(time)) events.push({ time, kind: t.type === "income" ? "payment" : "expense", amount: t.amount });
   }
+  const billAmounts = billExpenseAmounts(bills, journalEntries);
   for (const b of bills) {
     if (b.status === "void") continue;
     const time = new Date(b.issuedDate).getTime();
     if (!inRange(time)) continue;
-    const amount = b.totalCost ?? b.estimatedCost ?? b.lineItems.reduce((s, li) => s + li.quantity * li.unitPrice, 0);
-    events.push({ time, kind: "expense", amount });
+    events.push({ time, kind: "expense", amount: billAmounts.get(b.id) ?? 0 });
   }
   events.sort((a, b) => a.time - b.time);
   // Dates without a time-of-day (a bill's issued date, a logged transaction's
@@ -1200,47 +1239,6 @@ function computeRecentPayrollHours(logs: TimeClockLog[], sinceDaysAgo: number): 
   return computePayrollHoursForRange(logs, dateInputValue(since), dateInputValue(new Date()), 0);
 }
 
-function computePayrollHoursForRange(logs: TimeClockLog[], startDate: string, endDate: string, workweekStartDay: number): { hours: number; regularHours: number; overtimeHours: number } {
-  const since = new Date(`${startDate}T00:00:00`);
-  const through = new Date(`${endDate}T23:59:59.999`);
-  const sorted = [...logs]
-    .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
-  const weekHours = new Map<string, number>();
-  let segmentStart: number | null = null;
-  const addSegment = (startMs: number, endMs: number) => {
-    let cursor = Math.max(startMs, since.getTime());
-    while (cursor < endMs) {
-      const date = new Date(cursor);
-      const weekStart = new Date(date);
-      weekStart.setHours(0, 0, 0, 0);
-      weekStart.setDate(weekStart.getDate() - ((weekStart.getDay() - workweekStartDay + 7) % 7));
-      const nextWeek = new Date(weekStart);
-      nextWeek.setDate(nextWeek.getDate() + 7);
-      const sliceEnd = Math.min(endMs, nextWeek.getTime());
-      const key = weekStart.toISOString().slice(0, 10);
-      weekHours.set(key, (weekHours.get(key) || 0) + Math.max(0, sliceEnd - cursor) / 3600000);
-      cursor = sliceEnd;
-    }
-  };
-  for (const log of sorted) {
-    const ts = new Date(log.timestamp).getTime();
-    if (log.type === "Clock In" || log.type === "Break End") {
-      segmentStart = Math.max(ts, since.getTime());
-    } else if ((log.type === "Clock Out" || log.type === "Break Start") && segmentStart !== null) {
-      if (ts >= since.getTime() && segmentStart <= through.getTime()) addSegment(segmentStart, Math.min(ts, through.getTime()));
-      segmentStart = null;
-    }
-  }
-  if (segmentStart !== null && segmentStart <= through.getTime()) addSegment(segmentStart, Math.min(Date.now(), through.getTime()));
-  let regularHours = 0;
-  let overtimeHours = 0;
-  weekHours.forEach(hours => {
-    regularHours += Math.min(hours, 40);
-    overtimeHours += Math.max(0, hours - 40);
-  });
-  return { hours: regularHours + overtimeHours, regularHours, overtimeHours };
-}
-
 const BrandIcon: React.FC<{ className?: string }> = ({ className = "" }) => (
   <img
     src="/branding/owners-sidebar-icon-1000043699.png"
@@ -1269,6 +1267,10 @@ const getScreenIcon = (screenId: string, className: string = "w-4 h-4") => {
       return <BrandIcon className={className} />;
     case "accounting":
       return <Landmark className={className} />;
+    case "payments":
+      return <CreditCard className={className} />;
+    case "billing":
+      return <Receipt className={className} />;
     case "customers":
       return <Users className={className} />;
     case "leads":
@@ -1281,6 +1283,8 @@ const getScreenIcon = (screenId: string, className: string = "w-4 h-4") => {
       return <Truck className={className} />;
     case "routes":
       return <Compass className={className} />;
+    case "employee_locations":
+      return <MapPin className={className} />;
     case "jobs":
       return <Briefcase className={className} />;
     case "timeclock":
@@ -1549,6 +1553,12 @@ export default function App() {
   const remoteSignToken = getRemoteSigningTokenFromUrl();
   if (remoteSignToken) return <RemoteSigningPage token={remoteSignToken} />;
 
+  // Same reasoning, for a customer's own Customer Portal link -- no
+  // OwnersLocal login of theirs is involved, so this renders instead of
+  // the normal logged-in app shell entirely.
+  const customerPortalToken = getCustomerPortalTokenFromUrl();
+  if (customerPortalToken) return <CustomerPortalPage token={customerPortalToken} />;
+
   // Logged in user profile (null if guest/default owner, or set when authenticated)
   // Standalone demo build: no Firebase Auth, no login screen -- opens
   // straight in as this fake Owner user. See src/hooks/useFirestoreCollection.ts
@@ -1641,11 +1651,37 @@ export default function App() {
   // Standalone demo build: always logged in, no Firebase Auth gate.
   const [isLoggedIn, setIsLoggedIn] = useState(true);
   const [authReady, setAuthReady] = useState(false);
+  // Owner'sLOCAL Customer -- a real account type, completely separate from
+  // the business Owner/Employee login above. loginMode only controls which
+  // login FORM shows before anyone's authenticated; customerSession is set
+  // once Firebase Auth resolves to a real customer_accounts/{uid} doc (see
+  // the onAuthStateChanged listener below) and gates rendering the entire
+  // customer app shell instead of the business dashboard.
+  // A business's invite link (?joinCode=...) should land straight on the
+  // Customer Login screen, not the business one, even for a first-time
+  // visitor -- static at mount time, same reasoning as the pre-existing
+  // remoteSignToken/customerPortalToken checks that read window.location
+  // once rather than reactively.
+  const [loginMode, setLoginMode] = useState<"business" | "customer">(() => (
+    new URLSearchParams(window.location.search).has("joinCode") ? "customer" : "business"
+  ));
+  const [customerSession, setCustomerSession] = useState<CustomerSession | null>(null);
+  // One shared, live Stripe Connect status (same check PaymentsPage itself
+  // uses) so Dashboard/Revenue's "Integrate Stripe" prompt actually reflects
+  // reality instead of showing unconditionally even for an already-connected
+  // business -- see src/hooks/useStripeConnectStatus.ts.
+  const stripeConnectStatus = useStripeConnectStatus();
   const [currentView, setCurrentView] = useState<string>("login");
   const [activeScreen, setActiveScreen] = useState(() => {
-    const savedId = sessionStorage.getItem("ownerslocal_active_screen");
+    const savedId = screenIdFromPath() || sessionStorage.getItem("ownerslocal_active_screen");
     return OS_SCREENS.find(screen => screen.id === savedId) || OS_SCREENS[0];
   });
+  // True until the first activeScreen-sync effect below has run once --
+  // that first sync (which may just be re-confirming whatever the URL/
+  // sessionStorage already said on load) uses replaceState so a plain page
+  // load never pushes an extra, pointless history entry; every screen
+  // change after that pushes a real one so Back/Forward work.
+  const hasSyncedInitialScreenUrlRef = useRef(false);
   const [showNotification, setShowNotification] = useState<string | null>(null);
   const [employeeRedoOnboardingAllowed, setEmployeeRedoOnboardingAllowed] = useState(false);
 
@@ -1660,7 +1696,29 @@ export default function App() {
 
   useEffect(() => {
     sessionStorage.setItem("ownerslocal_active_screen", activeScreen.id);
+    const nextPath = `/app/${activeScreen.id}`;
+    if (window.location.pathname !== nextPath) {
+      const historyMethod = hasSyncedInitialScreenUrlRef.current ? "pushState" : "replaceState";
+      window.history[historyMethod]({ screenId: activeScreen.id }, "", nextPath + window.location.search);
+    }
+    hasSyncedInitialScreenUrlRef.current = true;
   }, [activeScreen]);
+
+  // Browser Back/Forward -- popstate fires with the URL already changed, so
+  // this only needs to read it and update activeScreen to match (never
+  // pushes/replaces a history entry itself, which would fight the browser's
+  // own navigation). An id the current user can't see still renders via the
+  // normal role-gated "Restricted Access" fallback, same as any other path
+  // to an activeScreen the permission check rejects.
+  useEffect(() => {
+    const handlePopState = () => {
+      const pathScreenId = screenIdFromPath();
+      const matched = pathScreenId && OS_SCREENS.find(s => s.id === pathScreenId);
+      if (matched) setActiveScreen(matched);
+    };
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, []);
 
   // Dashboard & Operational Interactive states
   const [isClockedIn, setIsClockedIn] = useState(false);
@@ -1690,6 +1748,25 @@ export default function App() {
   // collection to empty. (TrainingPage.tsx already used this exact
   // ternary, anticipating businessEmail would be populated here.)
   const businessId = loggedInUser?.isEmployee ? loggedInUser?.businessEmail : loggedInUser?.email;
+
+  // Applies a theme choice immediately -- local state, localStorage, AND a
+  // direct partial Firestore write (merge: true only touches
+  // companySettings.appearance.theme, leaving every other saved setting
+  // alone) -- rather than only updating local state and waiting for
+  // Settings' own separate "Save Changes" button. A theme pick that only
+  // lives in local state until some unrelated form is explicitly saved is
+  // exactly what made switching themes look like it "doesn't stick": pick
+  // a theme, refresh before hitting Save anywhere else, and the reload
+  // reads whatever was last actually saved, not the pick.
+  const applyWorkspaceTheme = (nextTheme: WorkspaceTheme) => {
+    setWorkspaceTheme(nextTheme);
+    const settingValue = workspaceThemeSettingValue(nextTheme);
+    localStorage.setItem("ownerslocal_workspace_theme", settingValue);
+    if (businessId) {
+      setDoc(doc(db, "business_profiles", businessId), { companySettings: { appearance: { theme: settingValue } } }, { merge: true })
+        .catch(err => console.error("Couldn't save workspace theme:", err));
+    }
+  };
 
   useEffect(() => {
     if (!businessId) return;
@@ -1724,6 +1801,13 @@ export default function App() {
   const [leads, setLeads] = useFirestoreCollection<Lead>("leads", businessId);
   const [estimates, setEstimates] = useFirestoreCollection<Estimate>("estimates", businessId);
   const [schedulingEvents, setSchedulingEvents] = useFirestoreCollection<SchedulingEvent>("scheduling_events", businessId);
+  const [workOrders, setWorkOrders] = useFirestoreCollection<WorkOrder>("work_orders", businessId);
+  const [priceBookFolders, setPriceBookFolders] = useFirestoreCollection<PriceBookFolder>("price_book_folders", businessId);
+  const [priceBookModels, setPriceBookModels] = useFirestoreCollection<PriceBookModel>("price_book_models", businessId);
+  const [memberships, setMemberships] = useFirestoreCollection<Membership>("memberships", businessId);
+  const [purchaseOrders, setPurchaseOrders] = useFirestoreCollection<PurchaseOrder>("purchase_orders", businessId);
+  const [reviewRequests, setReviewRequests] = useFirestoreCollection<ReviewRequest>("review_requests", businessId);
+  const [reviewAutomationSettings, setReviewAutomationSettings] = useState<ReviewAutomationSettings>(DEFAULT_REVIEW_AUTOMATION_SETTINGS);
   const [inventoryList, setInventoryList] = useFirestoreCollection<InventoryItem>("inventory", businessId);
   const [documents, setDocuments] = useFirestoreCollection<DocumentItem>("documents", businessId);
   const [recentRoster, setRecentRoster] = useFirestoreCollection<{ id?: string; name: string; role: string; code: string; status: string }>(
@@ -1811,6 +1895,22 @@ export default function App() {
     setAccounts(seeded);
   }, [businessId, accounts.length, setAccounts]);
 
+  // Additive backfill for businesses whose Chart of Accounts was already
+  // seeded before a new system account (e.g. a dedicated Bills expense
+  // account) was added to DEFAULT_CHART_OF_ACCOUNTS above -- otherwise an
+  // older business would keep posting that category's dollars into
+  // whichever account used to catch it (typically Other Operating Expense)
+  // forever, disagreeing with a newer business's books for the exact same
+  // kind of transaction. Only ever adds accounts that don't already exist;
+  // never edits or removes one, so no existing balance is touched.
+  useEffect(() => {
+    if (!businessId || accounts.length === 0) return;
+    const existingIds = new Set(accounts.map(a => a.id));
+    const missing = DEFAULT_CHART_OF_ACCOUNTS.filter(a => !existingIds.has(a.id));
+    if (missing.length === 0) return;
+    setAccounts(prev => [...prev, ...missing.map(a => ({ ...a, createdAt: new Date().toISOString() }))]);
+  }, [businessId, accounts, setAccounts]);
+
   // Derived, never a separately-tracked number — a running total kept in
   // its own useState would silently reset to 0 on every reload/re-login
   // instead of reflecting what's actually been recognized. Includes both
@@ -1826,6 +1926,7 @@ export default function App() {
   // Roster's "Manage Roles" button) instead of dead-ending in an alert/toast
   // telling the user to go find it themselves.
   const [preSelectedSettingsSection, setPreSelectedSettingsSection] = useState<string | undefined>(undefined);
+  const [preSelectedTechnicianId, setPreSelectedTechnicianId] = useState<string | undefined>(undefined);
 
   // Test connection on boot
   useEffect(() => {
@@ -2062,6 +2163,7 @@ export default function App() {
     if (highPrivilegeRoles.includes(activeRole)) {
       if (!perms.includes("revenue")) perms.push("revenue");
       if (!perms.includes("accounting")) perms.push("accounting");
+      if (!perms.includes("payments")) perms.push("payments");
     }
 
     return OS_SCREENS.filter(s => perms.includes(s.id));
@@ -2142,6 +2244,8 @@ export default function App() {
   const [payrollState, setPayrollState] = useState("TX");
   const [revenuePageFilter, setRevenuePageFilter] = useState("Pay Period");
   const [isFinancialSnapshotOpen, setIsFinancialSnapshotOpen] = useState(false);
+  const [isPriceBookOpen, setIsPriceBookOpen] = useState(false);
+  const [pendingCreateTemplateFolder, setPendingCreateTemplateFolder] = useState<string | null>(null);
   const [pinnedChartPoint, setPinnedChartPoint] = useState<{ label: number; payload: any[] } | null>(null);
   const [financialSnapshotCategory, setFinancialSnapshotCategory] = useState<
     "all" | "balance" | "unpaid_invoices" | "outstanding_expenses" | "payments_collected" | "expenses_paid"
@@ -2152,9 +2256,12 @@ export default function App() {
   // here so "View Financial Reports" doesn't have to navigate away --
   // each category's items come straight from the journal entries and open
   // invoices/bills those real actions already posted, nothing fabricated.
+  // computeAccountBalances is the exact function Accounting & Bookkeeping
+  // itself calls with these same inputs, inventory valuation and legacy-
+  // revenue backfill included, so this snapshot can't drift from that page.
   const financialSnapshotData = useMemo(() => {
-    const cashBalances: Record<string, number> = {};
-    for (const acct of accounts) cashBalances[acct.id] = computeAccountBalance(acct, journalEntries);
+    const inventoryAssetValue = inventoryList.reduce((s, i) => s + (i.quantity || 0) * (i.unitCost || 0), 0);
+    const cashBalances = computeAccountBalances({ accounts, journalEntries, revenueEvents, inventoryAssetValue });
 
     const cashLine = (entry: JournalEntry) => entry.lines.find(l => l.accountId === "acct_cash");
     const byDateDesc = <T extends { date: string }>(rows: T[]) => [...rows].sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
@@ -2211,7 +2318,7 @@ export default function App() {
       payments_collected: { label: "Payments Collected", total: paymentsCollectedItems.reduce((s, i) => s + i.amount, 0), items: paymentsCollectedItems },
       expenses_paid: { label: "Expenses Paid", total: expensesPaidItems.reduce((s, i) => s + i.amount, 0), items: expensesPaidItems }
     };
-  }, [accounts, journalEntries, invoices, bills]);
+  }, [accounts, journalEntries, invoices, bills, revenueEvents, inventoryList]);
   const [isGeneratingFinancialStatement, setIsGeneratingFinancialStatement] = useState(false);
 
   // Builds a real PDF statement from whichever category is currently open
@@ -2395,6 +2502,18 @@ export default function App() {
     }, 500);
     return () => clearTimeout(handle);
   }, [businessId, globalAiSetting, moduleAiSettings, aiKnowledgeBase]);
+
+  // Same auto-persist pattern as the AI settings above, for Automated
+  // Review Request settings (Settings > Automate Reviews) -- one small
+  // settings blob on the same business profile document, not a new
+  // collection just for a handful of fields.
+  useEffect(() => {
+    if (!businessId || !aiSettingsLoadedRef.current || aiSettingsHydratingRef.current) return;
+    const handle = setTimeout(() => {
+      setDoc(doc(db, "business_profiles", businessId), { reviewAutomationSettings }, { merge: true }).catch(err => console.error("Error saving review automation settings:", err));
+    }, 500);
+    return () => clearTimeout(handle);
+  }, [businessId, reviewAutomationSettings]);
 
   // Floating AI Widget UI States
   const [isFloatingAiOpen, setIsFloatingAiOpen] = useState(false);
@@ -2724,7 +2843,7 @@ export default function App() {
     const isOwnerOrAdmin = (simulatedRole || loggedInUser?.role || "Owner") === "Owner" || (simulatedRole || loggedInUser?.role || "Owner") === "Admin";
     const businessSummary = buildBusinessSummary(pageId);
 
-    fetch("/api/ai/ask", {
+    authedFetch("/api/ai/ask", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ pageId, pageName, customContext: resolvedContext, businessSummary, isOwnerOrAdmin, styleGuidance: buildStyleGuidance(aiKnowledgeBase) })
@@ -2796,7 +2915,7 @@ export default function App() {
     const isOwnerOrAdmin = (simulatedRole || loggedInUser?.role || "Owner") === "Owner" || (simulatedRole || loggedInUser?.role || "Owner") === "Admin";
     const conversation = aiMessages.map(m => ({ role: (m.sender === "user" ? "user" : "model") as "user" | "model", text: m.text }));
 
-    fetch("/api/ai/ask", {
+    authedFetch("/api/ai/ask", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -2883,7 +3002,7 @@ export default function App() {
     const isOwnerOrAdmin = (simulatedRole || loggedInUser?.role || "Owner") === "Owner" || (simulatedRole || loggedInUser?.role || "Owner") === "Admin";
     const conversation = floatingAiMessages.map(m => ({ role: (m.sender === "user" ? "user" : "model") as "user" | "model", text: m.text }));
 
-    fetch("/api/ai/ask", {
+    authedFetch("/api/ai/ask", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -3093,10 +3212,11 @@ Access to full financial telemetry is restricted.`;
   // row, dropdown, card) should route through this so "many roads lead to the
   // same record" behaves identically everywhere, instead of each page call
   // site redefining its own copy of this logic.
-  const navigateToScreen = (screenId: string, params?: { customerId?: string; date?: string; section?: string }) => {
+  const navigateToScreen = (screenId: string, params?: { customerId?: string; date?: string; section?: string; technicianId?: string }) => {
     setPreSelectedCustomerId(params?.customerId ?? undefined);
     setPreSelectedDate(params?.date ?? undefined);
     setPreSelectedSettingsSection(params?.section ?? undefined);
+    setPreSelectedTechnicianId(params?.technicianId ?? undefined);
     const matched = OS_SCREENS.find(s => s.id === screenId);
     if (matched) {
       setActiveScreen(matched);
@@ -3154,7 +3274,7 @@ Access to full financial telemetry is restricted.`;
       const user = userCredential.user;
 
       // 2. Create owner user profile document
-      const ownerPermissions = ["dashboard", "customers", "leads", "estimates", "scheduling", "dispatch", "routes", "jobs", "timeclock", "inventory", "documents", "messages", "training", "ai_assistant", "settings", "integrations", "roster"];
+      const ownerPermissions = ["dashboard", "customers", "leads", "estimates", "scheduling", "dispatch", "routes", "employee_locations", "jobs", "timeclock", "inventory", "documents", "messages", "training", "ai_assistant", "settings", "integrations", "roster"];
       const userProfile = {
         uid: user.uid,
         email: cleanEmail,
@@ -3676,10 +3796,22 @@ Access to full financial telemetry is restricted.`;
 
   // Save a real income/expense transaction -- typed manually or scanned via
   // real Gemini vision, always confirmed/edited by the user before saving.
-  const handleSaveTransaction = async (t: Omit<Transaction, "id">) => {
+  const handleSaveTransaction = async (t: Omit<Transaction, "id"> & { id?: string }) => {
     try {
-      const newTxn: Transaction = { ...t, id: `txn_${Date.now()}_${Math.random().toString(36).slice(2, 8)}` };
-      const journalEntry = postTransactionEntry(newTxn);
+      // Reuses the caller-supplied id (LogTransactionModal generates one
+      // stable id per form-fill and resubmits it unchanged on retry) so a
+      // retry after a network blip -- where the first attempt's batch.commit
+      // actually succeeded server-side but the client never saw the ack --
+      // safely re-applies the SAME transaction/journal-entry docs instead of
+      // creating a second, duplicate income/expense record with a new id.
+      const { id: suppliedId, ...rest } = t;
+      const newTxn: Transaction = { ...rest, id: suppliedId || `txn_${Date.now()}_${Math.random().toString(36).slice(2, 8)}` };
+      // postTransactionEntry's own id is a fresh random one on every call
+      // (shared by every other builder in accountingEngine.ts, so that isn't
+      // changed) -- overridden here to a deterministic derivative of the
+      // now-stable transaction id, so a retry of this same submission writes
+      // the identical journal-entry doc instead of a second one.
+      const journalEntry = { ...postTransactionEntry(newTxn), id: `je_for_${newTxn.id}` };
       if (!businessId) throw new Error("Missing business account");
       // Firestore rejects `undefined` values. Category and createdBy are
       // intentionally optional in the manual-entry form, so omit them from
@@ -3981,6 +4113,11 @@ Access to full financial telemetry is restricted.`;
         granularPermissions: inviteGranularPermissions,
         isEmployee: true,
         businessEmail,
+        // Lets firestore.rules' user_profiles create rule verify this
+        // businessEmail/role actually came from a real, still-open invite
+        // this business issued, instead of trusting whatever this new
+        // account itself claims.
+        inviteCode: empInviteCode,
         requireTimeClockVerification: inviteRequiresClockVerification,
         isOnboarded: true,
         name: `${empFirstName} ${empLastName}`,
@@ -4093,6 +4230,22 @@ Access to full financial telemetry is restricted.`;
     setEstimates,
     schedulingEvents,
     setSchedulingEvents,
+    workOrders,
+    setWorkOrders,
+    priceBookFolders,
+    setPriceBookFolders,
+    priceBookModels,
+    setPriceBookModels,
+    pendingCreateTemplateFolder,
+    setPendingCreateTemplateFolder,
+    memberships,
+    setMemberships,
+    purchaseOrders,
+    setPurchaseOrders,
+    reviewRequests,
+    setReviewRequests,
+    reviewAutomationSettings,
+    setReviewAutomationSettings,
     inventoryList,
     setInventoryList,
     documents,
@@ -4116,6 +4269,7 @@ Access to full financial telemetry is restricted.`;
     timeClockLogs,
     setTimeClockLogs,
     refreshTimeClockLogs,
+    payrollWorkweekStart,
     transactions,
     setTransactions,
     saveTransaction: handleSaveTransaction,
@@ -4174,6 +4328,17 @@ Access to full financial telemetry is restricted.`;
     triggerNotification
   };
 
+  // Owner'sLOCAL Customer: an entirely separate app shell, rendered instead
+  // of everything below once Firebase Auth resolves to a real customer
+  // account. Safe to early-return here (after every hook in this component
+  // has already run for this render) without breaking the Rules of Hooks --
+  // it's the same reasoning as the remote-signing/portal-token early
+  // returns at the very top of this function, just gated on real auth
+  // state instead of a static URL param, so it can't be checked until now.
+  if (customerSession) {
+    return <CustomerAppShell session={customerSession} onSignOut={() => { setCustomerSession(null); auth.signOut(); }} />;
+  }
+
   return (
     <AuthContext.Provider value={authContextValue}>
     <DomainDataContext.Provider value={domainDataContextValue}>
@@ -4227,7 +4392,8 @@ Access to full financial telemetry is restricted.`;
         {/* VIEW 1: INTERACTIVE LOGIN CARD */}
         {!isLoggedIn ? (
           <div className="w-full min-h-[100dvh] sm:min-h-0 flex flex-col items-center justify-center sm:py-6">
-            
+            {loginMode === "customer" && <CustomerLoginPanel onSwitchToBusiness={() => setLoginMode("business")} />}
+            {loginMode === "business" && (<>
             {/* Aspect ratio bounding box for the login card */}
             <div
               id="login-card-container"
@@ -4685,7 +4851,7 @@ Access to full financial telemetry is restricted.`;
                           onChange={(value) => setBusinessAddresses(prev => [value, ...prev.slice(1)])}
                         />
                         {renderDynamicField("business logo (optional)", businessLogos, setBusinessLogos, "e.g. https://logo-url.png")}
-                        {renderDynamicField("company locations (optional)", companyLocations, setCompanyLocations, "e.g. Seattle HQ")}
+                        {renderDynamicField("company locations (optional)", companyLocations, setCompanyLocations, "e.g. Main Office")}
                         <div className="rounded-xl border border-blue-200 bg-blue-50/90 p-3 text-[10px] leading-relaxed text-blue-950">
                           <p className="flex items-center gap-1.5 font-black uppercase tracking-wide">
                             <Shield className="h-3.5 w-3.5 shrink-0 text-blue-600" />
@@ -5594,7 +5760,7 @@ Access to full financial telemetry is restricted.`;
                               } catch (err) {
                                 console.error("Error setting onboarded flag:", err);
                               }
-                              const ownerDashboardPerms = ["dashboard", "leads", "jobs", "customers", "messages", "scheduling", "dispatch", "timeclock", "routes", "estimates", "documents", "ai_assistant", "inventory", "settings", "training"];
+                              const ownerDashboardPerms = ["dashboard", "leads", "jobs", "customers", "messages", "scheduling", "dispatch", "timeclock", "routes", "employee_locations", "estimates", "documents", "ai_assistant", "inventory", "settings", "training"];
                               setLoggedInUser({
                                 email,
                                 role: "Owner",
@@ -5931,6 +6097,18 @@ Access to full financial telemetry is restricted.`;
               </div>
             )}
 
+            {currentView === "login" && (
+              <button
+                type="button"
+                onClick={() => setLoginMode("customer")}
+                style={{ marginTop: `${10 * scale}px`, ...getFontSize(11) }}
+                className="font-bold text-[#5E7393] hover:text-[#1F3557] hover:underline cursor-pointer"
+              >
+                Customer? Log in to your free account here
+              </button>
+            )}
+
+          </>)}
           </div>
         ) : (
 
@@ -6026,11 +6204,11 @@ Access to full financial telemetry is restricted.`;
                         setNotifications(prev => prev.map(n => n.screenId === screen.id ? { ...n, isRead: true } : n));
                         triggerNotification(`Navigated to: ${screen.label}`);
                       }}
-                      className={`w-full rounded-xl transition-all duration-200 cursor-pointer flex items-center relative group ${
+                      className={`sidebar-nav-btn w-full rounded-xl transition-all duration-200 cursor-pointer flex items-center relative group ${
                         isSidebarCollapsed ? "justify-center p-2" : "px-3 py-2"
                       } ${
                         isCurrent
-                          ? "bg-gradient-to-r from-[#2E7BEF] to-[#1485F4] text-white font-bold shadow-[0_0_10px_rgba(20,133,244,0.45)]"
+                          ? "sidebar-nav-btn-active bg-gradient-to-r from-[#2E7BEF] to-[#1485F4] text-white font-bold shadow-[0_0_10px_rgba(20,133,244,0.45)]"
                           : "hover:bg-[#BDDDF8] text-[#5E7393] hover:text-[#1F3557] border border-transparent"
                       }`}
                       title={screen.label}
@@ -6335,8 +6513,8 @@ Access to full financial telemetry is restricted.`;
 
                     // Keep the dashboard widget on the exact same selected period and
                     // financial series as the Revenue page graph.
-                    const getDashboardGraphData = () => getRevenueChartData(revenuePageFilter, revenueEvents, transactions).series;
-                    const dashboardFinancials = getRevenueChartData(revenuePageFilter, revenueEvents, transactions);
+                    const getDashboardGraphData = () => getRevenueChartData(revenuePageFilter, accounts, journalEntries).series;
+                    const dashboardFinancials = getRevenueChartData(revenuePageFilter, accounts, journalEntries);
                     const dashboardNetRevenue = dashboardFinancials.currentTotal - dashboardFinancials.currentExpenseTotal;
 
                     // Dashboard widgets show real company data -- each slot maps to the
@@ -6713,9 +6891,17 @@ Access to full financial telemetry is restricted.`;
 
                     return (
                       <>
-                      <div className="flex justify-end">
-                        <PlaidConnectButton />
-                      </div>
+                      {!stripeConnectStatus.ready && (
+                        <div className="flex flex-wrap justify-end gap-2">
+                          <button
+                            onClick={() => navigateToScreen("payments")}
+                            className="px-3 py-2 bg-[#315C9F] hover:bg-[#1F3557] text-white text-xs font-bold rounded-xl uppercase flex items-center gap-1.5 cursor-pointer"
+                          >
+                            <CreditCard className="w-3.5 h-3.5" />
+                            Integrate Stripe for financial updates and customer payment options
+                          </button>
+                        </div>
+                      )}
                       <div className="flex-1 flex flex-col gap-5 animate-fade-in text-[#1F3557]">
                         
                         {/* TEAM MEMBER TERMINAL (Top side-to-side card) */}
@@ -6969,6 +7155,12 @@ Access to full financial telemetry is restricted.`;
                   ) : activeScreen.id === "accounting" ? (
                     <AccountingPage />
 
+                  ) : activeScreen.id === "payments" ? (
+                    <PaymentsPage />
+
+                  ) : activeScreen.id === "billing" ? (
+                    <BillingPage />
+
                   ) : activeScreen.id === "messages" ? (
                     <MessagesPage />
 
@@ -7063,7 +7255,7 @@ Access to full financial telemetry is restricted.`;
                     ) : (
                       /* HIGHLY POLISHED COMPREHENSIVE REVENUE PAGE */
                       <div className="space-y-3 animate-fade-in text-left">
-                      {/* QUICK ACTIONS - 4 BUTTONS + Plaid connect, ONE SLEEK LINE (scrolls horizontally rather than wrapping) */}
+                      {/* QUICK ACTIONS - 4 BUTTONS, ONE SLEEK LINE (scrolls horizontally rather than wrapping) */}
                       <div className="overflow-x-auto" style={{ WebkitOverflowScrolling: 'touch' as any }}>
                         <div className="flex flex-nowrap gap-2 w-max">
                           {[
@@ -7095,9 +7287,14 @@ Access to full financial telemetry is restricted.`;
                                   handleRunPayroll();
                                   return;
                                 }
+                                // "Create Invoice" was previously a dead label -- it just
+                                // navigated to Accounting with a toast telling the user to
+                                // go find the real invoice form themselves. This handoff
+                                // (same sessionStorage pattern as "expense"/"payment" above)
+                                // actually opens Accounting's own New Invoice form.
+                                sessionStorage.setItem("ownerslocal_pending_invoice_create", "1");
                                 const accounting = OS_SCREENS.find(screen => screen.id === "accounting");
                                 if (accounting) setActiveScreen(accounting);
-                                triggerNotification("Open Invoices to create a customer invoice.");
                               }}
                               className="shrink-0 bg-gradient-to-r from-[#2E7BEF] to-[#1485F4] hover:from-[#1E6EE0] hover:to-[#0D5FCB] border border-white/40 rounded-xl px-3.5 py-2 flex items-center gap-1.5 cursor-pointer transition-all shadow-[0_0_10px_rgba(20,133,244,0.35)] disabled:opacity-60 disabled:cursor-not-allowed"
                             >
@@ -7122,14 +7319,14 @@ Access to full financial telemetry is restricted.`;
                         <span className="pointer-events-none absolute bottom-3 left-3 w-5 h-5 border-b-2 border-l-2 border-white" />
                         <span className="pointer-events-none absolute bottom-3 right-3 w-5 h-5 border-b-2 border-r-2 border-white" />
                         {(() => {
-                          const stepData = getRevenueStepSeries(revenuePageFilter, revenueEvents, transactions, bills);
+                          const stepData = getRevenueStepSeries(revenuePageFilter, revenueEvents, transactions, bills, journalEntries);
                           const { points, periodStart, periodEnd } = stepData;
                           const latest = points[points.length - 1];
                           const paymentsTotal = latest.Payments;
                           const expensesTotal = latest.Expenses;
                           const netTotal = latest.Net;
 
-                          const { priorTotal, priorExpenseTotal } = getRevenueChartData(revenuePageFilter, revenueEvents, transactions, bills);
+                          const { priorTotal, priorExpenseTotal } = getRevenueChartData(revenuePageFilter, accounts, journalEntries);
                           const priorNet = priorTotal - priorExpenseTotal;
                           const pctChange = (cur: number, prior: number) => (prior !== 0 ? ((cur - prior) / Math.abs(prior)) * 100 : null);
                           const paymentsPct = pctChange(paymentsTotal, priorTotal);
@@ -7143,15 +7340,11 @@ Access to full financial telemetry is restricted.`;
                           const jobRevenueThisPeriod = revenueEvents.filter(e => inPeriod(e.date)).reduce((s, e) => s + e.amount, 0);
                           const loggedIncomeThisPeriod = transactions.filter(t => t.type === "income" && inPeriod(t.date)).reduce((s, t) => s + t.amount, 0);
 
-                          const materialCategories = new Set(["Material Expenses", "Materials", "Equipment", "Fuel", "Office Supplies", "Tools", "Supplies", "Inventory"]);
-                          const categoryTotalsThisPeriod = EXPENSE_CATEGORY_NAMES.map(name => {
-                            const values = name === "Bills"
-                              ? bills.filter(b => b.status !== "void" && inPeriod(b.issuedDate)).map(b => b.totalCost ?? b.estimatedCost ?? b.lineItems.reduce((s, li) => s + li.quantity * li.unitPrice, 0))
-                              : name === "Material Expenses"
-                                ? transactions.filter(t => t.type === "expense" && materialCategories.has(t.category || "") && inPeriod(t.date)).map(t => t.amount)
-                                : transactions.filter(t => t.type === "expense" && t.category === name && inPeriod(t.date)).map(t => t.amount);
-                            return { name: name as string, total: values.reduce((s, v) => s + v, 0) };
-                          }).filter(c => c.total > 0).sort((a, b) => b.total - a.total);
+                          // Ledger-derived -- one row per real expense account for this
+                          // period, the same function the Revenue page's statement table
+                          // and Accounting & Bookkeeping's Reports tab use, so this pie can
+                          // never disagree with either about what a category adds up to.
+                          const categoryTotalsThisPeriod = expenseBreakdownByAccount(accounts, journalEntries, periodStart, periodEnd);
 
                           const topCategories = categoryTotalsThisPeriod.slice(0, 4);
                           const otherCategoriesTotal = categoryTotalsThisPeriod.slice(4).reduce((s, c) => s + c.total, 0);
@@ -7167,7 +7360,7 @@ Access to full financial telemetry is restricted.`;
                           const revenueSlicesTotal = revenueSlices.reduce((s, r) => s + r.value, 0);
                           const expenseSlicesTotal = expenseSlices.reduce((s, r) => s + r.value, 0);
 
-                          const cashFlowSeries = getRevenueChartData(revenuePageFilter, revenueEvents, transactions, bills).series;
+                          const cashFlowSeries = getRevenueChartData(revenuePageFilter, accounts, journalEntries).series;
 
                           const todayStr = new Date().toISOString().slice(0, 10);
                           const upcomingJobs = schedulingEvents
@@ -7178,6 +7371,19 @@ Access to full financial telemetry is restricted.`;
                             .filter(b => b.status !== "paid" && b.status !== "void")
                             .sort((a, b) => (a.dueDate < b.dueDate ? -1 : a.dueDate > b.dueDate ? 1 : 0))
                             .map(b => ({ id: b.id, label: b.billNumber ? `Bill ${b.billNumber} — ${b.vendor}` : b.vendor, amount: Math.max(0, b.lineItems.reduce((s, li) => s + li.quantity * li.unitPrice, 0) - b.amountPaid) }));
+
+                          // Job Costing ticker: same computeJobCosting engine the Jobs tab's
+                          // detail panel uses (see lib/jobCostingEngine.ts), one row per job
+                          // that actually has an estimate/budget or real cost activity --
+                          // brand-new jobs with nothing logged yet would just be a row of
+                          // zeros, so they're left out until there's something to show.
+                          const jobCostingRows = schedulingEvents
+                            .filter(e => e.eventType === "Job")
+                            .map(job => {
+                              const jc = computeJobCosting(job, estimates, timeClockLogs, employees, transactions, payrollWorkweekStart);
+                              return { id: job.id, label: job.jobNumber || job.title || job.customer || "Job", ...jc };
+                            })
+                            .filter(row => row.estimatedRevenue > 0 || row.totalCost > 0);
 
                           const fmt = (n: number) => `$${n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
                           const xTickFormat = (ms: number) => {
@@ -7447,6 +7653,12 @@ Access to full financial telemetry is restricted.`;
                                 >
                                   <Landmark className="w-3.5 h-3.5" /> View Financial Reports
                                 </button>
+                                <button
+                                  onClick={() => setIsPriceBookOpen(true)}
+                                  className="min-h-10 px-3.5 py-2 text-[10.5px] font-mono font-extrabold uppercase tracking-wide rounded-md bg-[#dff4ff] border border-white text-[#07599a] cursor-pointer flex items-center justify-center gap-1.5 shadow-[0_0_15px_rgba(56,189,248,0.52),inset_0_0_10px_rgba(255,255,255,0.95)]"
+                                >
+                                  💲 Price Book
+                                </button>
                               </div>
 
                               {/* REVENUE BREAKDOWN / EXPENSE BREAKDOWN / CASH FLOW -- all real, this-period data */}
@@ -7550,6 +7762,80 @@ Access to full financial telemetry is restricted.`;
                                 ))}
                               </div>
 
+                              {/* JOB COSTING TICKER -- same computeJobCosting numbers as the Jobs
+                                  tab's detail panel, one job per scrolling row. Column headers stay
+                                  fixed above the scroll, same title styling used on every other
+                                  card on this page. */}
+                              {(() => {
+                                const jobCostingColumns: Array<{ key: string; header: string; bold: boolean; color: string; get: (r: typeof jobCostingRows[number]) => string }> = [
+                                  { key: "estPlus", header: "Estimated +", bold: false, color: "#00C853", get: r => fmt(r.estimatedRevenue) },
+                                  { key: "estMinus", header: "Estimated -", bold: false, color: "#FF1744", get: r => fmt(r.totalCost) },
+                                  { key: "labor", header: "Labor -", bold: false, color: "#FF1744", get: r => fmt(r.laborCost) },
+                                  { key: "material", header: "Material -", bold: false, color: "#FF1744", get: r => fmt(r.materialCost) },
+                                  { key: "other", header: "Other -", bold: false, color: "#FF1744", get: r => fmt(r.otherCost) },
+                                  { key: "totalMinus", header: "Total -", bold: true, color: "#FF1744", get: r => fmt(r.totalCost) },
+                                  { key: "totalPlus", header: "Total +", bold: true, color: "#00C853", get: r => fmt(r.estimatedRevenue) },
+                                  { key: "profit", header: "Profit +", bold: true, color: "#168BFF", get: r => fmt(r.grossProfit) },
+                                  { key: "margin", header: "Margin %", bold: true, color: "#168BFF", get: r => r.marginPercent == null ? "—" : `${r.marginPercent.toFixed(1)}%` },
+                                ];
+                                return (
+                                  <div>
+                                    <p className="text-[10px] font-mono font-black text-[#07599a] uppercase tracking-widest mb-2">Job Costing</p>
+                                    <div className="overflow-x-auto">
+                                      <div className="min-w-[760px]">
+                                        <div className="grid grid-cols-9 gap-1 px-3 pb-1.5">
+                                          {jobCostingColumns.map(col => (
+                                            <span key={col.key} className="text-[8px] font-mono font-black text-[#07599a] uppercase tracking-widest text-center truncate">{col.header}</span>
+                                          ))}
+                                        </div>
+                                        <div className="bg-[linear-gradient(145deg,rgba(224,242,255,0.94),rgba(195,227,251,0.96))] rounded-lg border border-white/95 shadow-[0_0_14px_rgba(56,189,248,0.36),inset_0_0_18px_rgba(255,255,255,0.82)] h-36 overflow-hidden relative">
+                                          {jobCostingRows.length === 0 ? (
+                                            <div className="h-full flex items-center justify-center text-[11px] font-mono text-[#2473aa]/60">No job costing data yet.</div>
+                                          ) : (
+                                            <div
+                                              className="absolute inset-x-0 top-0 hover:[animation-play-state:paused]"
+                                              style={{ animation: `ticker-scroll ${Math.max(12, jobCostingRows.length * 4)}s linear infinite` }}
+                                            >
+                                              {[0, 1].map(copy => (
+                                                <div key={copy}>
+                                                  {jobCostingRows.map((row, idx) => (
+                                                    <div key={`${copy}_${row.id}_${idx}`} className="px-3 py-2 border-b border-sky-500/15">
+                                                      <p className="text-[8.5px] font-mono font-semibold text-[#2473aa]/70 truncate mb-1">{row.label}</p>
+                                                      <div className="grid grid-cols-9 gap-1 items-center">
+                                                        {jobCostingColumns.map(col => (
+                                                          <span
+                                                            key={col.key}
+                                                            className={`truncate text-center font-mono ${col.bold ? "text-[10px] font-black" : "text-[9px] font-semibold"}`}
+                                                            style={{ color: col.color, textShadow: `0 0 6px ${col.color}99` }}
+                                                          >
+                                                            {col.get(row)}
+                                                          </span>
+                                                        ))}
+                                                      </div>
+                                                    </div>
+                                                  ))}
+                                                </div>
+                                              ))}
+                                            </div>
+                                          )}
+                                        </div>
+                                      </div>
+                                    </div>
+                                  </div>
+                                );
+                              })()}
+
+                              {/* Marketing Attribution -- same real Lead -> Customer -> Estimate ->
+                                  Job -> Invoice -> Revenue -> Profit chain shown in Reports, dropped
+                                  in here too (point 5) so an owner sees it without leaving Revenue. */}
+                              <div className="rounded-2xl border border-[#9EC8EF] bg-white/70 p-4">
+                                <p className="text-[10px] font-mono font-black text-[#07599a] uppercase tracking-widest mb-3">Marketing Attribution</p>
+                                <MarketingAttributionView
+                                  leads={leads} customers={customers} estimates={estimates} jobs={schedulingEvents} invoices={invoices}
+                                  timeClockLogs={timeClockLogs} employees={employees} transactions={transactions} payrollWorkweekStart={payrollWorkweekStart}
+                                />
+                              </div>
+
                               {/* Upcoming Job Payments (left) and Upcoming Bills & Expenses (right) --
                                   two independent scrolling columns, bottom to top */}
                               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -7563,10 +7849,18 @@ Access to full financial telemetry is restricted.`;
                                 </div>
                               </div>
 
-                              {/* Plaid connect -- lives at the bottom of the card, out of the way of the graph and quick actions */}
-                              <div className="flex justify-end pt-1">
-                                <PlaidConnectButton />
-                              </div>
+                              {/* Lives at the bottom of the card, out of the way of the graph and quick actions */}
+                              {!stripeConnectStatus.ready && (
+                                <div className="flex flex-wrap justify-end gap-2 pt-1">
+                                  <button
+                                    onClick={() => navigateToScreen("payments")}
+                                    className="px-3 py-2 bg-[#315C9F] hover:bg-[#1F3557] text-white text-xs font-bold rounded-xl uppercase flex items-center gap-1.5 cursor-pointer"
+                                  >
+                                    <CreditCard className="w-3.5 h-3.5" />
+                                    Integrate Stripe for financial updates and customer payment options
+                                  </button>
+                                </div>
+                              )}
                             </>
                           );
                         })()}
@@ -7574,7 +7868,6 @@ Access to full financial telemetry is restricted.`;
 
                       {/* TWO STATEMENT TABLES - PAYMENTS (TOP), THEN EXPENSES (BELOW) */}
                       {(() => {
-                        const materialCategories = new Set(["Material Expenses", "Materials", "Equipment", "Fuel", "Office Supplies", "Tools", "Supplies", "Inventory"]);
                         const fmt = (n: number) => `$${n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
                         const allPaymentItems = [
@@ -7584,26 +7877,13 @@ Access to full financial telemetry is restricted.`;
                         const paymentItems = paymentsTableFilter === "all" ? allPaymentItems : allPaymentItems.filter(i => i.source === paymentsTableFilter);
                         const paymentsTotal = paymentItems.reduce((s, i) => s + i.amount, 0);
 
-                        const getCategoryItems = (name: string) => {
-                          if (name === "Bills") {
-                            return bills.filter(b => b.status !== "void").map(b => ({
-                              id: b.id,
-                              date: b.issuedDate,
-                              memo: b.billNumber ? `Bill ${b.billNumber} — ${b.vendor}` : b.vendor,
-                              amount: b.totalCost ?? b.estimatedCost ?? b.lineItems.reduce((s, li) => s + li.quantity * li.unitPrice, 0)
-                            }));
-                          }
-                          if (name === "Material Expenses") {
-                            return transactions
-                              .filter(t => t.type === "expense" && materialCategories.has(t.category || ""))
-                              .map(t => ({ id: t.id, date: t.date, memo: t.description || "Material expense", amount: t.amount }));
-                          }
-                          return transactions
-                            .filter(t => t.type === "expense" && t.category === name)
-                            .map(t => ({ id: t.id, date: t.date, memo: t.description || name, amount: t.amount }));
-                        };
-                        const allExpenseItems = EXPENSE_CATEGORY_NAMES.flatMap(name =>
-                          getCategoryItems(name).map(item => ({ ...item, category: name as string }))
+                        // Ledger-derived -- one row per posted journal line, grouped by its
+                        // real Chart of Accounts account. A balanced entry never posts two
+                        // lines to the same account, so no bill or transaction can ever be
+                        // listed (or totaled) under two different category rows here.
+                        const expenseCategoryAccounts = accounts.filter(a => a.type === "expense");
+                        const allExpenseItems = expenseCategoryAccounts.flatMap(acct =>
+                          ledgerItemsForAccount(acct.id, "expense", journalEntries).map(item => ({ ...item, category: acct.name }))
                         ).sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
                         const expenseItems = expensesTableFilter === "all" ? allExpenseItems : allExpenseItems.filter(i => i.category === expensesTableFilter);
                         const expensesTotal = expenseItems.reduce((s, i) => s + i.amount, 0);
@@ -7686,7 +7966,7 @@ Access to full financial telemetry is restricted.`;
                                     className="bg-white border border-[#9EC8EF] rounded-xl px-3 py-2 text-[11px] font-bold text-[#1F3557] focus:outline-none cursor-pointer"
                                   >
                                     <option value="all">All Expenses</option>
-                                    {EXPENSE_CATEGORY_NAMES.map(name => <option key={name} value={name}>{name}</option>)}
+                                    {expenseCategoryAccounts.map(acct => <option key={acct.id} value={acct.name}>{acct.name}</option>)}
                                   </select>
                                   <button
                                     type="button"
@@ -7739,36 +8019,8 @@ Access to full financial telemetry is restricted.`;
 
                       {/* FUTURE INTEGRATIONS SECTION (Bottom Card) */}
                       <div className="bg-[#C7E3FA] rounded-3xl p-6 border border-[#9EC8EF] shadow-sm space-y-4">
-                        <div className="border-b border-[#9EC8EF]/30 pb-3">
-                          <span className="text-[10px] uppercase font-bold tracking-wider text-[#5E7393]">Automations & Ecosystems</span>
-                          <h3 className="text-base font-sans font-black text-[#1F3557] tracking-tight">Future Integrations</h3>
-                          <p className="text-xs text-[#5E7393] font-sans font-semibold">Connect OwnersLOCAL with your accounting software</p>
-                        </div>
-                        
-                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                          {[
-                            { name: "Plaid", icon: Landmark, desc: "Bank account connectivity" },
-                            { name: "Teller", icon: Landmark, desc: "Secure banking data" },
-                            { name: "Stripe", icon: CreditCard, desc: "Payment processing" }
-                          ].map((integ, idx) => (
-                            <div
-                              key={idx}
-                              className="border border-dashed border-[#9EC8EF] rounded-2xl p-4 flex flex-col items-center justify-center text-center gap-2.5 opacity-80 bg-[#EAF5FF]/50 hover:opacity-100 transition-opacity"
-                            >
-                              <div className="w-9 h-9 rounded-full bg-[#EAF5FF] text-[#315C9F] border border-[#9EC8EF] flex items-center justify-center text-sm shadow-sm">
-                                <integ.icon className="w-4 h-4" />
-                              </div>
-                              <div>
-                                <p className="text-[11px] font-extrabold text-[#1F3557] leading-none">{integ.name}</p>
-                                <p className="text-[9px] text-[#5E7393] font-medium mt-0.5">{integ.desc}</p>
-                              </div>
-                              <span className="px-2 py-0.5 bg-[#9EC8EF]/30 text-[#1F3557] border border-[#9EC8EF]/50 text-[8.5px] font-bold rounded">
-                                Coming Soon
-                              </span>
-                            </div>
-                          ))}
-                        </div>
-                        
+                        <h3 className="text-base font-sans font-black text-[#1F3557] tracking-tight">Integrations</h3>
+
                         <div className="text-center pt-2">
                           <button
                             onClick={() => {
@@ -7784,6 +8036,8 @@ Access to full financial telemetry is restricted.`;
                           </button>
                         </div>
                       </div>
+
+                      <PriceBookModal isOpen={isPriceBookOpen} onClose={() => setIsPriceBookOpen(false)} />
 
                       {/* FINANCIAL REPORTS FLOATING PANE */}
                       {isFinancialSnapshotOpen && (
@@ -8106,8 +8360,12 @@ Access to full financial telemetry is restricted.`;
                     <MapPageErrorBoundary>
                       <InteractiveMapPage
                         businessAddresses={businessAddresses}
+                        initialTechnicianId={preSelectedTechnicianId}
                       />
                     </MapPageErrorBoundary>
+
+                  ) : activeScreen.id === "employee_locations" ? (
+                    <EmployeeLocationsPage />
 
                   ) : activeScreen.id === "bulletins" ? (
                     
@@ -8319,6 +8577,33 @@ Access to full financial telemetry is restricted.`;
               setWorkspaceTheme(nextTheme);
               localStorage.setItem("ownerslocal_workspace_theme", workspaceThemeSettingValue(nextTheme));
             }}
+            className={`max-w-[150px] rounded-lg border px-2 py-1.5 text-[10px] font-bold shadow-sm backdrop-blur-md outline-none cursor-pointer ${isDarkTheme
+              ? "border-blue-400/30 bg-[#06152b]/70 text-blue-50"
+              : "border-blue-200/60 bg-white/60 text-[#315C9F]"
+            }`}
+          >
+            <option value="light-basic">Light Mode Basic</option>
+            <option value="light-extreme">Light Mode Dynamic</option>
+            <option value="dark-basic">Dark Mode Basic</option>
+            <option value="dark-dynamic">Dark Mode Dynamic</option>
+          </select>
+        </div>
+      )}
+
+      {/* Same theme switcher as the login page, but for once you're signed
+          in -- previously the only way to change themes post-login was
+          Settings > Appearance, several clicks deep. Uses
+          applyWorkspaceTheme so a pick here (like a pick in Settings) saves
+          immediately instead of waiting on some unrelated form's Save
+          button. */}
+      {isLoggedIn && (
+        <div className="fixed top-3 right-3 sm:top-4 sm:right-4 z-30">
+          <label className="sr-only" htmlFor="workspace-theme-selector">Color scheme</label>
+          <select
+            id="workspace-theme-selector"
+            aria-label="Color scheme"
+            value={workspaceTheme}
+            onChange={(event) => applyWorkspaceTheme(event.target.value as WorkspaceTheme)}
             className={`max-w-[150px] rounded-lg border px-2 py-1.5 text-[10px] font-bold shadow-sm backdrop-blur-md outline-none cursor-pointer ${isDarkTheme
               ? "border-blue-400/30 bg-[#06152b]/70 text-blue-50"
               : "border-blue-200/60 bg-white/60 text-[#315C9F]"
@@ -8604,6 +8889,7 @@ Access to full financial telemetry is restricted.`;
                   onClick={() => setIsFloatingAiOpen(false)}
                   className="w-7 h-7 rounded-lg bg-white/10 hover:bg-white/20 transition-colors flex items-center justify-center text-xs font-bold cursor-pointer"
                   title="Collapse Panel"
+                  aria-label="Collapse Owner's AI panel"
                 >
                   ✕
                 </button>
@@ -8798,6 +9084,7 @@ Access to full financial telemetry is restricted.`;
                   <div className="flex gap-1.5 pt-2 border-t border-slate-100 shrink-0">
                     <input
                       type="text"
+                      aria-label="Ask Owner's AI a question"
                       value={floatingAiInput}
                       disabled={!!pendingAiAction || !!pendingDataAction}
                       onChange={(e) => setFloatingAiInput(e.target.value)}

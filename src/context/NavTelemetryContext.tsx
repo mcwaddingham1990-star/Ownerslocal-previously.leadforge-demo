@@ -17,7 +17,7 @@ export interface NavTelemetryContextValue {
    * "many roads lead to the same record" behaves identically everywhere,
    * instead of each page redefining its own copy of this logic.
    */
-  navigateToScreen: (screenId: string, params?: { customerId?: string; date?: string; section?: string }) => void;
+  navigateToScreen: (screenId: string, params?: { customerId?: string; date?: string; section?: string; technicianId?: string }) => void;
   /**
    * `target` lets the caller say where the notification this creates should
    * take you when clicked. Defaults to the screen the event's own type maps

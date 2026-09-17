@@ -8,6 +8,7 @@ import { postBillCreatedEntry } from "../lib/accountingEngine";
 import { db } from "../firebase";
 import { doc, setDoc } from "firebase/firestore";
 import { downscaleImageToBase64 } from "../lib/imageCompression";
+import { authedFetch } from "../lib/apiClient";
 import { useVisualViewportBottomRight } from "../hooks/useVisualViewportBottomRight";
 import { buildScanSnapshotDocument, SNAPSHOT_PHOTO_MAX_BASE64_LENGTH } from "../lib/scanSnapshotDocument";
 import type { ScannedLineItem } from "../types/scannedReceipt";
@@ -127,7 +128,7 @@ export function UniversalAIIntake({ snapshotFolder }: UniversalAIIntakeProps = {
     try {
       const { base64, mimeType } = await downscaleImageToBase64(file);
       setScannedPhoto({ base64, mimeType });
-      const response = await fetch("/api/ai/scan-business-record", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ imageBase64: base64, mimeType, preferredRecordType: recordType === "unknown" ? undefined : recordType }) });
+      const response = await authedFetch("/api/ai/scan-business-record", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ imageBase64: base64, mimeType, preferredRecordType: recordType === "unknown" ? undefined : recordType }) });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || "Unable to scan this record");
       if (result.unreadable) throw new Error("AI could not read a completed business record in that image.");

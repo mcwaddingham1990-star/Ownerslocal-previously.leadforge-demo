@@ -1,9 +1,18 @@
-import React, { useState, useMemo } from "react";
-import { PlaidConnectButton } from "./PlaidConnectButton";
+import React, { useState, useMemo, useEffect } from "react";
 import { useDomainData } from "../context/DomainDataContext";
 import { useNavTelemetry } from "../context/NavTelemetryContext";
 import { useAuth } from "../context/AuthContext";
 import { hasPermission } from "../types/permissions";
+import { authedFetch } from "../lib/apiClient";
+import { PriceBookModal } from "./PriceBookModal";
+import { CreatePurchaseOrderPicker } from "./CreatePurchaseOrderPicker";
+import { PurchaseOrderBuilder } from "./PurchaseOrderBuilder";
+import type { PurchaseOrder } from "../types/purchaseOrder";
+import { CustomerPortalControls } from "./CustomerPortalControls";
+import { ReviewRequestControls } from "./ReviewRequestControls";
+import { resolveCustomerByIdOrName } from "../lib/resolveCustomer";
+import { useStripeConnectStatus } from "../hooks/useStripeConnectStatus";
+import { MarketingAttributionView } from "./MarketingAttributionView";
 import {
   Account,
   JournalEntry,
@@ -16,7 +25,6 @@ import {
   Budget,
   InvoiceLineItem,
   BankAccountType,
-  computeAccountBalance,
   isBalancedEntry
 } from "../types/accounting";
 import {
@@ -25,12 +33,15 @@ import {
   postBillCreatedEntry,
   postBillPaymentEntry,
   postRefundEntry,
-  invoiceTotal
+  invoiceTotal,
+  computeAccountBalances,
+  computeLedgerTotals,
+  expenseBreakdownByAccount
 } from "../lib/accountingEngine";
 import { buildInvoicePdf, bytesToBase64 } from "../lib/pdfExport";
 import { MAX_INLINE_BASE64_LENGTH } from "../lib/firestoreDocumentLimits";
 import SendChoiceModal from "./SendChoiceModal";
-import type { DocumentItem } from "../types/domain";
+import type { DocumentItem, Estimate } from "../types/domain";
 import {
   LayoutDashboard,
   FileText,
@@ -67,6 +78,7 @@ type AccountingTab =
   | "dashboard"
   | "invoices"
   | "expenses"
+  | "purchase_orders"
   | "vendors"
   | "banking"
   | "chart_of_accounts"
@@ -81,6 +93,7 @@ const TABS: Array<{ id: AccountingTab; label: string; icon: React.ReactNode }> =
   { id: "dashboard", label: "Dashboard", icon: <LayoutDashboard className="w-3.5 h-3.5" /> },
   { id: "invoices", label: "Invoices", icon: <FileText className="w-3.5 h-3.5" /> },
   { id: "expenses", label: "Expenses", icon: <Receipt className="w-3.5 h-3.5" /> },
+  { id: "purchase_orders", label: "Purchase Orders", icon: <ClipboardList className="w-3.5 h-3.5" /> },
   { id: "vendors", label: "Service Providers", icon: <Users className="w-3.5 h-3.5" /> },
   { id: "banking", label: "Banking", icon: <Landmark className="w-3.5 h-3.5" /> },
   { id: "chart_of_accounts", label: "Chart of Accounts", icon: <BookOpen className="w-3.5 h-3.5" /> },
@@ -148,15 +161,36 @@ export const AccountingPage: React.FC = () => {
     customers,
     estimates,
     employees,
-    inventoryList
+    inventoryList,
+    purchaseOrders,
+    leads,
+    schedulingEvents,
+    timeClockLogs,
+    payrollWorkweekStart
   } = useDomainData();
   const { triggerNotification, logOperationalEvent } = useNavTelemetry();
   const { loggedInUser, simulatedRole, businessId } = useAuth();
   const activeRole = simulatedRole || loggedInUser?.role || "Owner";
   const canEdit = activeRole === "Owner" || hasPermission(loggedInUser?.granularPermissions, "accounting", "edit");
   const canDelete = activeRole === "Owner" || hasPermission(loggedInUser?.granularPermissions, "accounting", "delete");
+  // Same live GET /api/stripe/connect/status check Dashboard/Revenue/
+  // Integrations/Payments all read, so Accounting's own "Integrate Stripe"
+  // prompt can't disagree with what those pages already show.
+  const stripeConnectStatus = useStripeConnectStatus();
 
   const [activeTab, setActiveTab] = useState<AccountingTab>("dashboard");
+  // Revenue's "Create Invoice" quick action hands off here the same way its
+  // "Record Expense"/"Add Custom Payment" siblings already do (a sessionStorage
+  // flag) since AccountingPage is mounted fresh by App.tsx's screen switch
+  // with no props of its own to carry an "open the invoice form" intent.
+  const [autoOpenInvoiceCreate, setAutoOpenInvoiceCreate] = useState(false);
+  useEffect(() => {
+    if (sessionStorage.getItem("ownerslocal_pending_invoice_create") === "1") {
+      sessionStorage.removeItem("ownerslocal_pending_invoice_create");
+      setActiveTab("invoices");
+      setAutoOpenInvoiceCreate(true);
+    }
+  }, []);
 
   // Inventory is a live subledger: its current asset value is the same
   // quantity × unit-cost valuation shown by Inventory. Journal-only balance
@@ -171,54 +205,27 @@ export const AccountingPage: React.FC = () => {
   );
 
   // ---- Derived, real numbers from journals plus connected subledgers. ----
-  const accountBalances = useMemo(() => {
-    const map: Record<string, number> = {};
-    for (const acct of accounts) map[acct.id] = computeAccountBalance(acct, journalEntries);
-    map["acct_inventory"] = inventoryAssetValue;
-    // Backfill the accounting view for job-completion revenue written by
-    // older app versions before those events also posted journal entries.
-    // New events carry a matching journal sourceId and are not added twice.
-    const postedSourceIds = new Set(journalEntries.map(entry => entry.sourceId).filter(Boolean));
-    const legacyUnpostedRevenue = revenueEvents
-      .filter(event => !postedSourceIds.has(event.id))
-      .reduce((sum, event) => sum + event.amount, 0);
-    map["acct_ar"] = (map["acct_ar"] || 0) + legacyUnpostedRevenue;
-    map["acct_service_revenue"] = (map["acct_service_revenue"] || 0) + legacyUnpostedRevenue;
-    return map;
-  }, [accounts, journalEntries, inventoryAssetValue, revenueEvents]);
+  // Canonical ledger read -- computeAccountBalances/computeLedgerTotals are
+  // the same functions Dashboard and Revenue call with these same inputs,
+  // so this page's balances/P&L can never drift from what those pages show.
+  const accountBalances = useMemo(
+    () => computeAccountBalances({ accounts, journalEntries, revenueEvents, inventoryAssetValue }),
+    [accounts, journalEntries, inventoryAssetValue, revenueEvents]
+  );
 
   const cashBalance = accountBalances["acct_cash"] || 0;
   const arBalance = accountBalances["acct_ar"] || 0;
   const apBalance = accountBalances["acct_ap"] || 0;
 
-  const totalRevenue = useMemo(
-    () => accounts.filter(a => a.type === "revenue").reduce((s, a) => s + (accountBalances[a.id] || 0), 0),
-    [accounts, accountBalances]
-  );
-  const totalExpenses = useMemo(
-    () => accounts.filter(a => a.type === "expense").reduce((s, a) => s + (accountBalances[a.id] || 0), 0),
-    [accounts, accountBalances]
-  );
-  const netIncome = totalRevenue - totalExpenses;
+  const ledgerTotals = useMemo(() => computeLedgerTotals(accounts, accountBalances), [accounts, accountBalances]);
+  const { totalRevenue, totalExpenses, netIncome } = ledgerTotals;
 
-  const totalAssets = useMemo(
-    () => accounts.filter(a => a.type === "asset").reduce((s, a) => s + (accountBalances[a.id] || 0), 0),
-    [accounts, accountBalances]
-  );
-  const totalLiabilities = useMemo(
-    () => accounts.filter(a => a.type === "liability").reduce((s, a) => s + (accountBalances[a.id] || 0), 0),
-    [accounts, accountBalances]
-  );
-  const totalEquityAccounts = useMemo(
-    () => accounts.filter(a => a.type === "equity").reduce((s, a) => s + (accountBalances[a.id] || 0), 0),
-    [accounts, accountBalances]
-  );
   // Books aren't formally "closed" each period (no separate closing-entry
   // step), so current-year net income is shown as its own equity line
   // rather than folded into Retained Earnings -- the accounting equation
   // (Assets = Liabilities + Equity) holds exactly because every entry that
   // touches Revenue/Expense also touches a real Asset/Liability account.
-  const totalEquity = totalEquityAccounts + netIncome;
+  const { totalAssets, totalLiabilities, totalEquity } = ledgerTotals;
 
   const pendingRevenue = useMemo(() => {
     const invoicedEstimateIds = new Set(invoices.map(i => i.estimateId).filter(Boolean));
@@ -301,6 +308,8 @@ export const AccountingPage: React.FC = () => {
           triggerNotification={triggerNotification}
           logOperationalEvent={logOperationalEvent}
           loggedInUser={loggedInUser}
+          autoOpenCreate={autoOpenInvoiceCreate}
+          onAutoOpenCreateHandled={() => setAutoOpenInvoiceCreate(false)}
         />
       )}
 
@@ -319,12 +328,16 @@ export const AccountingPage: React.FC = () => {
         />
       )}
 
+      {activeTab === "purchase_orders" && (
+        <PurchaseOrdersTab purchaseOrders={purchaseOrders} canEdit={canEdit} />
+      )}
+
       {activeTab === "vendors" && (
-        <VendorsTab vendors={vendors} setVendors={setVendors} bills={bills} canEdit={canEdit} canDelete={canDelete} triggerNotification={triggerNotification} />
+        <VendorsTab vendors={vendors} setVendors={setVendors} bills={bills} purchaseOrders={purchaseOrders} canEdit={canEdit} canDelete={canDelete} triggerNotification={triggerNotification} />
       )}
 
       {activeTab === "banking" && (
-        <BankingTab bankAccounts={bankAccounts} setBankAccounts={setBankAccounts} accounts={accounts} canEdit={canEdit} triggerNotification={triggerNotification} businessId={businessId} />
+        <BankingTab bankAccounts={bankAccounts} setBankAccounts={setBankAccounts} accounts={accounts} canEdit={canEdit} triggerNotification={triggerNotification} businessId={businessId} stripeReady={stripeConnectStatus.ready} />
       )}
 
       {activeTab === "chart_of_accounts" && (
@@ -356,6 +369,12 @@ export const AccountingPage: React.FC = () => {
           totalRevenue={totalRevenue}
           totalExpenses={totalExpenses}
           netIncome={netIncome}
+          leads={leads}
+          jobs={schedulingEvents}
+          customers={customers}
+          employees={employees}
+          timeClockLogs={timeClockLogs}
+          payrollWorkweekStart={payrollWorkweekStart}
         />
       )}
 
@@ -517,11 +536,21 @@ function InvoicesTab({
   canEdit,
   triggerNotification,
   logOperationalEvent,
-  loggedInUser
+  loggedInUser,
+  autoOpenCreate,
+  onAutoOpenCreateHandled
 }: any) {
   const { setGeneratedPdfDraft, documents, setDocuments, businessProfile, estimates } = useDomainData();
   const { navigateToScreen } = useNavTelemetry();
   const [isCreating, setIsCreating] = useState(false);
+  useEffect(() => {
+    if (autoOpenCreate) {
+      setIsCreating(true);
+      onAutoOpenCreateHandled?.();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoOpenCreate]);
+  const [isPriceBookOpen, setIsPriceBookOpen] = useState(false);
   const [customer, setCustomer] = useState("");
   const [dueInDays, setDueInDays] = useState(30);
   const [taxRate, setTaxRate] = useState<number>(salesTaxRates.find((r: any) => r.isDefault)?.rate || 0);
@@ -616,10 +645,18 @@ function InvoicesTab({
       triggerNotification("Add a customer and at least one line item.");
       return;
     }
+    // Marketing attribution -- prefer the linked estimate's source (most
+    // specific to this actual sale), then the matched customer's source,
+    // over leaving it blank.
+    const linkedEstimate = linkedEstimateId ? estimates.find((e: Estimate) => e.id === linkedEstimateId) : undefined;
+    const matchedCustomerForSource = customers.find((c: any) => c.contact === customer.trim() || c.company === customer.trim());
+    const source = linkedEstimate?.source || matchedCustomerForSource?.source || "Manual Entry";
+    const sourceLeadId = linkedEstimate?.sourceLeadId || matchedCustomerForSource?.sourceLeadId;
     const invoice: Invoice = {
       id: genId("inv"),
       invoiceNumber: `INV-${1000 + invoices.length + 1}`,
       customer: customer.trim(),
+      customerId: matchedCustomerForSource?.id,
       lineItems: lineItems.filter(li => li.description.trim()),
       taxRate,
       issuedDate: todayStr(),
@@ -628,7 +665,9 @@ function InvoicesTab({
       amountPaid: 0,
       createdAt: new Date().toISOString(),
       createdBy: loggedInUser?.email,
-      estimateId: linkedEstimateId || undefined
+      estimateId: linkedEstimateId || undefined,
+      source,
+      sourceLeadId
     };
     setInvoices((prev: Invoice[]) => [...prev, invoice]);
     setJournalEntries((prev: JournalEntry[]) => [...prev, postInvoiceCreatedEntry(invoice, loggedInUser?.email)]);
@@ -719,18 +758,31 @@ function InvoicesTab({
     <div className="space-y-4">
       <div className="flex justify-between items-center">
         <h3 className="text-sm font-black text-[#1F3557] uppercase">Invoices</h3>
-        {canEdit && (
+        <div className="flex gap-2">
           <button
-            onClick={() => {
-              setCustomer(customers.length === 1 ? (customers[0].company || customers[0].contact || "") : "");
-              setIsCreating(true);
-            }}
-            className="px-3 py-2 bg-[#315C9F] hover:bg-[#1F3557] text-white text-xs font-bold rounded-xl uppercase tracking-wide flex items-center gap-1.5 cursor-pointer"
+            onClick={() => setIsPriceBookOpen(true)}
+            className="px-3 py-2 bg-[#EAF5FF] hover:bg-[#BDDDF8] border border-[#9EC8EF] text-[#315C9F] text-xs font-bold rounded-xl uppercase tracking-wide flex items-center gap-1.5 cursor-pointer"
           >
-            <Plus className="w-3.5 h-3.5" /> New Invoice
+            💲 Price Book
           </button>
-        )}
+          {canEdit && (
+            <button
+              onClick={() => {
+                setCustomer(customers.length === 1 ? (customers[0].company || customers[0].contact || "") : "");
+                setIsCreating(true);
+              }}
+              className="px-3 py-2 bg-[#315C9F] hover:bg-[#1F3557] text-white text-xs font-bold rounded-xl uppercase tracking-wide flex items-center gap-1.5 cursor-pointer"
+            >
+              <Plus className="w-3.5 h-3.5" /> New Invoice
+            </button>
+          )}
+        </div>
       </div>
+      <PriceBookModal
+        isOpen={isPriceBookOpen}
+        onClose={() => setIsPriceBookOpen(false)}
+        pickerMode={isCreating ? { onPick: (item) => { setLineItems(prev => [...prev, { id: genId("li"), description: item.description, quantity: item.quantity, unitPrice: item.unitPrice }]); setIsPriceBookOpen(false); } } : undefined}
+      />
 
       <CustomerStatementPicker invoices={invoices} customers={customers} />
 
@@ -866,6 +918,12 @@ function InvoicesTab({
                 >
                   <Plus className="w-3 h-3" /> Add Line
                 </button>
+                <button
+                  onClick={() => setIsPriceBookOpen(true)}
+                  className="w-full rounded-lg border border-dashed border-[#315C9F] py-1.5 text-[10px] font-black text-[#315C9F]"
+                >
+                  💲 Add Flat Rate Pricing Model
+                </button>
               </div>
               <div className="text-right font-black text-[#1F3557] text-sm pt-2 border-t border-slate-100">
                 Total: {fmt(lineItems.reduce((s, li) => s + li.quantity * li.unitPrice, 0) * (1 + taxRate / 100))}
@@ -918,6 +976,14 @@ function InvoicesTab({
                   <p className="bg-[#EAF5FF]/40 border border-[#9EC8EF]/30 p-3 rounded-xl">{viewingInvoice.notes}</p>
                 </div>
               )}
+              <div className="space-y-1.5">
+                <p className="text-[10px] uppercase font-bold text-[#5E7393]">Customer Portal</p>
+                <CustomerPortalControls customer={resolveCustomerByIdOrName(customers, viewingInvoice.customerId, viewingInvoice.customer)} />
+              </div>
+              <div className="space-y-1.5">
+                <p className="text-[10px] uppercase font-bold text-[#5E7393]">Review Requests</p>
+                <ReviewRequestControls customer={resolveCustomerByIdOrName(customers, viewingInvoice.customerId, viewingInvoice.customer)} jobId={viewingInvoice.jobId} invoiceId={viewingInvoice.id} />
+              </div>
             </div>
             <div className="bg-slate-50 border-t border-[#9EC8EF]/40 px-6 py-4 flex justify-between gap-2 shrink-0">
               {(() => {
@@ -1264,7 +1330,74 @@ function BillsTab({ bills, setBills, setJournalEntries, vendors, setVendors, can
 // ============================================================================
 // VENDORS
 // ============================================================================
-function VendorsTab({ vendors, setVendors, bills, canEdit, canDelete, triggerNotification }: any) {
+// ============================================================================
+// PURCHASE ORDERS
+// ============================================================================
+function PurchaseOrdersTab({ purchaseOrders, canEdit }: any) {
+  const [isPickerOpen, setIsPickerOpen] = useState(false);
+  const [editingPO, setEditingPO] = useState<PurchaseOrder | null>(null);
+  const [isBuilderOpen, setIsBuilderOpen] = useState(false);
+  const [search, setSearch] = useState("");
+
+  const poTotal = (po: PurchaseOrder) => po.items.reduce((s, i) => s + i.quantity * i.unitCost, 0);
+  const filtered = purchaseOrders.filter((po: PurchaseOrder) =>
+    [po.poNumber, po.vendor, po.status].some(v => String(v || "").toLowerCase().includes(search.trim().toLowerCase()))
+  );
+
+  const statusColor: Record<string, string> = {
+    Draft: "bg-slate-100 text-slate-600",
+    Ordered: "bg-blue-100 text-blue-700",
+    "Partially Received": "bg-amber-100 text-amber-800",
+    Received: "bg-emerald-100 text-emerald-700",
+    Canceled: "bg-rose-100 text-rose-700"
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="flex justify-between items-center">
+        <div><h3 className="text-sm font-black text-[#1F3557] uppercase">Purchase Orders</h3><p className="text-[10px] text-[#5E7393]">Every PO your team has created, ordered, or received</p></div>
+        {canEdit && (
+          <button onClick={() => setIsPickerOpen(true)} className="px-3 py-2 bg-[#315C9F] hover:bg-[#1F3557] text-white text-xs font-bold rounded-xl uppercase flex items-center gap-1.5 cursor-pointer">
+            <Plus className="w-3.5 h-3.5" /> New PO
+          </button>
+        )}
+      </div>
+      <div className="relative">
+        <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-[#5E7393]" />
+        <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search by PO number, vendor, or status" className="w-full rounded-xl border border-[#9EC8EF] bg-white/80 py-2.5 pl-9 pr-3 text-xs outline-none" />
+      </div>
+      <div className="bg-[#C7E3FA] rounded-2xl border border-[#9EC8EF] shadow-sm overflow-hidden">
+        <div className="overflow-x-auto"><table className="w-full min-w-[800px] text-left text-xs">
+          <thead>
+            <tr className="bg-[#EAF5FF] text-[10px] font-bold text-[#1F3557] uppercase">
+              <th className="px-4 py-3">PO #</th>
+              <th className="px-4 py-3">Vendor</th>
+              <th className="px-4 py-3">Date</th>
+              <th className="px-4 py-3 text-right">Total</th>
+              <th className="px-4 py-3">Status</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-[#9EC8EF]/30">
+            {filtered.length === 0 && <tr><td colSpan={5} className="px-4 py-8 text-center text-[#5E7393]">{search ? "No purchase orders match your search." : "No purchase orders yet."}</td></tr>}
+            {filtered.map((po: PurchaseOrder) => (
+              <tr key={po.id} onClick={() => { setEditingPO(po); setIsBuilderOpen(true); }} className="hover:bg-[#BDDDF8] cursor-pointer">
+                <td className="px-4 py-3 font-bold text-[#1F3557]">{po.poNumber}</td>
+                <td className="px-4 py-3">{po.vendor}</td>
+                <td className="px-4 py-3">{po.date}</td>
+                <td className="px-4 py-3 text-right font-mono font-bold">{fmt(poTotal(po))}</td>
+                <td className="px-4 py-3"><span className={`rounded-full px-2 py-0.5 text-[9px] font-black uppercase ${statusColor[po.status] || "bg-slate-100 text-slate-600"}`}>{po.status}</span></td>
+              </tr>
+            ))}
+          </tbody>
+        </table></div>
+      </div>
+      <CreatePurchaseOrderPicker isOpen={isPickerOpen} onClose={() => setIsPickerOpen(false)} />
+      <PurchaseOrderBuilder isOpen={isBuilderOpen} onClose={() => setIsBuilderOpen(false)} editingPurchaseOrder={editingPO} onSaved={() => setEditingPO(null)} />
+    </div>
+  );
+}
+
+function VendorsTab({ vendors, setVendors, bills, purchaseOrders, canEdit, canDelete, triggerNotification }: any) {
   const [isAdding, setIsAdding] = useState(false);
   const [name, setName] = useState("");
   const [contact, setContact] = useState("");
@@ -1301,6 +1434,7 @@ function VendorsTab({ vendors, setVendors, bills, canEdit, canDelete, triggerNot
         {vendors.filter((provider: Vendor) => provider.name.toLowerCase().includes(search.trim().toLowerCase())).map((v: Vendor) => {
           const vendorBills = bills.filter((b: Bill) => b.serviceProviderId === v.id || b.vendor.trim().toLowerCase() === v.name.trim().toLowerCase());
           const totalSpent = vendorBills.reduce((s: number, b: Bill) => s + billTotal(b), 0);
+          const vendorPOs = purchaseOrders.filter((po: PurchaseOrder) => po.vendor.trim().toLowerCase() === v.name.trim().toLowerCase());
           return (
             <div key={v.id} className="bg-[#C7E3FA] rounded-2xl p-3.5 border border-[#9EC8EF] shadow-sm space-y-1.5">
               <div className="flex justify-between items-start">
@@ -1316,7 +1450,7 @@ function VendorsTab({ vendors, setVendors, bills, canEdit, canDelete, triggerNot
               {v.email && <p className="text-[10px] text-[#5E7393]">{v.email}</p>}
               {v.phone && <p className="text-[10px] text-[#5E7393]">{v.phone}</p>}
               <div className="pt-1.5 border-t border-[#9EC8EF]/30 text-[10px] text-[#1F3557] font-bold">
-                {vendorBills.length} bill{vendorBills.length === 1 ? "" : "s"} · {fmt(totalSpent)} total
+                {vendorBills.length} bill{vendorBills.length === 1 ? "" : "s"} · {fmt(totalSpent)} total · {vendorPOs.length} PO{vendorPOs.length === 1 ? "" : "s"}
               </div>
               {expandedProviderId === v.id && <div className="space-y-2 pt-2 border-t border-[#9EC8EF]/40"><p className="text-[9px] font-black uppercase text-[#5E7393]">Provider bill &amp; service history</p>{vendorBills.length === 0 ? <p className="text-[10px] text-[#5E7393]">No bills connected yet.</p> : vendorBills.map((bill: Bill) => <div key={bill.id} className="rounded-xl border border-[#9EC8EF] bg-[#EAF5FF] p-2.5 text-[10px]"><div className="flex justify-between gap-2"><strong className="text-[#1F3557]">{bill.serviceProvided || bill.lineItems?.map(item => item.description).join(", ")}</strong><span className="font-mono">{fmt(bill.totalCost ?? bill.estimatedCost ?? billTotal(bill))}</span></div><p className="mt-1 text-[#5E7393]">{bill.billNumber} · {bill.recurring ? `Recurring ${bill.recurringDate || "date pending"}` : "One-time"} · {bill.status}</p>{(bill.history || []).map(event => <p key={event.id} className="mt-1 border-t border-[#9EC8EF]/40 pt-1 text-[#5E7393]">{event.action} · {new Date(event.date).toLocaleDateString()}{event.amount === undefined ? "" : ` · ${fmt(event.amount)}`}</p>)}</div>)}</div>}
             </div>
@@ -1347,7 +1481,8 @@ function VendorsTab({ vendors, setVendors, bills, canEdit, canDelete, triggerNot
 // ============================================================================
 // BANKING
 // ============================================================================
-function BankingTab({ bankAccounts, setBankAccounts, accounts, canEdit, triggerNotification, businessId }: any) {
+function BankingTab({ bankAccounts, setBankAccounts, accounts, canEdit, triggerNotification, businessId, stripeReady }: any) {
+  const { navigateToScreen } = useNavTelemetry();
   const [isAdding, setIsAdding] = useState(false);
   const [name, setName] = useState("");
   const [type, setType] = useState<BankAccountType>("checking");
@@ -1367,7 +1502,6 @@ function BankingTab({ bankAccounts, setBankAccounts, accounts, canEdit, triggerN
         accountNumberLast4: last4 || undefined,
         openingBalance: parseFloat(openingBalance) || 0,
         openingBalanceDate: todayStr(),
-        isPlaidConnected: false,
         createdAt: new Date().toISOString()
       }
     ]);
@@ -1384,7 +1518,6 @@ function BankingTab({ bankAccounts, setBankAccounts, accounts, canEdit, triggerN
     "Transaction Matching",
     "Duplicate Detection",
     "Automatic Categorization",
-    "Payment Processor Sync (Stripe/Square/PayPal)",
     "Payroll Provider Sync",
     "Tax Filing Integration"
   ];
@@ -1394,12 +1527,27 @@ function BankingTab({ bankAccounts, setBankAccounts, accounts, canEdit, triggerN
       <div className="flex justify-between items-center">
         <h3 className="text-sm font-black text-[#1F3557] uppercase">Bank &amp; Financial Accounts</h3>
         {canEdit && <div className="flex gap-2">
-          <PlaidConnectButton />
           <button onClick={() => setIsAdding(true)} className="px-3 py-2 bg-[#315C9F] hover:bg-[#1F3557] text-white text-xs font-bold rounded-xl uppercase flex items-center gap-1.5 cursor-pointer">
             <Plus className="w-3.5 h-3.5" /> Add Manually
           </button>
         </div>}
       </div>
+
+      {canEdit && !stripeReady && (
+        <button
+          onClick={() => navigateToScreen("payments")}
+          className="w-full px-4 py-3 bg-[#315C9F] hover:bg-[#1F3557] text-white text-xs font-bold rounded-2xl uppercase flex items-center justify-center gap-2 cursor-pointer shadow-sm"
+        >
+          <CreditCard className="w-4 h-4" />
+          Integrate Stripe for financial updates and customer payment options
+        </button>
+      )}
+      {canEdit && stripeReady && (
+        <div className="w-full px-4 py-3 bg-emerald-50 border border-emerald-200 text-emerald-700 text-xs font-bold rounded-2xl uppercase flex items-center justify-center gap-2">
+          <CreditCard className="w-4 h-4" />
+          Stripe Connected
+        </div>
+      )}
 
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3.5">
         {bankAccounts.length === 0 && <p className="text-xs text-[#5E7393] col-span-full text-center py-6">No bank/financial accounts added yet.</p>}
@@ -1411,8 +1559,7 @@ function BankingTab({ bankAccounts, setBankAccounts, accounts, canEdit, triggerN
             </div>
             <p className="text-[9px] text-[#5E7393] font-bold uppercase mt-0.5">{BANK_TYPE_LABELS[b.type]}{b.accountNumberLast4 ? ` •••• ${b.accountNumberLast4}` : ""}</p>
             <p className="text-base font-black text-[#1F3557] mt-1.5">{fmt(b.openingBalance)}</p>
-            <p className="text-[8px] text-[#5E7393] mt-0.5">{b.isPlaidConnected ? `Connected through ${b.plaidInstitutionName || 'Plaid'} • Balance checked ${b.openingBalanceDate}` : `Manually entered balance as of ${b.openingBalanceDate}`}</p>
-            {b.isPlaidConnected && <span className="inline-block mt-2 px-2 py-1 bg-emerald-100 text-emerald-700 text-[8px] font-black uppercase rounded-full">Plaid Connected</span>}
+            <p className="text-[8px] text-[#5E7393] mt-0.5">Manually entered balance as of {b.openingBalanceDate}</p>
           </div>
         ))}
       </div>
@@ -1639,7 +1786,7 @@ function JournalTab({ journalEntries, setJournalEntries, accounts, canEdit, trig
 // ============================================================================
 // REPORTS
 // ============================================================================
-function ReportsTab({ accounts, invoices, bills, transactions, revenueEvents, estimates, inventoryList, accountBalances, totalRevenue, totalExpenses, netIncome }: any) {
+function ReportsTab({ accounts, journalEntries, invoices, bills, transactions, revenueEvents, estimates, inventoryList, accountBalances, totalRevenue, totalExpenses, netIncome, leads, jobs, customers, employees, timeClockLogs, payrollWorkweekStart }: any) {
   const [report, setReport] = useState("pnl");
 
   const revenueByCustomer = useMemo(() => {
@@ -1673,23 +1820,22 @@ function ReportsTab({ accounts, invoices, bills, transactions, revenueEvents, es
     return Object.entries(map).sort((a, b) => b[1] - a[1]);
   }, [invoices]);
 
+  // Ledger-derived, same function Dashboard/Revenue use for their own
+  // "Expenses by Category" breakdown -- one row per real expense account, so
+  // this report can never disagree with what those pages show for the same
+  // all-time range, and a bill/transaction can never land in two rows.
   const expensesByCategory = useMemo(() => {
-    const map: Record<string, number> = {};
-    const materialCategories = new Set(["Material Expenses", "Materials", "Equipment", "Fuel", "Office Supplies", "Tools", "Supplies", "Inventory"]);
-    for (const t of transactions) {
-      if (t.type !== "expense") continue;
-      const category = materialCategories.has(t.category || "") ? "Material Expenses" : (t.category || "Uncategorized");
-      map[category] = (map[category] || 0) + t.amount;
-    }
-    for (const b of bills as Bill[]) map.Bills = (map.Bills || 0) + billTotal(b);
-    const priority = ["Bills", "Material Expenses", "Payroll"];
-    return Object.entries(map).sort((a, b) => {
-      const aPriority = priority.indexOf(a[0]);
-      const bPriority = priority.indexOf(b[0]);
-      if (aPriority >= 0 || bPriority >= 0) return (aPriority < 0 ? priority.length : aPriority) - (bPriority < 0 ? priority.length : bPriority);
-      return b[1] - a[1];
-    });
-  }, [transactions, bills]);
+    const breakdown = expenseBreakdownByAccount(accounts, journalEntries);
+    const priority = ["Bills", "Payroll & Labor Expense"];
+    return breakdown
+      .map(c => [c.name, c.total] as [string, number])
+      .sort((a, b) => {
+        const aPriority = priority.indexOf(a[0]);
+        const bPriority = priority.indexOf(b[0]);
+        if (aPriority >= 0 || bPriority >= 0) return (aPriority < 0 ? priority.length : aPriority) - (bPriority < 0 ? priority.length : bPriority);
+        return b[1] - a[1];
+      });
+  }, [accounts, journalEntries]);
 
   const expensesByVendor = useMemo(() => {
     const map: Record<string, number> = {};
@@ -1718,11 +1864,22 @@ function ReportsTab({ accounts, invoices, bills, transactions, revenueEvents, es
     { id: "exp_vendor", label: "Expenses by Vendor" },
     { id: "sales_tax", label: "Sales Tax" },
     { id: "payroll", label: "Payroll" },
-    { id: "inventory_val", label: "Inventory Valuation" }
+    { id: "inventory_val", label: "Inventory Valuation" },
+    { id: "attribution", label: "Marketing Attribution" }
   ];
 
   const exportCsv = (rows: Array<[string, number]>, filename: string) => {
-    const csv = "Label,Amount\n" + rows.map(([l, v]) => `"${l}",${v.toFixed(2)}`).join("\n");
+    // Guards against CSV/Excel "formula injection" (see src/lib/csv.ts) --
+    // these labels are customer/vendor/employee/service names, which can
+    // ultimately trace back to unauthenticated input (the public website
+    // lead form). Also escapes embedded quotes, which this line previously
+    // didn't (a label containing a literal `"` would otherwise corrupt
+    // the CSV's column structure).
+    const safeLabel = (label: string) => {
+      const text = /^[=+\-@\t\r]/.test(label) ? `'${label}` : label;
+      return `"${text.replace(/"/g, '""')}"`;
+    };
+    const csv = "Label,Amount\n" + rows.map(([l, v]) => `${safeLabel(l)},${v.toFixed(2)}`).join("\n");
     const blob = new Blob([csv], { type: "text/csv" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -1800,6 +1957,12 @@ function ReportsTab({ accounts, invoices, bills, transactions, revenueEvents, es
             <p className="text-lg font-black text-[#1F3557]">{fmt(inventoryValuation)}</p>
             <p className="text-[9px] text-[#5E7393] mt-1">Real quantity × unit cost across current Inventory.</p>
           </div>
+        )}
+        {report === "attribution" && (
+          <MarketingAttributionView
+            leads={leads} customers={customers} estimates={estimates} jobs={jobs} invoices={invoices}
+            timeClockLogs={timeClockLogs} employees={employees} transactions={transactions} payrollWorkweekStart={payrollWorkweekStart}
+          />
         )}
       </div>
     </div>
@@ -2179,7 +2342,7 @@ function AIInsightsTab({ totalRevenue, totalExpenses, netIncome, cashBalance, ar
     ].join(" ");
 
     try {
-      const res = await fetch("/api/ai/ask", {
+      const res = await authedFetch("/api/ai/ask", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
