@@ -106,7 +106,7 @@ export const PaymentsPage: React.FC = () => {
 
   const startOnboarding = async () => {
     if (!publishableKey) {
-      triggerNotification("Stripe isn't configured on this deployment yet (missing publishable key).");
+      triggerNotification("Payments aren't necessary for this demo.");
       return;
     }
     setIsStartingOnboarding(true);

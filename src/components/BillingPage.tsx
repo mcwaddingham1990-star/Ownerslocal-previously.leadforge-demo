@@ -120,7 +120,7 @@ export const BillingPage: React.FC = () => {
         <div className="bg-[#FFF6E3] border border-[#F0D999] rounded-2xl p-4 flex items-start gap-3">
           <AlertTriangle className="w-4 h-4 text-[#8A6D1F] shrink-0 mt-0.5" />
           <div className="text-xs text-[#5B4A15]">
-            Subscription billing isn't configured on this deployment yet. An administrator needs to set <code className="font-mono">STRIPE_BASE_PRICE</code> (and Stripe keys) on the server.
+            Billing isn't necessary for this demo.
           </div>
         </div>
       ) : subscription.error ? (
