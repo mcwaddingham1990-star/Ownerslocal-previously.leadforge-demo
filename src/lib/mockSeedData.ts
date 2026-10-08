@@ -56,6 +56,8 @@ export const MOCK_SEED_DATA: Record<string, any[]> = {
   ],
 
   scheduling_events: [
+    // Completed visit for the Ortiz lawn plan below (counts as 1 used visit on Service Agreements).
+    { id: "evt_mem_visit_1", eventType: "Job", jobNumber: "JOB-2026-0090", date: ymd(-40), startTime: "08:00", endTime: "09:30", customerId: "cust_2", customer: "Diane Ortiz", customerPhone: "(555) 774-3321", customerAddress: "15 Sunset Ave, Haslet, TX 76052", assignedEmployee: "J. Alvarez", location: "15 Sunset Ave, Haslet, TX 76052", priority: "Medium", notes: "", status: "Completed", title: "Seasonal Lawn Care Plan — Maintenance Visit", budget: 0, sourceMembershipId: "mem_demo_1" },
     { id: "evt_1", eventType: "Job", date: ymd(0), startTime: "08:00", endTime: "10:00", customer: "Carla Jennings", customerPhone: "(555) 201-4432", customerAddress: "4400 Ridgeview Dr, Ridgeview, TX", assignedEmployee: "Danny Reyes", assignedCrew: "Crew 1", location: "4400 Ridgeview Dr, Ridgeview, TX", priority: "Medium", notes: "", status: "Scheduled", title: "Irrigation Repair", budget: 2150 },
     { id: "evt_2", eventType: "Job", date: ymd(0), startTime: "09:30", endTime: "11:00", customer: "Diane Ortiz", customerPhone: "(555) 774-3321", customerAddress: "15 Sunset Ave, Haslet, TX", assignedEmployee: "J. Alvarez", assignedCrew: "Crew 2", location: "15 Sunset Ave, Haslet, TX", priority: "Low", notes: "", status: "Scheduled", title: "Weekly Mow & Trim", budget: 210 },
     { id: "evt_3", eventType: "Estimate", date: ymd(0), startTime: "11:00", endTime: "12:00", customer: "Marcus Webb", customerPhone: "(555) 118-2290", customerAddress: "200 Chapel Rd, Haslet, TX", assignedEmployee: "Priya Nair", assignedCrew: "Crew 3", location: "200 Chapel Rd, Haslet, TX", priority: "Medium", notes: "", status: "Scheduled", title: "Install Consult", budget: 0 },
@@ -157,6 +159,35 @@ export const MOCK_SEED_DATA: Record<string, any[]> = {
     { id: "conv_1", title: "Carla Jennings", type: "Customer Chat", lastMessage: "Thanks for the quick turnaround today!", lastMessageSender: "Carla Jennings", lastMessageTime: isoNow(0), unreadCount: 1 },
     { id: "conv_2", title: "Diane Ortiz", type: "Customer Chat", lastMessage: "Can we push tomorrow's mow to Thursday?", lastMessageSender: "Diane Ortiz", lastMessageTime: isoNow(0), unreadCount: 1 },
     { id: "conv_3", title: "Crew Chat", type: "Crew Chat", lastMessage: "Low on trimmer line, restocking after this job.", lastMessageSender: "J. Alvarez", lastMessageTime: isoNow(-1), unreadCount: 0 },
+  ],
+  // Sample Service Agreements (Jobs > Service Agreements).
+  memberships: [
+    {
+      id: "mem_demo_1", membershipNumber: "MEM-2026-0001", planName: "Seasonal Lawn Care Plan", description: "Spring and fall aeration, fertilization and shrub trimming.",
+      price: 45, billingFrequency: "monthly", billingMethod: "invoice", includedServices: [{ id: "svc_d1", description: "Aeration + fertilization", quantity: 1, unitPrice: 0 }, { id: "svc_d2", description: "Shrub trimming", quantity: 1, unitPrice: 0 }],
+      maintenanceFrequency: { unit: "months", interval: 6 }, visitsIncluded: 2,
+      coveredEquipment: [{ id: "eq_d1", type: "Other", manufacturer: "Rain Bird", model: "ESP-TM2 Controller", location: "Garage wall" }],
+      startDate: ymd(-60), endDate: ymd(305), status: "Active", nextMaintenanceDate: ymd(12), nextPaymentDate: ymd(10),
+      customerId: "cust_2", customerName: "Diane Ortiz", customerPhone: "(555) 774-3321", customerEmail: "diane.ortiz@gmail.com", address: "15 Sunset Ave, Haslet, TX 76052",
+      createdAt: isoNow(-60), activity: [{ id: "act_d1", timestamp: isoNow(-60), action: "Membership created", by: "Mike Donovan" }]
+    },
+    {
+      id: "mem_demo_2", membershipNumber: "MEM-2026-0002", planName: "Irrigation Maintenance Plan", description: "Quarterly sprinkler inspection, head adjustments and winterization.",
+      price: 1200, billingFrequency: "annually", billingMethod: "invoice", includedServices: [{ id: "svc_d3", description: "Irrigation inspection", quantity: 1, unitPrice: 0 }],
+      maintenanceFrequency: { unit: "months", interval: 3 }, visitsIncluded: 4,
+      coveredEquipment: [{ id: "eq_d2", type: "Other", manufacturer: "Hunter", model: "Pro-C Controller", location: "Pump house" }, { id: "eq_d3", type: "Other", manufacturer: "Hunter", model: "PGP Rotor Zones 1-12", location: "Fairways" }],
+      startDate: ymd(-340), endDate: ymd(25), status: "Active", nextMaintenanceDate: ymd(-3),
+      customerId: "cust_7", customerName: "Angela Petrov", customerPhone: "(555) 887-3345", customerEmail: "angela@pineviewgc.com", address: "1 Fairway Blvd, Haslet, TX 76052",
+      createdAt: isoNow(-340), activity: [{ id: "act_d2", timestamp: isoNow(-340), action: "Membership created", by: "Mike Donovan" }]
+    },
+    {
+      id: "mem_demo_3", membershipNumber: "MEM-2026-0003", planName: "Commercial Grounds Plan", description: "Monthly grounds cleanup and bed maintenance.",
+      price: 650, billingFrequency: "monthly", billingMethod: "manual", includedServices: [{ id: "svc_d4", description: "Grounds cleanup", quantity: 1, unitPrice: 0 }],
+      maintenanceFrequency: { unit: "months", interval: 1 },
+      startDate: ymd(-120), endDate: ymd(245), status: "Active", nextMaintenanceDate: ymd(18), nextPaymentDate: ymd(5),
+      customerId: "cust_8", customerName: "Derrick Holt", customerPhone: "(555) 556-2210", customerEmail: "dholt@northgateplaza.com", address: "88 Northgate Rd, Fort Worth, TX 76052",
+      createdAt: isoNow(-120), activity: [{ id: "act_d3", timestamp: isoNow(-120), action: "Membership created", by: "Mike Donovan" }]
+    }
   ],
   bank_accounts: [],
   recurring_transactions: [],

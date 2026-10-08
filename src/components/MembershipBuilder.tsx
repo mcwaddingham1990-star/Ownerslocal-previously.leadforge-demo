@@ -6,6 +6,11 @@ import { useNavTelemetry } from "../context/NavTelemetryContext";
 import type { Membership, MaintenanceFrequencyUnit, BillingFrequency, MembershipStatus, MembershipBillingMethod, MembershipIncludedService, MembershipCustomField } from "../types/membership";
 import { PriceBookModal } from "./PriceBookModal";
 import { useAssignableEmployeeRoster } from "../hooks/useAssignableEmployees";
+import type { EquipmentRecord } from "../types/domain";
+import { hasPermission } from "../types/permissions";
+
+const EQUIPMENT_TYPES = ["AC", "Furnace", "Heat Pump", "Mini-Split", "Water Heater", "Other"];
+const EMPTY_EQUIPMENT = { type: "AC", manufacturer: "", model: "", serial: "", installDate: "", location: "" };
 
 const uid = (prefix: string) => `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
 const todayStr = () => new Date().toISOString().slice(0, 10);
@@ -24,6 +29,8 @@ export interface MembershipBuilderProps {
   prefill?: Partial<Membership>;
   editingMembership?: Membership | null;
   onSaved?: (membership: Membership) => void;
+  /** Activity-log entry for this save (e.g. "Agreement renewed"); defaults to created/edited. */
+  activityLabel?: string;
 }
 
 const EMPTY_FORM = {
@@ -49,7 +56,8 @@ const EMPTY_FORM = {
   assignedEmployee: "",
   assignedCrew: "",
   status: "Active" as MembershipStatus,
-  billingMethod: "manual" as MembershipBillingMethod
+  billingMethod: "manual" as MembershipBillingMethod,
+  visitsIncluded: ""
 };
 
 /** Advances a start date forward by one maintenance cycle -- the same math
@@ -73,9 +81,9 @@ function firstBillingDate(startDate: string, freq: BillingFrequency, customDays:
   return addInterval(startDate, "months", 1);
 }
 
-export const MembershipBuilder: React.FC<MembershipBuilderProps> = ({ isOpen, onClose, prefill, editingMembership, onSaved }) => {
-  const { loggedInUser } = useAuth();
-  const { customers, schedulingEvents, estimates, memberships, setMemberships, setGeneratedPdfDraft } = useDomainData();
+export const MembershipBuilder: React.FC<MembershipBuilderProps> = ({ isOpen, onClose, prefill, editingMembership, onSaved, activityLabel }) => {
+  const { loggedInUser, simulatedRole } = useAuth();
+  const { customers, setCustomers, schedulingEvents, estimates, memberships, setMemberships, setGeneratedPdfDraft } = useDomainData();
   const { navigateToScreen, logOperationalEvent, triggerNotification } = useNavTelemetry();
   const actor = loggedInUser?.name || loggedInUser?.email || "Staff";
 
@@ -91,6 +99,8 @@ export const MembershipBuilder: React.FC<MembershipBuilderProps> = ({ isOpen, on
   const [specificDates, setSpecificDates] = useState<string[]>([]);
   const [newSpecificDate, setNewSpecificDate] = useState("");
   const [isPriceBookOpen, setIsPriceBookOpen] = useState(false);
+  const [coveredEquipment, setCoveredEquipment] = useState<EquipmentRecord[]>([]);
+  const [newEquipment, setNewEquipment] = useState(EMPTY_EQUIPMENT);
 
   const jobs = schedulingEvents.filter(e => e.eventType === "Job");
 
@@ -120,8 +130,11 @@ export const MembershipBuilder: React.FC<MembershipBuilderProps> = ({ isOpen, on
       assignedEmployee: source.assignedEmployee || "",
       assignedCrew: source.assignedCrew || "",
       status: source.status || "Active",
-      billingMethod: source.billingMethod || "manual"
+      billingMethod: source.billingMethod || "manual",
+      visitsIncluded: source.visitsIncluded != null ? String(source.visitsIncluded) : ""
     });
+    setCoveredEquipment((source.coveredEquipment || []).map(eq => ({ ...eq })));
+    setNewEquipment(EMPTY_EQUIPMENT);
     setIncludedServices((source.includedServices || []).map(s => ({ ...s })));
     setCustomFields((source.customFields || []).map(f => ({ ...f })));
     setSpecificDates(source.maintenanceFrequency?.specificDates || []);
@@ -137,6 +150,40 @@ export const MembershipBuilder: React.FC<MembershipBuilderProps> = ({ isOpen, on
     setNewService({ description: "", quantity: 1, unitPrice: 0 });
   };
 
+  const selectedCustomer = customers.find(c => c.id === form.customerId);
+  const savedCustomerEquipment = (selectedCustomer?.equipment || []).filter(eq => !coveredEquipment.some(c => c.id === eq.id));
+
+  const addEquipment = () => {
+    if (!newEquipment.type.trim()) return;
+    const clean = (v: string) => v.trim() || undefined;
+    setCoveredEquipment(prev => [...prev, {
+      id: uid("eq"), type: newEquipment.type.trim(), manufacturer: clean(newEquipment.manufacturer), model: clean(newEquipment.model),
+      serial: clean(newEquipment.serial), installDate: clean(newEquipment.installDate), location: clean(newEquipment.location)
+    }]);
+    setNewEquipment(EMPTY_EQUIPMENT);
+  };
+
+  const equipmentLabel = (eq: EquipmentRecord) => [eq.type, eq.manufacturer, eq.model].filter(Boolean).join(" · ")
+    + (eq.serial ? ` (S/N ${eq.serial})` : "") + (eq.location ? ` — ${eq.location}` : "");
+
+  // Covered equipment is also kept on the customer's own record so the next
+  // agreement or visit can reuse it. Only for users allowed to edit
+  // customers -- anyone else still saves the agreement, just not the copy.
+  const canEditCustomers = (!simulatedRole && !loggedInUser?.isEmployee)
+    || (simulatedRole || loggedInUser?.role) === "Owner"
+    || hasPermission(loggedInUser?.granularPermissions, "customers", "edit");
+  const saveEquipmentToCustomer = (customerId: string) => {
+    if (!customerId || !coveredEquipment.length || !canEditCustomers) return;
+    const customer = customers.find(c => c.id === customerId);
+    if (!customer) return;
+    const existing = customer.equipment || [];
+    const additions = coveredEquipment.filter(eq => !existing.some(x => x.id === eq.id));
+    const updated = existing.map(x => coveredEquipment.find(eq => eq.id === x.id) || x);
+    const changed = additions.length > 0 || updated.some((x, i) => JSON.stringify(x) !== JSON.stringify(existing[i]));
+    if (!changed) return;
+    setCustomers(prev => prev.map(c => c.id === customerId ? { ...c, equipment: [...updated, ...additions] } : c));
+  };
+
   const addCustomField = () => {
     if (!newField.key.trim()) return;
     setCustomFields(prev => [...prev, { key: newField.key.trim(), value: newField.value.trim() }]);
@@ -149,10 +196,10 @@ export const MembershipBuilder: React.FC<MembershipBuilderProps> = ({ isOpen, on
     setNewSpecificDate("");
   };
 
-  const handleSave = () => {
+  const handleSave = (): Membership | null => {
     if (!canSave) {
       triggerNotification("Plan Name, Customer, and Start Date are required to save a Membership.");
-      return;
+      return null;
     }
     const now = new Date().toISOString();
     const id = editingMembership?.id || uid("mem");
@@ -181,6 +228,11 @@ export const MembershipBuilder: React.FC<MembershipBuilderProps> = ({ isOpen, on
       discountPercent: form.discountPercent ? Number(form.discountPercent) : undefined,
       discountFlat: form.discountFlat ? Number(form.discountFlat) : undefined,
       maintenanceFrequency,
+      coveredEquipment: coveredEquipment.length ? coveredEquipment : undefined,
+      visitsIncluded: Number(form.visitsIncluded) > 0 ? Math.floor(Number(form.visitsIncluded)) : undefined,
+      visitsGenerated: editingMembership?.visitsGenerated,
+      visitsCountedFrom: editingMembership?.visitsCountedFrom,
+      previousStartDate: editingMembership?.previousStartDate,
       startDate: form.startDate,
       endDate: form.endDate || undefined,
       notes: form.notes.trim() || undefined,
@@ -206,15 +258,17 @@ export const MembershipBuilder: React.FC<MembershipBuilderProps> = ({ isOpen, on
       createdBy: editingMembership?.createdBy || loggedInUser?.email,
       activity: [
         ...(editingMembership?.activity || []),
-        { id: uid("act"), timestamp: now, action: editingMembership ? "Membership edited" : "Membership created", by: actor }
+        { id: uid("act"), timestamp: now, action: activityLabel || (editingMembership ? "Membership edited" : "Membership created"), by: actor }
       ]
     };
 
     setMemberships(prev => editingMembership ? prev.map(m => m.id === id ? membership : m) : [membership, ...prev]);
+    saveEquipmentToCustomer(membership.customerId);
     logOperationalEvent(editingMembership ? "Membership Updated" : "Membership Created", `${membership.membershipNumber} — ${membership.planName}`, "📜");
-    triggerNotification(editingMembership ? "Membership updated." : "Membership created.");
+    triggerNotification(activityLabel ? `${activityLabel}.` : editingMembership ? "Membership updated." : "Membership created.");
     onSaved?.(membership);
     onClose();
+    return membership;
   };
 
   const generatePdf = () => {
@@ -222,12 +276,15 @@ export const MembershipBuilder: React.FC<MembershipBuilderProps> = ({ isOpen, on
       triggerNotification("Save the Membership first (Plan Name, Customer, and Start Date are required).");
       return;
     }
-    handleSave();
+    // Use the agreement exactly as just saved, so a brand-new agreement's
+    // PDF is linked to it (Documents > Service Agreements, Customer Portal).
+    const saved = handleSave();
+    if (!saved) return;
     setGeneratedPdfDraft({
-      filename: `${editingMembership?.membershipNumber || "Service-Agreement"}.pdf`,
-      title: `Service Agreement ${editingMembership?.membershipNumber || ""}`.trim(),
+      filename: `${saved.membershipNumber || "Service-Agreement"}.pdf`,
+      title: `Service Agreement ${saved.membershipNumber || ""}`.trim(),
       sourceType: "Service Agreement",
-      sourceId: editingMembership?.id || "",
+      sourceId: saved.id,
       customerName: form.customerName,
       customerPhone: form.customerPhone,
       customerEmail: form.customerEmail,
@@ -240,7 +297,9 @@ export const MembershipBuilder: React.FC<MembershipBuilderProps> = ({ isOpen, on
         `Price: $${(Number(form.price) || 0).toFixed(2)} (${form.billingFrequency})`,
         `Start Date: ${form.startDate}${form.endDate ? ` — End Date: ${form.endDate}` : ""}`,
         `Maintenance: every ${form.maintenanceUnit === "specific_dates" ? "specific dates" : `${form.maintenanceInterval} ${form.maintenanceUnit}`}`,
+        ...(saved.visitsIncluded ? [`Visits included: ${saved.visitsIncluded}`] : []),
         "",
+        ...(coveredEquipment.length ? ["Covered Equipment:", ...coveredEquipment.map(eq => `  ${equipmentLabel(eq)}`), ""] : []),
         ...(form.description ? [`Description: ${form.description}`, ""] : []),
         ...(includedServices.length ? ["Included Services:", ...includedServices.map(s => `  ${s.quantity} x ${s.description} — $${(s.quantity * s.unitPrice).toFixed(2)}`)] : []),
         ...(form.notes ? ["", `Notes: ${form.notes}`] : [])
@@ -292,6 +351,39 @@ export const MembershipBuilder: React.FC<MembershipBuilderProps> = ({ isOpen, on
             <Field label="Property / Address">
               <input value={form.address} onChange={e => setForm({ ...form, address: e.target.value })} className="input" placeholder="Job site covered by this plan" />
             </Field>
+          </div>
+
+          <div className="rounded-2xl border border-[#9EC8EF] bg-white p-3">
+            <p className="text-xs font-black uppercase text-[#1F3557]">Covered Equipment</p>
+            <div className="mt-2 space-y-1.5">
+              {coveredEquipment.map((eq, i) => (
+                <div key={eq.id} className="flex items-center justify-between rounded-lg bg-blue-50 p-2 text-xs">
+                  <span>{equipmentLabel(eq)}{eq.installDate ? ` · installed ${eq.installDate}` : ""}</span>
+                  <button type="button" onClick={() => setCoveredEquipment(prev => prev.filter((_, idx) => idx !== i))} className="text-rose-500" aria-label="Remove equipment"><Trash2 className="h-3.5 w-3.5" /></button>
+                </div>
+              ))}
+            </div>
+            {savedCustomerEquipment.length > 0 && (
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                <span className="self-center text-[9px] font-bold uppercase tracking-wider text-[#5E7393]">Customer's saved equipment:</span>
+                {savedCustomerEquipment.map(eq => (
+                  <button type="button" key={eq.id} onClick={() => setCoveredEquipment(prev => [...prev, { ...eq }])} className="rounded-lg bg-[#EAF5FF] px-2.5 py-1.5 text-[11px] font-bold text-[#315C9F]">
+                    <Plus className="mr-0.5 inline h-3 w-3" />{equipmentLabel(eq)}
+                  </button>
+                ))}
+              </div>
+            )}
+            <div className="mt-2 grid gap-2 sm:grid-cols-3">
+              <select value={newEquipment.type} onChange={e => setNewEquipment({ ...newEquipment, type: e.target.value })} className="input" aria-label="Equipment type">
+                {EQUIPMENT_TYPES.map(t => <option key={t}>{t}</option>)}
+              </select>
+              <input value={newEquipment.manufacturer} onChange={e => setNewEquipment({ ...newEquipment, manufacturer: e.target.value })} placeholder="Manufacturer" className="input" />
+              <input value={newEquipment.model} onChange={e => setNewEquipment({ ...newEquipment, model: e.target.value })} placeholder="Model" className="input" />
+              <input value={newEquipment.serial} onChange={e => setNewEquipment({ ...newEquipment, serial: e.target.value })} placeholder="Serial #" className="input" />
+              <input type="date" value={newEquipment.installDate} onChange={e => setNewEquipment({ ...newEquipment, installDate: e.target.value })} className="input" aria-label="Install date" />
+              <input value={newEquipment.location} onChange={e => setNewEquipment({ ...newEquipment, location: e.target.value })} placeholder="Location (e.g. Attic)" className="input" />
+            </div>
+            <button type="button" onClick={addEquipment} className="mt-2 w-full rounded-lg bg-[#315C9F] py-2 text-xs font-black text-white"><Plus className="mr-1 inline h-3.5 w-3.5" />Add Equipment</button>
           </div>
 
           <div className="grid gap-3 sm:grid-cols-2">
@@ -396,6 +488,9 @@ export const MembershipBuilder: React.FC<MembershipBuilderProps> = ({ isOpen, on
                   <input type="number" min="1" value={form.maintenanceInterval} onChange={e => setForm({ ...form, maintenanceInterval: e.target.value })} className="input" />
                 </Field>
               )}
+              <Field label="Number of visits included (blank = no limit)">
+                <input type="number" min="1" value={form.visitsIncluded} onChange={e => setForm({ ...form, visitsIncluded: e.target.value })} className="input" placeholder="e.g. 2" />
+              </Field>
             </div>
             {form.maintenanceUnit === "specific_dates" && (
               <div className="mt-2">
@@ -454,7 +549,7 @@ export const MembershipBuilder: React.FC<MembershipBuilderProps> = ({ isOpen, on
         <div className="sticky bottom-0 flex flex-wrap justify-end gap-2 border-t border-[#9EC8EF] bg-[#F5FAFF] px-4 py-3">
           <button type="button" onClick={onClose} className="rounded-xl px-4 py-2 text-xs font-bold text-slate-500 hover:bg-slate-100">Cancel</button>
           <button type="button" onClick={generatePdf} className="rounded-xl bg-emerald-600 px-4 py-2 text-xs font-black text-white"><FileText className="mr-1 inline h-3.5 w-3.5" />Generate PDF</button>
-          <button type="button" disabled={!canSave} onClick={handleSave} className="rounded-xl bg-[#315C9F] px-4 py-2 text-xs font-black text-white disabled:opacity-40">Save Membership</button>
+          <button type="button" disabled={!canSave} onClick={() => { handleSave(); }} className="rounded-xl bg-[#315C9F] px-4 py-2 text-xs font-black text-white disabled:opacity-40">Save Membership</button>
         </div>
       </div>
       <PriceBookModal

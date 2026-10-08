@@ -8,6 +8,8 @@
  * that guarantee.
  */
 
+import type { EquipmentRecord } from "./domain";
+
 export type MaintenanceFrequencyUnit = "days" | "weeks" | "months" | "years" | "specific_dates";
 
 export interface MaintenanceFrequency {
@@ -64,6 +66,22 @@ export interface Membership {
   sourceJobId?: string;
   assignedEmployee?: string;
   assignedCrew?: string;
+
+  /** Equipment this agreement covers (also saved to the customer's record for reuse). */
+  coveredEquipment?: EquipmentRecord[];
+  /** Total maintenance visits included over the agreement. Unset = no limit
+   * (agreements created before this field existed keep working unchanged).
+   * Visits left is never stored -- it's derived from completed visits, see
+   * lib/serviceAgreements.ts, so it can't drift or be double-counted. */
+  visitsIncluded?: number;
+  /** How many visits the server's recurring scheduler has auto-generated --
+   * it stops generating once this reaches visitsIncluded. */
+  visitsGenerated?: number;
+  /** Term start the visitsGenerated count belongs to -- the scheduler resets the count when visits start falling in a new term (after a Renew). */
+  visitsCountedFrom?: string;
+  /** Start date of the term before the last Renew. Until a renewed term
+   * actually begins, visits left keeps counting the current term. */
+  previousStartDate?: string;
 
   status: MembershipStatus;
   /** Next date a recurring maintenance visit should be generated for. Advanced by the scheduler after each generation; cleared once endDate or the specific-dates list is exhausted. */

@@ -143,6 +143,8 @@ export const WorkOrderBuilder: React.FC<WorkOrderBuilderProps> = ({ isOpen, onCl
       address: form.address.trim() || undefined,
       sourceEstimateId: editingWorkOrder?.sourceEstimateId ?? prefill?.sourceEstimateId,
       sourceJobId: editingWorkOrder?.sourceJobId ?? prefill?.sourceJobId,
+      // Keep a maintenance visit linked to its Service Agreement when edited.
+      sourceMembershipId: editingWorkOrder?.sourceMembershipId ?? prefill?.sourceMembershipId,
       assignedEmployees: form.assignedEmployees.length ? form.assignedEmployees : undefined,
       scheduledDate: form.scheduledDate || undefined,
       scheduledTime: form.scheduledTime || undefined,

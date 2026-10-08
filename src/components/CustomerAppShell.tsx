@@ -614,7 +614,12 @@ const MembershipsTab: React.FC<{ businessFilter: string; refreshVersion: number 
           <div className="mt-2 flex flex-wrap gap-3 text-[11px] font-bold text-[#5E7393]">
             {m.nextMaintenanceDate && <span>Next visit: {m.nextMaintenanceDate}</span>}
             {m.nextPaymentDate && <span>Next payment: {m.nextPaymentDate}</span>}
+            {m.visitsIncluded != null && <span>Visits left: {m.visitsRemaining ?? m.visitsIncluded} of {m.visitsIncluded}</span>}
+            {m.endDate && <span>Expires: {m.endDate}</span>}
           </div>
+          {!!m.coveredEquipment?.length && (
+            <p className="mt-1.5 text-[11px] text-[#5E7393]">Covers: {m.coveredEquipment.map(eq => [eq.type, eq.manufacturer, eq.model].filter(Boolean).join(" ") + (eq.location ? ` (${eq.location})` : "")).join(", ")}</p>
+          )}
         </div>
       ))}
     </div>

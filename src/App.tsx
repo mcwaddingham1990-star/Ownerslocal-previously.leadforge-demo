@@ -135,6 +135,7 @@ import { EstimatesPage, INITIAL_ESTIMATES, Estimate } from "./components/Estimat
 import { SchedulingPage, SchedulingEvent } from "./components/SchedulingPage";
 import { DispatchPage } from "./components/DispatchPage";
 import { JobsPage } from "./components/JobsPage";
+import { ServiceAgreementsPage } from "./components/ServiceAgreementsPage";
 import { TimeClockPage } from "./components/TimeClockPage";
 import { InventoryPage, INITIAL_INVENTORY, InventoryItem } from "./components/InventoryPage";
 import { InteractiveMapPage } from "./components/InteractiveMapPage";
@@ -941,6 +942,7 @@ const OS_SCREENS = [
   { id: "routes", label: "Interactive Map & Routes", url: "https://raw.githubusercontent.com/mcwaddingham1990-star/Leadforgeos/main/Src/Screens/Lightmodescreens/Lightroutes.jpg", icon: "🗺️", top: "52%", bottom: "57%" },
   { id: "employee_locations", label: "Employee Locations", url: "", icon: "📍", top: "52%", bottom: "57%" },
   { id: "jobs", label: "Jobs", url: "https://raw.githubusercontent.com/mcwaddingham1990-star/Leadforgeos/main/Src/Screens/Lightmodescreens/Lightjobs.jpg", icon: "💼", top: "22%", bottom: "27%" },
+  { id: "service_agreements", label: "Service Agreements", url: "", icon: "📜", top: "22%", bottom: "27%" },
   { id: "timeclock", label: "Time Clock", url: "https://raw.githubusercontent.com/mcwaddingham1990-star/Leadforgeos/main/Src/Screens/Lightmodescreens/Lighttimeclock.jpg", icon: "⏱️", top: "47%", bottom: "52%" },
   { id: "payroll", label: "Payroll", url: "", icon: "💵", top: "47%", bottom: "52%" },
   { id: "inventory", label: "Inventory", url: "https://raw.githubusercontent.com/mcwaddingham1990-star/Leadforgeos/main/Src/Screens/Lightmodescreens/Lightinventory.jpg", icon: "📦", top: "72%", bottom: "77%" },
@@ -969,7 +971,7 @@ const SIDEBAR_MENU = [
   { type: "screen", id: "missed_call_textback" },
   { type: "group", id: "finances", label: "Finances", iconScreenId: "revenue", items: ["revenue", "accounting", "payments", "billing"] },
   { type: "group", id: "clientele", label: "Clientele", iconScreenId: "customers", items: ["customers", "leads", "estimates"] },
-  { type: "group", id: "jobs_group", label: "Jobs", iconScreenId: "jobs", items: ["scheduling", "dispatch", "routes", "employee_locations", "jobs"] },
+  { type: "group", id: "jobs_group", label: "Jobs", iconScreenId: "jobs", items: ["scheduling", "dispatch", "routes", "employee_locations", "jobs", "service_agreements"] },
   { type: "group", id: "roster_group", label: "Roster", iconScreenId: "roster", items: ["timeclock", "payroll", "training", "roster"] },
   { type: "group", id: "collectibles", label: "Collectibles", iconScreenId: "documents", items: ["inventory", "documents", "snapshots"] },
   { type: "group", id: "communications", label: "Communications", iconScreenId: "messages", items: ["messages", "bulletins", "notifications"] },
@@ -1385,6 +1387,8 @@ const getScreenIcon = (screenId: string, className: string = "w-4 h-4") => {
       return <MapPin className={className} />;
     case "jobs":
       return <Briefcase className={className} />;
+    case "service_agreements":
+      return <FileText className={className} />;
     case "timeclock":
       return <Clock className={className} />;
     case "payroll":
@@ -2258,6 +2262,17 @@ export default function App() {
     } else {
       // Legacy account from before granular permissions existed.
       perms = [...(loggedInUser.permissions || ["dashboard"])];
+    }
+
+    // Service Agreements isn't its own permission module -- it's the page for
+    // the existing "Memberships" module, so it follows that permission.
+    const canViewMemberships = simulatedRole
+      ? perms.includes("memberships")
+      : loggedInUser.granularPermissions && loggedInUser.granularPermissions.memberships !== undefined
+        ? (["view", "edit", "delete"] as const).some(action => hasPermission(loggedInUser.granularPermissions, "memberships", action))
+        : (loggedInUser.permissions?.includes("memberships") ?? false);
+    if (canViewMemberships && !perms.includes("service_agreements")) {
+      perms.push("service_agreements");
     }
 
     // Always allow the Dashboard to be viewed by everyone -- it isn't part
@@ -8842,6 +8857,8 @@ Access to full financial telemetry is restricted.`;
 
                   ) : activeScreen.id === "jobs" ? (
                     <JobsPage />
+                  ) : activeScreen.id === "service_agreements" ? (
+                    <ServiceAgreementsPage />
 
                   ) : activeScreen.id === "routes" ? (
                     <MapPageErrorBoundary>
