@@ -73,4 +73,6 @@ export interface BuildJobPrefill {
   sourceEstimateId?: string;
   sourceLeadId?: string;
   source?: import("./domain").LeadSource;
+  /** Booking a visit for a Service Agreement -- carried onto the new Job. */
+  sourceMembershipId?: string;
 }

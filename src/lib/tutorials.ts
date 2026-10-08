@@ -161,6 +161,14 @@ export const TUTORIALS: Record<string, Tutorial> = {
       "Inside a job, tap the No Tap Info Entry microphone and just talk: what you did, materials used, what the customer asked for or approved, and what has to happen next. Or snap photos and they're sorted into before, after, damage, receipts and serial numbers for you. You get a quick Review & Save screen first, so nothing is saved until you check it.",
     ],
   },
+  service_agreements: {
+    title: "Service Agreements",
+    paragraphs: [
+      "Service Agreements lists every maintenance plan you sell: who it's for, the price, the next visit, how many visits are left, and when it expires. Tap Due Soon to see only agreements with a visit coming up or overdue.",
+      "Choose New Agreement to set one up: pick the customer, add the equipment it covers, list the included services, how many visits and how often, the price and how often they pay, and the start and end dates.",
+      "Schedule Visit books the visit as a regular job, so it shows on Scheduling and Dispatch. When that job is completed, the agreement's visits left goes down by one automatically. Renew starts a new term with the same plan, and Cancel stops future visits and bills while keeping the history.",
+    ],
+  },
   timeclock: {
     title: "Time Clock",
     paragraphs: [

@@ -62,7 +62,7 @@ export const getInvoices = (businessId?: string) => callJson<{ ok: boolean; erro
 export const createInvoiceCheckout = (businessId: string, invoiceId: string) =>
   callJson<{ ok: boolean; error?: string; url?: string }>(`/api/customer-accounts/invoices/${encodeURIComponent(invoiceId)}/checkout`, { method: "POST", body: JSON.stringify({ businessId }) });
 
-export interface TaggedMembership { id: string; businessId: string; businessName: string; membershipNumber?: string; planName: string; description?: string; price: number; billingFrequency: string; includedServices?: Array<{ id: string; description: string; quantity: number; unitPrice: number }>; startDate: string; endDate?: string; status: string; nextMaintenanceDate?: string; nextPaymentDate?: string }
+export interface TaggedMembership { id: string; businessId: string; businessName: string; membershipNumber?: string; planName: string; description?: string; price: number; billingFrequency: string; includedServices?: Array<{ id: string; description: string; quantity: number; unitPrice: number }>; startDate: string; endDate?: string; status: string; nextMaintenanceDate?: string; nextPaymentDate?: string; coveredEquipment?: Array<{ id: string; type: string; manufacturer?: string; model?: string; location?: string }>; visitsIncluded?: number; visitsRemaining?: number }
 export const getMemberships = (businessId?: string) => callJson<{ ok: boolean; error?: string; memberships?: TaggedMembership[] }>(`/api/customer-accounts/memberships${qs(businessId)}`);
 
 export interface TaggedDocument { id: string; businessId: string; businessName: string; name: string; date: string; status: string; folder?: string; hasPdf: boolean; canSign: boolean }

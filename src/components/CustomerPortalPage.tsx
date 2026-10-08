@@ -547,10 +547,18 @@ function MembershipsTab({ data }: { data: PortalData }) {
             <div>Next Service: {m.nextMaintenanceDate || "—"}</div>
             <div>Next Payment: {m.nextPaymentDate || "—"}</div>
             <div>Started: {m.startDate}</div>
+            {m.endDate && <div>Expires: {m.endDate}</div>}
+            {m.visitsIncluded != null && <div>Visits Left: {m.visitsRemaining ?? m.visitsIncluded} of {m.visitsIncluded}</div>}
           </div>
           {!!m.includedServices?.length && (
             <div className="mt-2 space-y-1 border-t border-blue-100 pt-2">
               {m.includedServices.map(s => <div key={s.id} className="text-xs text-slate-600">{s.quantity} × {s.description}</div>)}
+            </div>
+          )}
+          {!!m.coveredEquipment?.length && (
+            <div className="mt-2 space-y-1 border-t border-blue-100 pt-2">
+              <p className="text-[10px] font-bold uppercase tracking-wide text-[#5E7393]">Covered Equipment</p>
+              {m.coveredEquipment.map(eq => <div key={eq.id} className="text-xs text-slate-600">{[eq.type, eq.manufacturer, eq.model].filter(Boolean).join(" · ")}{eq.location ? ` — ${eq.location}` : ""}</div>)}
             </div>
           )}
         </Card>

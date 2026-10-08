@@ -56,6 +56,22 @@ export interface Customer {
    * without re-deriving it from scratch each time. */
   source?: LeadSource;
   sourceLeadId?: string;
+  /** Equipment at this customer's property (HVAC units, etc.), saved from a
+   * Service Agreement so it can be reused on the next agreement or visit. */
+  equipment?: EquipmentRecord[];
+}
+
+/** One piece of covered equipment -- shared by Customer.equipment and a
+ * Service Agreement's coveredEquipment (see types/membership.ts). */
+export interface EquipmentRecord {
+  id: string;
+  type: string;
+  manufacturer?: string;
+  model?: string;
+  serial?: string;
+  installDate?: string;
+  location?: string;
+  notes?: string;
 }
 
 export interface Lead {
@@ -483,6 +499,8 @@ export interface SchedulingEvent {
   activity?: Array<{ id: string; timestamp: string; action: string; by: string; detail?: string }>;
   /** Set when this calendar entry (eventType "Work Order") was auto-created so a scheduled Work Order shows up on Scheduling/Dispatch/Map without those pages needing any Work Order-specific code -- see WorkOrderBuilder.tsx. */
   sourceWorkOrderId?: string;
+  /** Set on a Job booked as a visit for a Service Agreement (Service Agreements > Schedule Visit). Completing the Job counts as one used visit -- see lib/serviceAgreements.ts. */
+  sourceMembershipId?: string;
   createdAt?: string;
   updatedAt?: string;
   /** Marketing attribution, carried over from the Estimate/Customer this job came from (see Customer.source). */

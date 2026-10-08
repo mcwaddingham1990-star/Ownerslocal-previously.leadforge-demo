@@ -29,7 +29,8 @@ const EMPTY_FORM = {
   date: new Date().toISOString().slice(0, 10), startTime: "09:00", endTime: "11:00", assignedEmployee: "", assignedCrew: "None",
   assignedVehicle: "None", priority: "Medium" as SchedulingEvent["priority"], status: "Unassigned" as JobStatusType,
   location: "", department: "General", description: "", notes: "", purchaseOrder: "", budget: "", laborRate: "",
-  sourceEstimateId: undefined as string | undefined, sourceLeadId: undefined as string | undefined, source: undefined as Customer["source"] | undefined
+  sourceEstimateId: undefined as string | undefined, sourceLeadId: undefined as string | undefined, source: undefined as Customer["source"] | undefined,
+  sourceMembershipId: undefined as string | undefined
 };
 
 const displayNumber = (job: SchedulingEvent) => job.jobNumber || `JOB-${job.id.replace(/\D/g, "").slice(-6) || job.id.slice(-6).toUpperCase()}`;
@@ -132,7 +133,8 @@ export function BuildJobModal({
         priority: editingJob.priority, status: normalizedStatus(editingJob), location: editingJob.location || editingJob.customerAddress || "", department: editingJob.department || "General",
         description: editingJob.description || "", notes: editingJob.notes || "", purchaseOrder: editingJob.purchaseOrder || "",
         budget: (editingJob.budget ?? "").toString(), laborRate: editingJob.laborRate?.toString() || "",
-        sourceEstimateId: editingJob.sourceEstimateId, sourceLeadId: editingJob.sourceLeadId, source: editingJob.source
+        sourceEstimateId: editingJob.sourceEstimateId, sourceLeadId: editingJob.sourceLeadId, source: editingJob.source,
+        sourceMembershipId: editingJob.sourceMembershipId
       });
       setSavedJob(editingJob);
     } else if (prefill) {
@@ -141,7 +143,8 @@ export function BuildJobModal({
         customerPhone: prefill.customerPhone || "", customerEmail: prefill.customerEmail || "", location: prefill.customerAddress || "",
         title: prefill.title || "", description: prefill.description || "", notes: prefill.notes || "",
         budget: prefill.budget != null ? String(prefill.budget) : "",
-        sourceEstimateId: prefill.sourceEstimateId, sourceLeadId: prefill.sourceLeadId, source: prefill.source
+        sourceEstimateId: prefill.sourceEstimateId, sourceLeadId: prefill.sourceLeadId, source: prefill.source,
+        sourceMembershipId: prefill.sourceMembershipId
       });
       setSavedJob(null);
     } else {
@@ -246,7 +249,8 @@ export function BuildJobModal({
       date: form.date, startTime: form.startTime, endTime: form.endTime, assignedEmployee: form.assignedEmployee,
       assignedCrew: form.assignedCrew, assignedVehicle: form.assignedVehicle, priority: form.priority, department: form.department,
       description: form.description, notes: form.notes, purchaseOrder: form.purchaseOrder, budget, laborRate: Number(form.laborRate) || 0,
-      status: form.status, sourceEstimateId: form.sourceEstimateId, sourceLeadId: form.sourceLeadId, source: form.source
+      status: form.status, sourceEstimateId: form.sourceEstimateId, sourceLeadId: form.sourceLeadId, source: form.source,
+      sourceMembershipId: form.sourceMembershipId
     });
     try {
       // createJob updates UI state optimistically; wait for the corresponding

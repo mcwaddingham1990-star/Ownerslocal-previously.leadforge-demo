@@ -112,6 +112,8 @@ export function useDomainActions() {
     sourceEstimateId?: string;
     sourceLeadId?: string;
     source?: Customer["source"];
+    /** Set when the job is a visit booked for a Service Agreement. */
+    sourceMembershipId?: string;
     /** Set only by the Automation Engine -- stamps the job so its own "Job Created" event can't re-trigger automations. */
     createdByAutomationId?: string;
   }): SchedulingEvent => {
@@ -155,6 +157,7 @@ export function useDomainActions() {
       sourceEstimateId: input.sourceEstimateId,
       sourceLeadId: input.sourceLeadId,
       source: input.source,
+      ...(input.sourceMembershipId ? { sourceMembershipId: input.sourceMembershipId } : {}),
       ...(input.createdByAutomationId ? { createdByAutomationId: input.createdByAutomationId } : {}),
       progress: 0,
       checklist: [],
