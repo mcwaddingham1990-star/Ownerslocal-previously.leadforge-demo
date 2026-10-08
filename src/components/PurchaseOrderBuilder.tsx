@@ -8,6 +8,7 @@ import type { Bill } from "../types/accounting";
 import { postBillCreatedEntry } from "../lib/accountingEngine";
 import { downscaleImageToBase64 } from "../lib/imageCompression";
 import { MAX_INLINE_BASE64_LENGTH } from "../lib/firestoreDocumentLimits";
+import { AssignEmployeeField } from "./AssignEmployeeField";
 
 const uid = (prefix: string) => `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
 const todayStr = () => new Date().toISOString().slice(0, 10);
@@ -47,7 +48,7 @@ export const PurchaseOrderBuilder: React.FC<PurchaseOrderBuilderProps> = ({ isOp
   const { loggedInUser } = useAuth();
   const {
     schedulingEvents, setSchedulingEvents, workOrders, setWorkOrders, inventoryList, setInventoryList,
-    vendors, recentRoster, purchaseOrders, setPurchaseOrders, setBills, setJournalEntries, saveTransaction,
+    vendors, purchaseOrders, setPurchaseOrders, setBills, setJournalEntries, saveTransaction,
     setGeneratedPdfDraft
   } = useDomainData();
   const { navigateToScreen, logOperationalEvent, triggerNotification } = useNavTelemetry();
@@ -455,10 +456,7 @@ export const PurchaseOrderBuilder: React.FC<PurchaseOrderBuilderProps> = ({ isOp
                   <input value={form.requestedBy} onChange={e => setForm({ ...form, requestedBy: e.target.value })} className="input" />
                 </Field>
                 <Field label="Assigned employee">
-                  <select value={form.assignedEmployee} onChange={e => setForm({ ...form, assignedEmployee: e.target.value })} className="input">
-                    <option value="">Not assigned</option>
-                    {recentRoster.map(r => <option key={r.id || r.name} value={r.name}>{r.name}</option>)}
-                  </select>
+                  <AssignEmployeeField value={form.assignedEmployee} onChange={v => setForm({ ...form, assignedEmployee: v })} className="input" unassignedLabel="Not assigned" />
                 </Field>
               </div>
 

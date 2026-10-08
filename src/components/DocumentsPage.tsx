@@ -1,4 +1,5 @@
 import React, { useState, useMemo, useRef, useEffect } from "react";
+import { createPortal } from "react-dom";
 import { useAuth } from "../context/AuthContext";
 import { useDomainData } from "../context/DomainDataContext";
 import { useNavTelemetry } from "../context/NavTelemetryContext";
@@ -13,6 +14,8 @@ import { CreatePurchaseOrderPicker } from "./CreatePurchaseOrderPicker";
 import { PurchaseOrderBuilder } from "./PurchaseOrderBuilder";
 import { CustomerPortalControls } from "./CustomerPortalControls";
 import { resolveCustomerByIdOrName } from "../lib/resolveCustomer";
+import { buildRemoteSigningLink, shareRemoteSigningPackage } from "../lib/remoteSigningClient";
+import { normalizeContactPhone, normalizeEstimateCompany } from "../lib/contactNormalization";
 import type { WorkOrder } from "../types/domain";
 import type { Membership } from "../types/membership";
 import type { PurchaseOrder } from "../types/purchaseOrder";
@@ -122,7 +125,7 @@ const STOCK_TEMPLATES = [
 export const DocumentsPage: React.FC = () => {
   const { loggedInUser, simulatedRole, businessId } = useAuth();
   const activeRole = simulatedRole || loggedInUser?.role || "Owner";
-  const { documents, setDocuments, customers: customersList, recentRoster, schedulingEvents, employees, setEmployees, generatedPdfDraft, setGeneratedPdfDraft, pendingSignatureCapture, setPendingSignatureCapture, preSelectedCustomerId, setPreSelectedCustomerId, businessProfile, workOrders, memberships, purchaseOrders, pendingCreateTemplateFolder, setPendingCreateTemplateFolder } = useDomainData();
+  const { documents, setDocuments, estimates, setEstimates, customers: customersList, setCustomers, leads, setLeads, notifications, setNotifications, recentRoster, schedulingEvents, employees, setEmployees, generatedPdfDraft, setGeneratedPdfDraft, pendingSignatureCapture, setPendingSignatureCapture, preSelectedCustomerId, setPreSelectedCustomerId, businessProfile, workOrders, memberships, purchaseOrders, pendingCreateTemplateFolder, setPendingCreateTemplateFolder } = useDomainData();
   const [isWorkOrderBuilderOpen, setIsWorkOrderBuilderOpen] = useState(false);
   const [editingWorkOrder, setEditingWorkOrder] = useState<WorkOrder | null>(null);
   const [workOrderPrefill, setWorkOrderPrefill] = useState<Partial<WorkOrder> | undefined>(undefined);
@@ -171,13 +174,28 @@ export const DocumentsPage: React.FC = () => {
   const [pdfEditorDocName, setPdfEditorDocName] = useState("");
   const [pdfEditorBase64, setPdfEditorBase64] = useState("");
   const [pdfEditorAutoOpenPicker, setPdfEditorAutoOpenPicker] = useState(false);
+  const [pdfEditorSignatureOnly, setPdfEditorSignatureOnly] = useState(false);
+  const [pdfEditorContact, setPdfEditorContact] = useState<{ phone?: string; email?: string; customerName?: string } | null>(null);
+  // SECURITY/CORRECTNESS: SelfieSaveEditor decides once, on mount, whether to
+  // show its "Start with a blank document" setup screen (based on whether a
+  // real document/draft was handed to it). Without a key that changes on
+  // every open, React reuses the SAME component instance across separate
+  // "open the editor" actions (they all render at the same JSX position), so
+  // that one-time decision never re-runs -- open a blank draft once, and
+  // every later open from a real Lead/Estimate/Customer/Job PDF incorrectly
+  // shows the blank-document screen again despite real content being loaded.
+  // Bumped on every distinct "open the editor" action below so each open is
+  // a fresh mount.
+  const [pdfEditorSessionKey, setPdfEditorSessionKey] = useState(0);
 
   useEffect(() => {
     if (!generatedPdfDraft) return;
-    setPdfEditorDocId(null);
+    setPdfEditorDocId(generatedPdfDraft.documentId || null);
     setPdfEditorDocName(generatedPdfDraft.filename);
     setPdfEditorBase64("");
     setPdfEditorAutoOpenPicker(false);
+    setPdfEditorContact({ phone: generatedPdfDraft.customerPhone, email: generatedPdfDraft.customerEmail, customerName: generatedPdfDraft.customerName });
+    setPdfEditorSessionKey(k => k + 1);
     setIsPDFEditorOpen(true);
   }, [generatedPdfDraft]);
 
@@ -191,6 +209,8 @@ export const DocumentsPage: React.FC = () => {
     setPdfEditorDocName("");
     setPdfEditorBase64("");
     setPdfEditorAutoOpenPicker(true);
+    setPdfEditorContact({ phone: pendingSignatureCapture.customerPhone, email: pendingSignatureCapture.customerEmail, customerName: pendingSignatureCapture.customerName });
+    setPdfEditorSessionKey(k => k + 1);
     setIsPDFEditorOpen(true);
   }, [pendingSignatureCapture]);
   const signatureCaptureHint = pendingSignatureCapture ? { customerName: pendingSignatureCapture.customerName } : null;
@@ -213,6 +233,8 @@ export const DocumentsPage: React.FC = () => {
 
   const closePDFEditor = () => {
     setIsPDFEditorOpen(false);
+    setPdfEditorSignatureOnly(false);
+    setPdfEditorContact(null);
     setGeneratedPdfDraft(null);
     setPendingSignatureCapture(null);
     setPendingCreateTemplateFolder(null);
@@ -249,6 +271,8 @@ export const DocumentsPage: React.FC = () => {
   const [isMainShareModalOpen, setIsMainShareModalOpen] = useState(false);
   const [shareDocItem, setShareDocItem] = useState<DocumentItem | null>(null);
   const [shareRecipient, setShareRecipient] = useState("");
+  const [actionMenuDoc, setActionMenuDoc] = useState<DocumentItem | null>(null);
+  const [actionMenuPosition, setActionMenuPosition] = useState<{ top: number; left: number } | null>(null);
 
   // Photo-to-PDF selection state
   const [photoToPdfName, setPhotoToPdfName] = useState("Photo Compilation.pdf");
@@ -274,14 +298,209 @@ export const DocumentsPage: React.FC = () => {
     setPdfEditorDocName(doc?.name || "");
     setPdfEditorBase64((doc as any)?.pdfBase64 || "");
     setPdfEditorAutoOpenPicker(autoOpenPdfPicker);
+    setPdfEditorSignatureOnly(false);
+    setPdfEditorContact(doc ? getDocumentContact(doc) : null);
+    setPdfEditorSessionKey(k => k + 1);
     setIsPDFEditorOpen(true);
     if (doc) {
       triggerNotification(`Opening ${doc.name} in SelfieSave eSign`);
     }
   };
 
+  const getDocumentRecipient = (doc: DocumentItem) => {
+    const customer = resolveCustomerByIdOrName(customersList, undefined, doc.customer !== "None" ? doc.customer : undefined);
+    if (!customer) return "";
+    return `customer|${customer.contact || customer.company || ""}|${customer.email || ""}|${customer.phone || ""}`;
+  };
+
+  const getDocumentContact = (doc: DocumentItem) => {
+    const customer = resolveCustomerByIdOrName(customersList, undefined, doc.customer !== "None" ? doc.customer : undefined);
+    return customer ? { phone: customer.phone, email: customer.email, customerName: customer.contact || customer.company } : null;
+  };
+
+  const openDocumentDropdown = (doc: DocumentItem, row: HTMLElement) => {
+    const rect = row.getBoundingClientRect();
+    setSelectedDocId(doc.id);
+    setActionMenuDoc(doc);
+    setActionMenuPosition({
+      top: Math.max(8, Math.min(rect.bottom + 6, window.innerHeight - 360)),
+      left: Math.max(8, Math.min(rect.left + 24, window.innerWidth - 260))
+    });
+  };
+
+  const openSendModal = (doc: DocumentItem) => {
+    setShareDocItem(doc);
+    setShareRecipient(getDocumentRecipient(doc));
+    setActionMenuDoc(null);
+    setActionMenuPosition(null);
+    setIsMainShareModalOpen(true);
+  };
+
+  const openCollectSignatures = (doc: DocumentItem) => {
+    setPdfEditorDocId(doc.id);
+    setPdfEditorDocName(doc.name);
+    setPdfEditorBase64((doc as any)?.pdfBase64 || "");
+    setPdfEditorAutoOpenPicker(!(doc as any)?.pdfBase64);
+    setPdfEditorSignatureOnly(true);
+    setPdfEditorContact(getDocumentContact(doc));
+    setActionMenuDoc(null);
+    setActionMenuPosition(null);
+    setPdfEditorSessionKey(k => k + 1);
+    setIsPDFEditorOpen(true);
+  };
+
+  const base64ToBlob = (base64: string, mimeType = "application/pdf") => {
+    const cleanBase64 = base64.includes(",") ? base64.split(",").pop() || "" : base64;
+    const binary = window.atob(cleanBase64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+    return new Blob([bytes], { type: mimeType });
+  };
+
+  const blobToBase64 = (blob: Blob) => new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || "").split(",").pop() || "");
+    reader.onerror = () => reject(reader.error || new Error("Could not read file"));
+    reader.readAsDataURL(blob);
+  });
+
+  const safePdfFileName = (name: string) => name.toLowerCase().endsWith(".pdf") ? name : `${name}.pdf`;
+
+  const getDocumentShareFile = async (doc: DocumentItem) => {
+    const pdfBase64 = (doc as any)?.pdfBase64;
+    if (pdfBase64) {
+      return new File([base64ToBlob(pdfBase64)], safePdfFileName(doc.name), { type: "application/pdf" });
+    }
+    if (doc.url) {
+      const response = await fetch(doc.url);
+      const blob = await response.blob();
+      const type = blob.type || "application/pdf";
+      return new File([blob], safePdfFileName(doc.name), { type });
+    }
+    const fallback = new Blob([`OwnersLOCAL document record\n\n${JSON.stringify(doc, null, 2)}`], { type: "text/plain" });
+    return new File([fallback], doc.name.toLowerCase().endsWith(".txt") ? doc.name : `${doc.name}.txt`, { type: "text/plain" });
+  };
+
+  const downloadDocumentFile = async (doc: DocumentItem) => {
+    const file = await getDocumentShareFile(doc);
+    const url = URL.createObjectURL(file);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = file.name;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
+  const markDocumentSent = (doc: DocumentItem) => {
+    setDocuments(prev => prev.map(d => d.id === doc.id ? { ...d, folder: "eSign", status: "Sent" } : d));
+  };
+
+  const prepareRemoteSigningLink = async (doc: DocumentItem) => {
+    const existingOptions = (doc as any).signingOptions || {};
+    const existingToken = existingOptions.remoteToken && !existingOptions.remoteTokenUsedAt ? String(existingOptions.remoteToken) : "";
+    const token = existingToken || `sign_${crypto.randomUUID().replace(/-/g, "")}`;
+    const remoteTokenExpiresAt = existingOptions.remoteTokenExpiresAt || new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString();
+    let pdfBase64 = String((doc as any).pdfBase64 || "");
+    let actualSizeBytes = (doc as any).actualSizeBytes;
+
+    if (!pdfBase64 && doc.url) {
+      const response = await fetch(doc.url);
+      const blob = await response.blob();
+      pdfBase64 = await blobToBase64(blob);
+      actualSizeBytes = blob.size;
+    }
+
+    if (!pdfBase64) {
+      triggerNotification("Open this document in the PDF Editor first so a signable PDF copy can be prepared.");
+      return null;
+    }
+
+    const nextDoc: DocumentItem = {
+      ...doc,
+      folder: "eSign",
+      status: "Awaiting Signature",
+      lastModified: new Date().toISOString().replace("T", " ").substring(0, 19),
+      signingOptions: {
+        ...existingOptions,
+        signMethod: existingOptions.signMethod || "both",
+        remoteToken: token,
+        remoteTokenExpiresAt,
+        remoteSignerName: existingOptions.remoteSignerName || doc.customer || ""
+      },
+      pdfBase64,
+      size: actualSizeBytes ? `${Math.max(1, Math.ceil(Number(actualSizeBytes) / 1024))} KB` : doc.size
+    } as DocumentItem;
+
+    setDocuments(prev => prev.map(d => d.id === doc.id ? nextDoc : d));
+    return { link: buildRemoteSigningLink(token), doc: nextDoc };
+  };
+
+  const shareDocumentSigningLink = async (doc: DocumentItem) => {
+    try {
+      const prepared = await prepareRemoteSigningLink(doc);
+      if (!prepared) return false;
+
+      const customer = getDocumentContact(prepared.doc);
+      const result = await shareRemoteSigningPackage({
+        documentName: prepared.doc.name,
+        signingLink: prepared.link,
+        pdfBase64: String((prepared.doc as any).pdfBase64 || ""),
+        signerName: customer?.customerName
+      });
+
+      if (result === "copied") {
+        triggerNotification("Native sharing is unavailable here, so the live signing link was copied.");
+      } else if (result === "shared") {
+        triggerNotification("Signing PDF and live signing link opened in your device share menu.");
+      }
+      return true;
+    } catch (error) {
+      console.error(error);
+      triggerNotification("Unable to prepare the signing link.");
+      return false;
+    }
+  };
+
+  const shareDocumentWithAttachment = async (doc: DocumentItem, channel: "share" | "email" | "text" = "share") => {
+    try {
+      const file = await getDocumentShareFile(doc);
+      const shareData: ShareData = {
+        title: doc.name,
+        text: channel === "text" ? `Please review ${doc.name} from OwnersLOCAL.` : `Please review the attached OwnersLOCAL document: ${doc.name}`,
+        files: [file]
+      };
+      if (navigator.share) {
+        // Some Android share targets reject a payload that combines text and a
+        // PDF even though they accept the PDF itself. Prefer the richer payload,
+        // then retry with the real file only so Messages receives an MMS
+        // attachment instead of a body-only sms: link.
+        const payloads: ShareData[] = [shareData, { title: doc.name, files: [file] }];
+        for (const payload of payloads) {
+          if (navigator.canShare && !navigator.canShare(payload)) continue;
+          try {
+            await navigator.share(payload);
+            if (channel !== "share") markDocumentSent(doc);
+            return true;
+          } catch (error) {
+            if ((error as DOMException).name === "AbortError") return true;
+          }
+        }
+      }
+      await downloadDocumentFile(doc);
+      triggerNotification("This browser cannot open the native file-share sheet. The PDF was downloaded; attach it from Downloads.");
+      return false;
+    } catch (error) {
+      console.error(error);
+      triggerNotification("Unable to prepare that document for sharing.");
+      return false;
+    }
+  };
+
   // Handler to save PDF Editor modifications
   const handleSavePDFEditor = (docId: string, updatedName: string, metaProperties?: any) => {
+    const linkedDocument = documents.find(d => d.id === docId);
     setDocuments(prev => {
       const exists = prev.some(d => d.id === docId);
       if (exists) {
@@ -313,6 +532,7 @@ export const DocumentsPage: React.FC = () => {
               auditTrail: metaProperties?.auditTrail || (d as any).auditTrail || [],
               signingOptions: metaProperties?.signingOptions || (d as any).signingOptions || {},
               pdfBase64: metaProperties?.pdfBase64 || (d as any).pdfBase64,
+              folder: metaProperties?.folder || d.folder,
               size: metaProperties?.actualSizeBytes ? `${Math.max(1, Math.ceil(metaProperties.actualSizeBytes / 1024))} KB` : d.size
             };
           }
@@ -332,7 +552,7 @@ export const DocumentsPage: React.FC = () => {
           date: new Date().toISOString().split('T')[0],
           size: metaProperties?.actualSizeBytes ? `${Math.max(1, Math.ceil(metaProperties.actualSizeBytes / 1024))} KB` : "Draft",
           status: metaProperties?.status || "Awaiting Signature",
-          folder: pendingCreateTemplateFolder || "eSign",
+          folder: metaProperties?.folder || pendingCreateTemplateFolder || "eSign",
           isFavorite: false,
           isArchived: false,
           notes: pendingCreateTemplateFolder ? "Created as a template from Documents." : "Generated from OwnersLOCAL Native PDF Editor tool.",
@@ -351,6 +571,92 @@ export const DocumentsPage: React.FC = () => {
         return [...prev, newDoc];
       }
     });
+
+    const sourceEstimateId =
+      linkedDocument?.estimateId && linkedDocument.estimateId !== "None"
+        ? linkedDocument.estimateId
+        : generatedPdfDraft?.sourceType === "Estimate"
+          ? generatedPdfDraft.sourceId
+          : undefined;
+
+    if (metaProperties?.status === "Signed" && sourceEstimateId) {
+      const sourceEstimate = estimates.find(estimate => estimate.id === sourceEstimateId);
+
+      // Update the one existing estimate in place. The Map also collapses any
+      // accidental same-ID copies so signing can never add another table row.
+      setEstimates(prev => prev
+        .filter((estimate, index, all) => all.findIndex(item => item.id === estimate.id) === index)
+        .map(estimate => estimate.id === sourceEstimateId ? { ...estimate, status: "Signed" as const } : estimate));
+
+      if (sourceEstimate) {
+        const normalizedCompany = normalizeEstimateCompany(sourceEstimate.customerName, sourceEstimate.company);
+        const matchedCustomer =
+          resolveCustomerByIdOrName(customersList, sourceEstimate.customerId, sourceEstimate.customerName) ||
+          (normalizedCompany ? resolveCustomerByIdOrName(customersList, undefined, normalizedCompany) : null);
+
+        if (matchedCustomer) {
+          setCustomers(prev => prev.map(customer =>
+            customer.id === matchedCustomer.id
+              ? { ...customer, status: "Active", pendingConfirmation: false }
+              : customer
+          ));
+        }
+
+        if (sourceEstimate.sourceLeadId) {
+          setLeads(prev => prev.map(lead =>
+            lead.id === sourceEstimate.sourceLeadId ? { ...lead, status: "Won" } : lead
+          ));
+        }
+
+        const recipientEmail = loggedInUser?.email;
+        const alreadyQueued = notifications.some(notification =>
+          notification.type === "signed_estimate_ready_for_job" &&
+          notification.relatedEstimateId === sourceEstimateId
+        );
+
+        if (recipientEmail && !alreadyQueued) {
+          const now = new Date();
+          const time = now.toISOString().slice(0, 16).replace("T", " ");
+          const customerName = matchedCustomer?.contact || sourceEstimate.customerName;
+          const jobPrefill = {
+            customerId: matchedCustomer?.id || sourceEstimate.customerId,
+            customerName,
+            customerPhone: normalizeContactPhone(sourceEstimate.phone || matchedCustomer?.phone),
+            customerEmail: matchedCustomer?.email,
+            customerAddress: sourceEstimate.address || matchedCustomer?.address,
+            title: sourceEstimate.projectSpecifics || `Job from ${sourceEstimate.number}`,
+            description: sourceEstimate.projectSpecifics || sourceEstimate.notes || "",
+            notes: sourceEstimate.notes || "",
+            budget: sourceEstimate.amount,
+            sourceEstimateId,
+            sourceLeadId: sourceEstimate.sourceLeadId,
+            source: sourceEstimate.source
+          };
+
+          setNotifications(prev => [{
+            id: `notif_signed_${now.getTime()}_${Math.random().toString(36).slice(2, 8)}`,
+            category: "jobs",
+            screenId: "jobs",
+            type: "signed_estimate_ready_for_job",
+            actionable: true,
+            title: "Signed estimate — create job",
+            description: `${customerName} signed estimate ${sourceEstimate.number}. Ready to create the job.`,
+            time,
+            isRead: false,
+            isArchived: false,
+            isPinned: false,
+            priority: "High",
+            assignedUser: loggedInUser?.name || loggedInUser?.role || "Owner",
+            recipientEmail,
+            createdBy: "In-Person Signing",
+            relatedCustomerId: matchedCustomer?.id,
+            relatedEstimateId: sourceEstimateId,
+            jobPrefill,
+            history: [`${time}: Estimate signed in person and moved to the job handoff.`]
+          }, ...prev]);
+        }
+      }
+    }
 
     // A signer committing their portion mid-session needs the Documents list
     // to pick up the new lock/status right away without booting the drafter
@@ -972,7 +1278,7 @@ export const DocumentsPage: React.FC = () => {
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
           <div>
             <h2 className="text-xl font-display font-extrabold text-[#1F3557] tracking-tight uppercase">
-              Documents Hub
+              Documents
             </h2>
             <p className="text-xs text-[#5E7393] font-sans font-semibold mt-1">
               Upload, find, and open your business documents
@@ -1005,7 +1311,7 @@ export const DocumentsPage: React.FC = () => {
               className="px-3.5 py-2 bg-[#EAF5FF] hover:bg-[#BDDDF8] border border-[#9EC8EF] text-[#315C9F] font-bold rounded-xl text-xs uppercase tracking-wider transition-colors flex items-center gap-1.5 cursor-pointer"
             >
               <Camera className="w-3.5 h-3.5" />
-              Snapshot AI
+              Scan Document
             </button>
             <button
               onClick={() => setShowAdvancedFilters(!showAdvancedFilters)}
@@ -1255,7 +1561,7 @@ export const DocumentsPage: React.FC = () => {
           className="px-4 py-2.5 bg-[#EAF5FF] hover:bg-[#BDDDF8] border border-[#9EC8EF] text-[#1F3557] font-black rounded-xl text-xs uppercase tracking-wider transition-all flex items-center gap-2 cursor-pointer"
         >
           <FolderOpen className="w-4 h-4" />
-          Open PDF — Device / Drive
+          Open PDF from Device or Drive
         </button>
         <button
           onClick={() => handleOpenPDFEditor(null, true)}
@@ -1481,7 +1787,9 @@ export const DocumentsPage: React.FC = () => {
                       if (tpl.action === "esign") {
                         setPdfEditorDocId(null);
                         setPdfEditorDocName(tpl.name + ".pdf");
+                        setPdfEditorBase64("");
                         setPdfEditorAutoOpenPicker(false);
+                        setPdfEditorSessionKey(k => k + 1);
                         setIsPDFEditorOpen(true);
                       } else {
                         window.open(tpl.url, "_blank", "noopener,noreferrer");
@@ -1519,7 +1827,7 @@ export const DocumentsPage: React.FC = () => {
                 {activeDocTab === "templates" ? null : tabFilteredDocs.length === 0 ? (
                   <tr>
                     <td colSpan={7} className="py-12 text-center text-[#5E7393] text-xs font-semibold">
-                      No matching files or documents located.
+                      No documents found. Clear your filters or upload a document.
                     </td>
                   </tr>
                 ) : (
@@ -1528,7 +1836,7 @@ export const DocumentsPage: React.FC = () => {
                     return (
                       <tr
                         key={doc.id}
-                        onClick={() => setSelectedDocId(doc.id)}
+                        onClick={(event) => openDocumentDropdown(doc, event.currentTarget)}
                         className={`hover:bg-[#BDDDF8]/50 transition-colors cursor-pointer text-xs ${
                           isSelected ? "bg-[#EAF5FF] border-l-4 border-l-[#315C9F]" : ""
                         }`}
@@ -1578,7 +1886,10 @@ export const DocumentsPage: React.FC = () => {
                           <div className="flex items-center justify-center gap-1.5">
                             {hasManagePermission && (
                             <button
-                              onClick={() => handleOpenPDFEditor(doc)}
+                              onClick={() => {
+                                setActionMenuDoc(null);
+                                handleOpenPDFEditor(doc);
+                              }}
                               className="p-1 hover:bg-[#BDDDF8]/50 text-[#315C9F] rounded transition-colors"
                               title="Open in eSign Editor"
                             >
@@ -1587,6 +1898,7 @@ export const DocumentsPage: React.FC = () => {
                             )}
                             <button
                               onClick={() => {
+                                setActionMenuDoc(null);
                                 setShareDocItem(doc);
                                 setIsMainShareModalOpen(true);
                               }}
@@ -1620,275 +1932,26 @@ export const DocumentsPage: React.FC = () => {
           )}
           <div className="mt-4 pt-3 border-t border-[#9EC8EF]/40 flex justify-between items-center text-[10px] font-sans font-bold text-[#5E7393]">
             <span>
-              Showing {tabFilteredDocs.length} of {documents.length} files
+              {tabFilteredDocs.length} documents
             </span>
             <span className="px-2 py-0.5 bg-[#EAF5FF] border border-[#9EC8EF]/60 rounded-lg text-[#1F3557]">
-              Synced Storage Active
+              Documents are up to date
             </span>
           </div>
         </div>
 
-        {/* DOCUMENT DETAILS PANEL (5 COLS) */}
-        <div className="lg:col-span-5 bg-[#C7E3FA] rounded-2xl p-4 border border-[#9EC8EF] shadow-sm space-y-4">
-          <div className="flex items-center justify-between border-b border-[#9EC8EF]/40 pb-2">
-            <h3 className="text-xs font-display font-black text-[#1F3557] uppercase tracking-wider flex items-center gap-1.5">
-              <Eye className="w-3.5 h-3.5" />
-              Document Inspector
-            </h3>
-            {activeDoc && (
-              <button
-                onClick={() => handleToggleFavorite(activeDoc)}
-                className="p-1 hover:bg-[#BDDDF8] rounded-lg"
-                title="Favorite"
-              >
-                <Star className={`w-4 h-4 ${activeDoc.isFavorite ? "text-amber-500 fill-amber-500" : "text-[#1F3557]"}`} />
-              </button>
-            )}
-          </div>
-
-          {activeDoc ? (
-            <div className="space-y-4">
-              {/* Document Mockup Preview Container */}
-              <div className="bg-[#EAF5FF] rounded-xl border border-[#9EC8EF] p-4 flex flex-col items-center justify-center text-center min-h-[140px] relative overflow-hidden group shadow-inner">
-                {getFileIcon(activeDoc.type)}
-                <p className="text-xs font-extrabold text-[#1F3557] mt-2 max-w-[200px] truncate uppercase">{activeDoc.name}</p>
-                <p className="text-[9px] font-mono text-slate-400 mt-1 uppercase tracking-widest">{activeDoc.size} • {activeDoc.type}</p>
-                <div className="absolute inset-0 bg-[#315C9F]/5 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
-                  <span className="bg-[#315C9F] text-white px-3 py-1 rounded-lg text-[9px] font-bold uppercase tracking-wider">Simulated Preview</span>
-                </div>
-              </div>
-
-              {/* ESIGN EDITOR LAUNCH — managers/owners only */}
-              {hasManagePermission ? (
-                <button
-                  onClick={() => handleOpenPDFEditor(activeDoc)}
-                  className="w-full py-3 bg-gradient-to-r from-[#1F3557] to-[#315C9F] hover:from-[#315C9F] hover:to-[#1F3557] text-white font-black rounded-xl text-xs uppercase tracking-wider transition-all flex items-center justify-center gap-2 shadow-md hover:shadow-lg cursor-pointer transform hover:-translate-y-0.5 active:translate-y-0"
-                >
-                  <FileSignature className="w-4 h-4 text-amber-400 animate-pulse" />
-                  Open eSign Editor
-                </button>
-              ) : (
-                <div className="w-full py-3 bg-slate-100 text-slate-400 font-bold rounded-xl text-xs uppercase tracking-wider flex items-center justify-center gap-2 cursor-not-allowed select-none">
-                  <FileSignature className="w-4 h-4" />
-                  eSign — Manager Access Only
-                </div>
-              )}
-
-              {/* Information Ledger */}
-              <div className="space-y-2 text-xs font-bold text-[#1F3557]">
-                <div className="flex justify-between border-b border-[#9EC8EF]/30 pb-1">
-                  <span className="text-[#5E7393] uppercase text-[9px]">Customer</span>
-                  <span className="text-right">{activeDoc.customer !== "None" ? activeDoc.customer : <span className="text-slate-400 font-normal">—</span>}</span>
-                </div>
-
-                <div className="flex justify-between border-b border-[#9EC8EF]/30 pb-1">
-                  <span className="text-[#5E7393] uppercase text-[9px]">Employee</span>
-                  <span className="text-right">{activeDoc.employee !== "None" ? activeDoc.employee : <span className="text-slate-400 font-normal">—</span>}</span>
-                </div>
-
-                <div className="flex justify-between border-b border-[#9EC8EF]/30 pb-1">
-                  <span className="text-[#5E7393] uppercase text-[9px]">Vendor</span>
-                  <span className="text-right">{activeDoc.vendor !== "None" ? activeDoc.vendor : <span className="text-slate-400 font-normal">—</span>}</span>
-                </div>
-
-                <div className="flex justify-between border-b border-[#9EC8EF]/30 pb-1">
-                  <span className="text-[#5E7393] uppercase text-[9px]">Job</span>
-                  <span className="text-right">{activeDoc.job !== "None" ? activeDoc.job : <span className="text-slate-400 font-normal">—</span>}</span>
-                </div>
-
-                {activeDoc.estimateId !== "None" && (
-                  <div className="flex justify-between border-b border-[#9EC8EF]/30 pb-1">
-                    <span className="text-[#5E7393] uppercase text-[9px]">Estimate ID</span>
-                    <span className="font-mono text-right">{activeDoc.estimateId}</span>
-                  </div>
-                )}
-
-                {activeDoc.invoiceId !== "None" && (
-                  <div className="flex justify-between border-b border-[#9EC8EF]/30 pb-1">
-                    <span className="text-[#5E7393] uppercase text-[9px]">Invoice ID</span>
-                    <span className="font-mono text-right">{activeDoc.invoiceId}</span>
-                  </div>
-                )}
-
-                <div className="flex justify-between border-b border-[#9EC8EF]/30 pb-1">
-                  <span className="text-[#5E7393] uppercase text-[9px]">Uploaded</span>
-                  <span className="font-mono text-[#5E7393]">{activeDoc.date} · {activeDoc.uploadedBy}</span>
-                </div>
-
-                <div className="space-y-1 pt-1">
-                  <span className="text-[#5E7393] uppercase text-[9px] block">Notes & Overview</span>
-                  <p className="text-[11px] font-sans font-medium text-slate-600 bg-[#EAF5FF] p-2.5 rounded-xl border border-[#9EC8EF]/60 leading-relaxed">
-                    {activeDoc.notes}
-                  </p>
-                </div>
-
-                {/* Tags chips */}
-                <div className="space-y-1.5 pt-1.5">
-                  <span className="text-[#5E7393] uppercase text-[9px] block">Document Tags</span>
-                  <div className="flex flex-wrap gap-1.5">
-                    {activeDoc.tags.map((tag) => (
-                      <span key={tag} className="px-2 py-0.5 bg-[#EAF5FF] border border-[#9EC8EF] text-[10px] text-[#315C9F] rounded-lg">
-                        {tag}
-                      </span>
-                    ))}
-                  </div>
-                </div>
-              </div>
-
-              {/* Customer Portal */}
-              <div className="space-y-1.5 pt-1.5">
-                <span className="text-[#5E7393] uppercase text-[9px] block">Customer Portal</span>
-                <CustomerPortalControls customer={resolveCustomerByIdOrName(customersList, undefined, activeDoc.customer !== "None" ? activeDoc.customer : undefined)} />
-              </div>
-
-              {/* ACTION BUTTONS (NO DEAD BUTTONS) */}
-              <div className="grid grid-cols-2 gap-1.5 pt-2">
-                <button
-                  onClick={() => {
-                    if (activeDoc.url) {
-                      const link = document.createElement('a');
-                      link.href = activeDoc.url;
-                      link.target = "_blank";
-                      link.rel = "noopener noreferrer";
-                      document.body.appendChild(link);
-                      link.click();
-                      document.body.removeChild(link);
-                    }
-                    triggerNotification(`📂 Opened document file: ${activeDoc.name}`);
-                  }}
-                  className="px-2.5 py-2 bg-[#EAF5FF] hover:bg-[#BDDDF8] border border-[#9EC8EF] text-xs font-bold text-[#1F3557] rounded-xl flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
-                >
-                  <Eye className="w-3.5 h-3.5" />
-                  Open File
-                </button>
-                <button
-                  onClick={() => {
-                    if (activeDoc.url) {
-                      const link = document.createElement('a');
-                      link.href = activeDoc.url;
-                      link.download = activeDoc.name;
-                      document.body.appendChild(link);
-                      link.click();
-                      document.body.removeChild(link);
-                      triggerNotification(`📥 Downloading document: ${activeDoc.name}`);
-                    } else {
-                      // Create simulated plain text file download for seed data
-                      const textContent = `OwnersLOCAL Document Meta: ${JSON.stringify(activeDoc, null, 2)}`;
-                      const blob = new Blob([textContent], { type: 'text/plain' });
-                      const blobUrl = URL.createObjectURL(blob);
-                      const link = document.createElement('a');
-                      link.href = blobUrl;
-                      link.download = activeDoc.name.endsWith(".pdf") ? activeDoc.name.replace(".pdf", ".txt") : activeDoc.name + ".txt";
-                      document.body.appendChild(link);
-                      link.click();
-                      document.body.removeChild(link);
-                      URL.revokeObjectURL(blobUrl);
-                      triggerNotification(`📥 Downloading document: ${activeDoc.name}`);
-                    }
-                  }}
-                  className="px-2.5 py-2 bg-[#EAF5FF] hover:bg-[#BDDDF8] border border-[#9EC8EF] text-xs font-bold text-[#1F3557] rounded-xl flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
-                >
-                  <Download className="w-3.5 h-3.5" />
-                  Download
-                </button>
-                <button
-                  onClick={() => {
-                    setRenameName(activeDoc.name);
-                    setIsRenameModalOpen(true);
-                  }}
-                  className="px-2.5 py-2 bg-[#EAF5FF] hover:bg-[#BDDDF8] border border-[#9EC8EF] text-xs font-bold text-[#1F3557] rounded-xl flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
-                >
-                  <Edit3 className="w-3.5 h-3.5" />
-                  Rename
-                </button>
-                <button
-                  onClick={() => {
-                    setUploadName(activeDoc.name);
-                    setUploadFolder(activeDoc.folder || inferFolderForDoc(activeDoc));
-                    setUploadType(activeDoc.type);
-                    setUploadCustomer(activeDoc.customer);
-                    setUploadEmployee(activeDoc.employee);
-                    setUploadVendor(activeDoc.vendor);
-                    setUploadJob(activeDoc.job);
-                    setUploadNotes(activeDoc.notes);
-                    setUploadTags(activeDoc.tags.join(", "));
-                    setIsUploadModalOpen(true);
-                  }}
-                  className="px-2.5 py-2 bg-[#EAF5FF] hover:bg-[#BDDDF8] border border-[#9EC8EF] text-xs font-bold text-[#1F3557] rounded-xl flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
-                >
-                  <RefreshCw className="w-3.5 h-3.5" />
-                  Replace
-                </button>
-                <button
-                  onClick={() => setIsDeleteModalOpen(true)}
-                  className="px-2.5 py-2 bg-rose-50 hover:bg-rose-100 border border-rose-200 text-xs font-bold text-rose-600 rounded-xl flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
-                >
-                  <Trash2 className="w-3.5 h-3.5" />
-                  Delete
-                </button>
-                <button
-                  onClick={() => handleToggleArchive(activeDoc)}
-                  className="px-2.5 py-2 bg-[#EAF5FF] hover:bg-[#BDDDF8] border border-[#9EC8EF] text-xs font-bold text-[#1F3557] rounded-xl flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
-                >
-                  <Archive className="w-3.5 h-3.5" />
-                  {activeDoc.isArchived ? "Restore" : "Archive"}
-                </button>
-              </div>
-
-              <div className="border-t border-[#9EC8EF]/40 my-2 pt-2" />
-
-              {/* QUICK CONNECTIONS CARD */}
-              <div className="space-y-1.5 text-left">
-                <span className="text-[#5E7393] uppercase text-[9.5px] font-extrabold block">Attach To</span>
-                <div className="grid grid-cols-3 gap-1.5">
-                  <button
-                    onClick={() => {
-                      setAttachTargetType("Customer");
-                      setAttachValue(activeDoc.customer !== "None" ? activeDoc.customer : "");
-                      setIsAttachModalOpen(true);
-                    }}
-                    className="px-2 py-1.5 bg-[#EAF5FF] hover:bg-[#BDDDF8] border border-[#9EC8EF] rounded-xl text-[10px] font-bold text-[#1F3557] text-center transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
-                  >
-                    <User className="w-3 h-3" />
-                    Customer
-                  </button>
-                  <button
-                    onClick={() => {
-                      setAttachTargetType("Job");
-                      setAttachValue(activeDoc.job !== "None" ? activeDoc.job : "");
-                      setIsAttachModalOpen(true);
-                    }}
-                    className="px-2 py-1.5 bg-[#EAF5FF] hover:bg-[#BDDDF8] border border-[#9EC8EF] rounded-xl text-[10px] font-bold text-[#1F3557] text-center transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
-                  >
-                    <Briefcase className="w-3 h-3" />
-                    Job
-                  </button>
-                  <button
-                    onClick={() => {
-                      setAttachTargetType("Employee");
-                      setAttachValue(activeDoc.employee !== "None" ? activeDoc.employee : "");
-                      setIsAttachModalOpen(true);
-                    }}
-                    className="px-2 py-1.5 bg-[#EAF5FF] hover:bg-[#BDDDF8] border border-[#9EC8EF] rounded-xl text-[10px] font-bold text-[#1F3557] text-center transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
-                  >
-                    <Users className="w-3 h-3" />
-                    Employee
-                  </button>
-                </div>
-              </div>
-            </div>
-          ) : (
-            <div className="text-center py-12 text-[#5E7393] text-xs font-semibold">
-              Select a file on the table to inspect details and triggers.
-            </div>
-          )}
-        </div>
       </div>
 
       {/* SELFIESAVE ESIGN — the real editor, native in this app. No iframe,
           no external site, no popup window: SelfieSaveEditor is a genuine
           React component living in src/components/SelfieSaveEditor.tsx. */}
-      {isPDFEditorOpen && (
+      {isPDFEditorOpen && createPortal(
+        // Keyed on a React.Fragment (rather than on SelfieSaveEditor itself)
+        // -- this project has no usable React prop types for custom
+        // components' `key`, only for intrinsic/Fragment elements -- so this
+        // still forces the fresh remount described above without fighting
+        // that gap.
+        <React.Fragment key={pdfEditorSessionKey}>
         <SelfieSaveEditor
           accountEmail={loggedInUser?.email || "owner@ownerslocal.app"}
           accountName={loggedInUser?.name}
@@ -1897,14 +1960,18 @@ export const DocumentsPage: React.FC = () => {
           initialPdfBase64={pdfEditorBase64 || generatedPdfDraft?.pdfBase64 || undefined}
           autoOpenPdfPicker={pdfEditorAutoOpenPicker}
           initialDraft={generatedPdfDraft?.pdfBase64 ? null : generatedPdfDraft}
-          signerHint={generatedPdfDraft ? { customerName: generatedPdfDraft.customerName, representativeName: generatedPdfDraft.representativeName } : signatureCaptureHint}
-          customerPhone={generatedPdfDraft?.customerPhone || pendingSignatureCapture?.customerPhone}
-          customerEmail={generatedPdfDraft?.customerEmail || pendingSignatureCapture?.customerEmail}
-          autoCaptureSignatures={generatedPdfDraft?.autoCaptureSignatures}
+          signerHint={generatedPdfDraft ? { customerName: generatedPdfDraft.customerName, representativeName: generatedPdfDraft.representativeName } : (pdfEditorContact?.customerName ? { customerName: pdfEditorContact.customerName } : signatureCaptureHint)}
+          customerPhone={generatedPdfDraft?.customerPhone || pendingSignatureCapture?.customerPhone || pdfEditorContact?.phone}
+          customerEmail={generatedPdfDraft?.customerEmail || pendingSignatureCapture?.customerEmail || pdfEditorContact?.email}
+          autoCaptureSignatures={Boolean(pendingSignatureCapture || generatedPdfDraft?.autoCaptureSignatures)}
+          autoOpenSignSetup={generatedPdfDraft?.autoOpenSignSetup}
+          signatureOnlyMode={pdfEditorSignatureOnly || Boolean(generatedPdfDraft?.signatureOnlyMode || pendingSignatureCapture || (generatedPdfDraft?.autoCaptureSignatures && !generatedPdfDraft?.autoOpenSignSetup))}
           businessProfile={businessProfile}
           onClose={closePDFEditor}
           onSave={handleSavePDFEditor}
         />
+        </React.Fragment>,
+        document.body
       )}
 
       {/* GOOGLE DRIVE SYNC IMPORT MODAL */}
@@ -2035,8 +2102,10 @@ export const DocumentsPage: React.FC = () => {
                 // SelfieSave manages its own canvas — just open it with the doc name
                 setPdfEditorDocId(null);
                 setPdfEditorDocName(photoToPdfName);
+                setPdfEditorBase64("");
                 setPdfEditorAutoOpenPicker(false);
                 setIsPhotoToPDFModalOpen(false);
+                setPdfEditorSessionKey(k => k + 1);
                 setIsPDFEditorOpen(true);
                 triggerNotification("📸 Photo compiling session complete! Opening compiled documents inside Editor.");
               }}
@@ -2045,6 +2114,130 @@ export const DocumentsPage: React.FC = () => {
               <Sparkles className="w-4 h-4 text-amber-300" />
               Compile into PDF & Edit
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* ROW DOCUMENT ACTION MENU */}
+      {actionMenuDoc && actionMenuPosition && (
+        <div className="fixed inset-0 z-50" onClick={() => { setActionMenuDoc(null); setActionMenuPosition(null); }}>
+          <div
+            className="absolute w-[250px] bg-white text-[#1F3557] border border-[#9EC8EF] rounded-xl shadow-xl p-1.5 text-left"
+            style={{ top: actionMenuPosition.top, left: actionMenuPosition.left }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-2.5 py-2 border-b border-[#9EC8EF]/50">
+              <p className="text-[10px] font-black uppercase tracking-wider truncate">{actionMenuDoc.name}</p>
+            </div>
+            {hasManagePermission && (
+              <button
+                onClick={() => {
+                  const doc = actionMenuDoc;
+                  setActionMenuDoc(null);
+                  setActionMenuPosition(null);
+                  handleOpenPDFEditor(doc, !(doc as any)?.pdfBase64);
+                }}
+                className="w-full px-2.5 py-2 hover:bg-[#EAF5FF] rounded-lg flex items-center gap-2 text-[11px] font-black uppercase"
+              >
+                <Edit3 className="w-3.5 h-3.5 text-[#315C9F]" />
+                Edit
+              </button>
+            )}
+            <button
+              onClick={() => openSendModal(actionMenuDoc)}
+              className="w-full px-2.5 py-2 hover:bg-[#EAF5FF] rounded-lg flex items-center gap-2 text-[11px] font-black uppercase"
+            >
+              <Send className="w-3.5 h-3.5 text-emerald-600" />
+              Send
+            </button>
+            <button
+              onClick={async () => {
+                const doc = actionMenuDoc;
+                setActionMenuDoc(null);
+                setActionMenuPosition(null);
+                // "Send for Signing" sends the live signer URL, not just a
+                // PDF attachment. A plain attachment has no way to submit a
+                // signature back into OwnersLOCAL.
+                await shareDocumentSigningLink(doc);
+              }}
+              className="w-full px-2.5 py-2 hover:bg-[#EAF5FF] rounded-lg flex items-center gap-2 text-[11px] font-black uppercase"
+            >
+              <FileSignature className="w-3.5 h-3.5 text-amber-600" />
+              Send for Signing
+            </button>
+            {hasManagePermission && (
+              <button
+                onClick={() => openCollectSignatures(actionMenuDoc)}
+                className="w-full px-2.5 py-2 hover:bg-[#EAF5FF] rounded-lg flex items-center gap-2 text-[11px] font-black uppercase"
+              >
+                <Edit3 className="w-3.5 h-3.5 text-[#315C9F]" />
+                Collect Signatures
+              </button>
+            )}
+            <details className="group">
+              <summary className="list-none w-full px-2.5 py-2 hover:bg-[#EAF5FF] rounded-lg flex items-center justify-between gap-2 text-[11px] font-black uppercase cursor-pointer">
+                <span className="flex items-center gap-2">
+                  <Link className="w-3.5 h-3.5 text-[#315C9F]" />
+                  Attach To
+                </span>
+                <ChevronDown className="w-3.5 h-3.5" />
+              </summary>
+              <div className="pl-4 pr-1 pb-1 grid gap-1">
+                <button
+                  onClick={() => {
+                    setAttachTargetType("Customer");
+                    setAttachValue(actionMenuDoc.customer !== "None" ? actionMenuDoc.customer : "");
+                    setActionMenuDoc(null);
+                    setActionMenuPosition(null);
+                    setIsAttachModalOpen(true);
+                  }}
+                  className="w-full px-2.5 py-1.5 hover:bg-[#EAF5FF] rounded-lg flex items-center gap-2 text-[10px] font-bold uppercase"
+                >
+                  <User className="w-3 h-3" />
+                  Customer
+                </button>
+                <button
+                  onClick={() => {
+                    setAttachTargetType("Job");
+                    setAttachValue(actionMenuDoc.job !== "None" ? actionMenuDoc.job : "");
+                    setActionMenuDoc(null);
+                    setActionMenuPosition(null);
+                    setIsAttachModalOpen(true);
+                  }}
+                  className="w-full px-2.5 py-1.5 hover:bg-[#EAF5FF] rounded-lg flex items-center gap-2 text-[10px] font-bold uppercase"
+                >
+                  <Briefcase className="w-3 h-3" />
+                  Job
+                </button>
+                <button
+                  onClick={() => {
+                    setAttachTargetType("Employee");
+                    setAttachValue(actionMenuDoc.employee !== "None" ? actionMenuDoc.employee : "");
+                    setActionMenuDoc(null);
+                    setActionMenuPosition(null);
+                    setIsAttachModalOpen(true);
+                  }}
+                  className="w-full px-2.5 py-1.5 hover:bg-[#EAF5FF] rounded-lg flex items-center gap-2 text-[10px] font-bold uppercase"
+                >
+                  <Users className="w-3 h-3" />
+                  Employee
+                </button>
+              </div>
+            </details>
+            {hasManagePermission && (
+              <button
+                onClick={() => {
+                  setSelectedDocId(actionMenuDoc.id);
+                  setActionMenuDoc(null);
+                  setActionMenuPosition(null);
+                  setIsDeleteModalOpen(true);
+                }}
+                className="w-full px-2.5 py-2 hover:bg-rose-50 text-rose-600 rounded-lg flex items-center gap-2 text-[11px] font-black uppercase"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                Delete
+              </button>
+            )}
           </div>
         </div>
       )}
@@ -2088,11 +2281,13 @@ export const DocumentsPage: React.FC = () => {
               {/* Share Channels */}
               <div className="grid grid-cols-2 gap-2.5">
                 <button
-                  onClick={() => {
+                  onClick={async () => {
                     const [, name = "", email = ""] = shareRecipient.split("|");
-                    if (!email) return triggerNotification("Choose a contact with an email address first.");
-                    window.location.href = `mailto:${encodeURIComponent(email)}?subject=${encodeURIComponent(shareDocItem.name)}&body=${encodeURIComponent(`Hi ${name},\n\nPlease review the attached OwnersLOCAL document: ${shareDocItem.name}`)}`;
-                    setDocuments(prev => prev.map(d => d.id === shareDocItem.id ? { ...d, folder: "eSign", status: "Sent" } : d));
+                    const shared = await shareDocumentWithAttachment(shareDocItem, "email");
+                    if (!shared) {
+                      window.location.href = `mailto:${encodeURIComponent(email)}?subject=${encodeURIComponent(shareDocItem.name)}&body=${encodeURIComponent(`Hi ${name},\n\nPlease review the OwnersLOCAL document attached/downloaded from this device: ${shareDocItem.name}`)}`;
+                      markDocumentSent(shareDocItem);
+                    }
                     setIsMainShareModalOpen(false);
                     setShareDocItem(null);
                   }}
@@ -2103,11 +2298,15 @@ export const DocumentsPage: React.FC = () => {
                 </button>
 
                 <button
-                  onClick={() => {
-                    const [, name = "", , phone = ""] = shareRecipient.split("|");
-                    if (!phone) return triggerNotification("Choose a contact with a mobile number first.");
-                    window.location.href = `sms:${phone}?body=${encodeURIComponent(`Hi ${name}, please review ${shareDocItem.name} from OwnersLOCAL.`)}`;
-                    setDocuments(prev => prev.map(d => d.id === shareDocItem.id ? { ...d, folder: "eSign", status: "Sent" } : d));
+                  onClick={async () => {
+                    const shared = await shareDocumentWithAttachment(shareDocItem, "text");
+                    if (!shared) {
+                      // Do not launch a body-only sms: URI here. Android cannot
+                      // attach a downloaded file to that URI, which previously
+                      // made the message claim an attachment existed when it did
+                      // not. The user can attach the downloaded fallback from
+                      // Downloads if native file sharing is unavailable.
+                    }
                     setIsMainShareModalOpen(false);
                     setShareDocItem(null);
                   }}
@@ -2134,20 +2333,11 @@ export const DocumentsPage: React.FC = () => {
                 </button>
 
                 <button
-                  onClick={() => {
-                    if (shareDocItem.url) {
-                      const link = document.createElement("a");
-                      link.href = shareDocItem.url;
-                      link.download = shareDocItem.name;
-                      document.body.appendChild(link);
-                      link.click();
-                      document.body.removeChild(link);
-                      triggerNotification(`📥 Downloading: ${shareDocItem.name}`);
-                      if (logOperationalEvent) {
-                        logOperationalEvent("Document Downloaded", shareDocItem.name, "📥");
-                      }
-                    } else {
-                      triggerNotification("No file is attached to this document record yet.");
+                  onClick={async () => {
+                    await downloadDocumentFile(shareDocItem);
+                    triggerNotification(`📥 Downloading: ${shareDocItem.name}`);
+                    if (logOperationalEvent) {
+                      logOperationalEvent("Document Downloaded", shareDocItem.name, "📥");
                     }
                     setIsMainShareModalOpen(false);
                     setShareDocItem(null);
@@ -2172,22 +2362,10 @@ export const DocumentsPage: React.FC = () => {
 
                 <button
                   onClick={async () => {
-                    const docName = shareDocItem.name;
+                    const doc = shareDocItem;
                     setIsMainShareModalOpen(false);
                     setShareDocItem(null);
-                    if (navigator.share) {
-                      try {
-                        await navigator.share({
-                          title: docName,
-                          text: `Document: ${docName}`,
-                          url: window.location.href
-                        });
-                      } catch {
-                        // User cancelled the native share sheet — no error to surface.
-                      }
-                    } else {
-                      triggerNotification("Native sharing isn't supported by this browser.");
-                    }
+                    await shareDocumentWithAttachment(doc, "share");
                   }}
                   className="p-3 bg-white hover:bg-[#EAF5FF] border border-[#9EC8EF] rounded-2xl flex flex-col items-center gap-1 text-center transition-all cursor-pointer shadow-sm"
                 >
@@ -2446,7 +2624,7 @@ export const DocumentsPage: React.FC = () => {
             <div className="flex items-center justify-between border-b border-white/10 pb-3 mb-4">
               <div className="flex items-center gap-2">
                 <Sparkles className="w-5 h-5 text-blue-400 animate-pulse" />
-                <h3 className="text-sm font-black text-white uppercase tracking-wider">Snapshot AI Scanner</h3>
+                <h3 className="text-sm font-black text-white uppercase tracking-wider">Scan Document</h3>
               </div>
               <button onClick={() => { setIsSnapshotModalOpen(false); triggerNotification("Document processing canceled."); }} className="text-slate-400 hover:text-white font-bold text-sm">✕</button>
             </div>

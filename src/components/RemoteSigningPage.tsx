@@ -21,6 +21,8 @@ export default function RemoteSigningPage({ token }: { token: string }) {
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState("");
   const [done, setDone] = useState(false);
+  const [customerInviteCode, setCustomerInviteCode] = useState("");
+  const [signedBusinessName, setSignedBusinessName] = useState("");
 
   useEffect(() => {
     let cancelled = false;
@@ -55,6 +57,8 @@ export default function RemoteSigningPage({ token }: { token: string }) {
     const result = await submitRemoteSignature(token, { signerName: signerName.trim(), method, signatureImage: method === "drawn" ? signatureImage : undefined, consent });
     setSubmitting(false);
     if (!result.ok) { setSubmitError(result.error || "That didn't go through -- try again."); return; }
+    setCustomerInviteCode(result.customerInviteCode || "");
+    setSignedBusinessName(result.businessName || info?.businessName || "");
     setDone(true);
   };
 
@@ -82,10 +86,27 @@ export default function RemoteSigningPage({ token }: { token: string }) {
         )}
 
         {!loading && info?.ok && (info.alreadySigned || done) && (
-          <div className="flex flex-col items-center gap-3 py-10 text-center">
+          <div className="flex flex-col items-center gap-3 py-8 text-center">
             <CheckCircle2 className="w-12 h-12 text-emerald-500" />
             <h1 className="text-lg font-black text-[#1F3557]">Signed and sent!</h1>
-            <p className="text-sm text-[#5E7393]">{info.businessName || "The business"} has been notified. You're all set -- you can close this page.</p>
+            <p className="text-sm text-[#5E7393]">{signedBusinessName || info.businessName || "The business"} has your signed document and will take it from here.</p>
+
+            {done && customerInviteCode && (
+              <div className="mt-4 w-full rounded-2xl border border-[#9EC8EF] bg-[#EAF5FF] p-4 text-left">
+                <p className="text-sm font-black text-[#1F3557]">One account. Every service provider.</p>
+                <p className="mt-1 text-xs font-semibold leading-relaxed text-[#5E7393]">
+                  Keep this project — and future Owner'sLOCAL jobs — together in one free account. Track your jobs, appointments, estimates, invoices, documents and messages from every connected service provider.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => { window.location.href = `/?joinCode=${encodeURIComponent(customerInviteCode)}&customer=signup`; }}
+                  className="mt-3 w-full rounded-xl bg-[#315C9F] px-4 py-3 text-xs font-black uppercase tracking-wide text-white hover:bg-[#1F3557]"
+                >
+                  Create My Free Account
+                </button>
+                <p className="mt-2 text-center text-[10px] font-semibold text-[#5E7393]">No account is required to sign documents.</p>
+              </div>
+            )}
           </div>
         )}
 

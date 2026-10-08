@@ -104,10 +104,10 @@ export const SnapshotsPage: React.FC = () => {
           <div>
             <h2 className="text-xl font-display font-extrabold text-[#1F3557] tracking-tight uppercase flex items-center gap-2">
               <Camera className="w-5 h-5 text-[#315C9F]" />
-              Snapshot Archives
+              Saved Pages
             </h2>
             <p className="text-xs text-[#5E7393] font-sans font-semibold mt-1">
-              Virtual vault of active page states, operational counts, and automated AI backups
+              View pages and information you previously saved.
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -147,26 +147,26 @@ export const SnapshotsPage: React.FC = () => {
       {/* STATS OVERVIEW */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
         <div className="bg-[#C7E3FA]/60 p-4.5 rounded-[22px] border border-[#9EC8EF]/60 shadow-sm">
-          <p className="text-[10px] font-black uppercase text-[#5E7393] tracking-wider">Total Snaps</p>
+          <p className="text-[10px] font-black uppercase text-[#5E7393] tracking-wider">Saved Pages</p>
           <p className="text-xl font-black text-[#1F3557] font-mono mt-1">{snapshots.length}</p>
-          <span className="text-[9px] text-[#22C55E] font-bold">100% cloud stored</span>
+          <span className="text-[9px] text-[#22C55E] font-bold">Saved online</span>
         </div>
         <div className="bg-[#C7E3FA]/60 p-4.5 rounded-[22px] border border-[#9EC8EF]/60 shadow-sm">
-          <p className="text-[10px] font-black uppercase text-[#5E7393] tracking-wider">Folders Map</p>
+          <p className="text-[10px] font-black uppercase text-[#5E7393] tracking-wider">Folders</p>
           <p className="text-xl font-black text-[#1F3557] font-mono mt-1">3 Directories</p>
           <span className="text-[9px] text-[#5E7393] font-bold">Dashboard, Customers, Leads</span>
         </div>
         <div className="bg-[#C7E3FA]/60 p-4.5 rounded-[22px] border border-[#9EC8EF]/60 shadow-sm">
-          <p className="text-[10px] font-black uppercase text-[#5E7393] tracking-wider">Archives Size</p>
+          <p className="text-[10px] font-black uppercase text-[#5E7393] tracking-wider">Storage Used</p>
           <p className="text-xl font-black text-[#1F3557] font-mono mt-1">
             {(snapshots.length * 480).toLocaleString()} KB
           </p>
           <span className="text-[9px] text-[#5E7393] font-bold">Approx. 480KB per snap</span>
         </div>
         <div className="bg-[#C7E3FA]/60 p-4.5 rounded-[22px] border border-[#9EC8EF]/60 shadow-sm">
-          <p className="text-[10px] font-black uppercase text-[#5E7393] tracking-wider">Backup Status</p>
-          <p className="text-xl font-black text-[#22C55E] font-display mt-1 uppercase tracking-tight">Active</p>
-          <span className="text-[9px] text-[#5E7393] font-bold">Automatic local index synced</span>
+          <p className="text-[10px] font-black uppercase text-[#5E7393] tracking-wider">Save Status</p>
+          <p className="text-xl font-black text-[#22C55E] font-display mt-1 uppercase tracking-tight">Up to Date</p>
+          <span className="text-[9px] text-[#5E7393] font-bold">Saved pages are up to date</span>
         </div>
       </div>
 
@@ -227,9 +227,9 @@ export const SnapshotsPage: React.FC = () => {
         {filteredSnapshots.length === 0 ? (
           <div className="bg-[#EAF5FF] p-12 rounded-2xl border border-dashed border-[#9EC8EF] text-center flex flex-col items-center justify-center">
             <Folder className="w-10 h-10 text-[#9EC8EF] mb-3 fill-blue-50/50" />
-            <h4 className="text-xs font-black text-[#1F3557] uppercase tracking-wider">Empty Directory Node</h4>
+            <h4 className="text-xs font-black text-[#1F3557] uppercase tracking-wider">No Saved Pages</h4>
             <p className="text-[11px] text-[#5E7393] mt-1 max-w-xs font-medium">
-              No page snapshots found in this partition. Click the "Snapshot" camera button on any active screen to record state.
+              No pages have been saved. Select Save This Page from any screen to add one here.
             </p>
           </div>
         ) : (

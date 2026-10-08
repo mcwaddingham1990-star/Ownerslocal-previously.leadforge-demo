@@ -8,6 +8,7 @@ import type { Invoice, InvoiceLineItem } from "../types/accounting";
 import type { WorkOrder, Estimate } from "../types/domain";
 import { buildTextDocumentPdf } from "../lib/pdfExport";
 import { generateEstimateNumber, formatEstimateDate, estimateExpirationDate } from "../lib/estimateDefaults";
+import { calculateEstimatePricing } from "../lib/estimatePricing";
 
 const uid = (prefix: string) => `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
 
@@ -241,7 +242,17 @@ export const PriceBookModal: React.FC<PriceBookModalProps> = ({ isOpen, onClose,
         setEstimates(prev => [newEstimate, ...prev]);
         triggerNotification(`New draft estimate created with ${addToModel.name}. Finish it in Estimates.`);
       } else {
-        setEstimates(prev => prev.map(est => est.id === addToTargetId ? { ...est, lineItems: [...(est.lineItems || []), estimateLine], amount: est.amount + lineTotal } : est));
+        setEstimates(prev => prev.map(est => {
+          if (est.id !== addToTargetId) return est;
+          const existingLines = est.lineItems?.length
+            ? est.lineItems
+            : est.amount > 0
+              ? [{ id: uid("li"), description: "Existing quoted amount", quantity: 1, unitPrice: est.amount }]
+              : [];
+          const nextLineItems = [...existingLines, estimateLine];
+          const pricing = calculateEstimatePricing(nextLineItems, est.discountPercent, est.taxRate);
+          return { ...est, lineItems: nextLineItems, amount: pricing.total };
+        }));
         triggerNotification(`${addToModel.name} added to estimate.`);
       }
     } else if (addToDocType === "job_tracking") {

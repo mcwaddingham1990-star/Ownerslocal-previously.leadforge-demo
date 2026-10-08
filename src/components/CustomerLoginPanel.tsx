@@ -1,6 +1,6 @@
 import React, { useState } from "react";
-import { signInWithEmailAndPassword, createUserWithEmailAndPassword } from "firebase/auth";
-import { doc, setDoc, serverTimestamp } from "firebase/firestore";
+import { signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut } from "firebase/auth";
+import { doc, getDoc, setDoc, serverTimestamp } from "firebase/firestore";
 import { User, Lock, Mail, ArrowLeft, Loader2 } from "lucide-react";
 import { auth, db } from "../firebase";
 
@@ -15,7 +15,9 @@ import { auth, db } from "../firebase";
  * that decides who's logged in as what.
  */
 export const CustomerLoginPanel: React.FC<{ onSwitchToBusiness: () => void }> = ({ onSwitchToBusiness }) => {
-  const [mode, setMode] = useState<"signin" | "signup">("signin");
+  const [mode, setMode] = useState<"signin" | "signup">(() => (
+    new URLSearchParams(window.location.search).get("customer") === "signup" ? "signup" : "signin"
+  ));
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -34,7 +36,7 @@ export const CustomerLoginPanel: React.FC<{ onSwitchToBusiness: () => void }> = 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     const cleanEmail = email.trim().toLowerCase();
-    const cleanPassword = password.trim();
+    const cleanPassword = password;
     if (!cleanEmail || !cleanPassword) {
       setError("Enter your email and password.");
       return;
@@ -45,6 +47,7 @@ export const CustomerLoginPanel: React.FC<{ onSwitchToBusiness: () => void }> = 
     }
     setError("");
     setBusy(true);
+    sessionStorage.setItem("ownerslocal_customer_auth_intent", "1");
     try {
       if (mode === "signup") {
         const credential = await createUserWithEmailAndPassword(auth, cleanEmail, cleanPassword);
@@ -55,20 +58,55 @@ export const CustomerLoginPanel: React.FC<{ onSwitchToBusiness: () => void }> = 
           createdAt: new Date().toISOString(),
           updatedAt: serverTimestamp()
         });
+
+        // createUserWithEmailAndPassword fires Firebase auth before the
+        // customer_accounts document write can finish. Reload only after that
+        // document exists so App.tsx can classify this uid as Customer on the
+        // very first stable render instead of ever treating it as an Owner.
+        const params = new URLSearchParams(window.location.search);
+        params.set("customer", "account");
+        const query = params.toString();
+        window.location.replace(`${window.location.pathname}${query ? `?${query}` : ""}${window.location.hash}`);
+        return;
       } else {
-        await signInWithEmailAndPassword(auth, cleanEmail, cleanPassword);
+        const credential = await signInWithEmailAndPassword(auth, cleanEmail, cleanPassword);
+        const customerSnap = await getDoc(doc(db, "customer_accounts", credential.user.uid));
+        if (!customerSnap.exists()) {
+          await signOut(auth);
+          sessionStorage.removeItem("ownerslocal_customer_auth_intent");
+          setError("That login is a business account, not a customer account. Use Business Login instead.");
+          setBusy(false);
+          return;
+        }
       }
-      // No further action needed -- App.tsx's onAuthStateChanged listener
-      // picks up the new session and renders CustomerAppShell.
+      // Existing customer sign-in is picked up by App.tsx's auth listener.
     } catch (err) {
+      sessionStorage.removeItem("ownerslocal_customer_auth_intent");
       setError(friendlyError(err));
       setBusy(false);
     }
   };
 
+  const switchToBusiness = () => {
+    sessionStorage.removeItem("ownerslocal_customer_auth_intent");
+    const params = new URLSearchParams(window.location.search);
+    params.delete("customer");
+    params.delete("joinCode");
+    const query = params.toString();
+    window.history.replaceState({}, "", `${window.location.pathname}${query ? `?${query}` : ""}${window.location.hash}`);
+
+    // If a business account was already authenticated when this customer
+    // screen opened, reload once so the normal auth listener restores it.
+    if (auth.currentUser) {
+      window.location.reload();
+      return;
+    }
+    onSwitchToBusiness();
+  };
+
   return (
     <div className="w-full max-w-sm mx-auto rounded-3xl border border-[#9EC8EF] bg-white/95 shadow-2xl p-6 sm:p-8">
-      <button type="button" onClick={onSwitchToBusiness} className="flex items-center gap-1.5 text-xs font-bold text-[#5E7393] hover:text-[#1F3557] mb-5">
+      <button type="button" onClick={switchToBusiness} className="flex items-center gap-1.5 text-xs font-bold text-[#5E7393] hover:text-[#1F3557] mb-5">
         <ArrowLeft className="w-3.5 h-3.5" /> Business Login
       </button>
 

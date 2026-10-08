@@ -1,37 +1,36 @@
-import React, { useEffect, useMemo, useState } from "react";
-import { doc, onSnapshot, setDoc } from "firebase/firestore";
-import { db } from "../firebase";
+import React, { useMemo } from "react";
 import { useAuth } from "../context/AuthContext";
-import { useNavTelemetry } from "../context/NavTelemetryContext";
 import { useDomainData } from "../context/DomainDataContext";
 import { useFirestoreCollection } from "../hooks/useFirestoreCollection";
 import type { MissedCallEvent } from "../types/domain";
-import { PhoneMissed, PhoneIncoming, PhoneOutgoing, Smartphone, Info, MessageCircle, UserPlus } from "lucide-react";
+import { PhoneMissed, PhoneIncoming, PhoneOutgoing, Download, Smartphone, MessageCircle, UserPlus, Apple } from "lucide-react";
 
-const DEFAULT_MESSAGE = "Sorry we missed your call! We'll get back to you shortly.";
+// Served from public/downloads (copied there from missed-call-text-back-app's build).
+const APK_URL = "/downloads/MissedCallTextBack.apk";
+const APK_VERSION = "3.1";
 
-// Mirrors KnownCallingApps.ENTRIES in the companion Android app exactly (label + package name),
-// so a package name checked here matches what that app already knows how to watch for.
-const KNOWN_APPS: { label: string; packageName: string }[] = [
-  { label: "Google Voice", packageName: "com.google.android.apps.googlevoice" },
-  { label: "TextNow", packageName: "com.enflick.android.TextNow" },
-  { label: "WhatsApp", packageName: "com.whatsapp" },
-  { label: "Telegram", packageName: "org.telegram.messenger" },
-  { label: "Skype", packageName: "com.skype.raider" },
-  { label: "Facebook Messenger", packageName: "com.facebook.orca" },
-  { label: "Viber", packageName: "com.viber.voip" }
+const isIOS = () =>
+  typeof navigator !== "undefined" &&
+  (/iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1));
+
+const STEPS = [
+  "Download and open the file on your Android phone. If asked, allow your browser to install apps.",
+  "Open Missed Call Text-Back and sign in with this same OwnersLOCAL login.",
+  "Tap Allow on each item in the app's Setup list.",
+  "Write your auto-reply message and pick any calling apps you use (Google Voice, TextNow…) right in the app.",
+  "Long-press your home screen → Widgets → Missed Call Text-Back to add the pulse widget. Tap it for your notifications, missed calls & texts, and team messages.",
 ];
 
+/**
+ * Missed Call Text-Back is a standalone Android app: every setting lives in
+ * that app, which runs on its own in the background. This page only offers
+ * the download and shows the calls the app has logged.
+ */
 export const MissedCallTextBackPage: React.FC = () => {
-  const { loggedInUser, simulatedRole, businessId } = useAuth();
-  const { triggerNotification } = useNavTelemetry();
+  const { businessId } = useAuth();
   const { customers, leads } = useDomainData();
-  const activeRole = simulatedRole || loggedInUser?.role || "Owner";
-  const isAuthorized = activeRole === "Owner" || activeRole === "Office Manager" || activeRole === "Manager" || activeRole === "General Manager";
+  const onIPhone = isIOS();
 
-  // Read-only: the companion Android app writes here directly (see
-  // CrmLinker.kt) whether or not the browser is even open -- this page just
-  // displays that real log, it never writes to this collection itself.
   const [callEvents] = useFirestoreCollection<MissedCallEvent>("missed_call_events", businessId);
   const sortedCallEvents = useMemo(
     () => [...callEvents].sort((a, b) => b.callTimestamp.localeCompare(a.callTimestamp)),
@@ -50,96 +49,6 @@ export const MissedCallTextBackPage: React.FC = () => {
     return "No match found";
   };
 
-  const [isLoading, setIsLoading] = useState(true);
-  const [isSaving, setIsSaving] = useState(false);
-  const [enabled, setEnabled] = useState(true);
-  const [messageTemplate, setMessageTemplate] = useState(DEFAULT_MESSAGE);
-  const [watchedKnownApps, setWatchedKnownApps] = useState<Set<string>>(new Set());
-  const [customPackages, setCustomPackages] = useState("");
-
-  // A one-time getDoc() here previously meant this screen's local state
-  // could genuinely go stale relative to what's actually saved (any
-  // transient read hiccup silently fell back to the defaults below with no
-  // error shown, which reads exactly like "it says Saved but nothing
-  // actually stuck"). A live onSnapshot listener -- the same pattern every
-  // other Firestore-backed settings page in this app already uses via
-  // useFirestoreCollection -- always reflects the real current document,
-  // including this tab's own write the instant it lands, and surfaces a
-  // real error instead of silently keeping whatever was on screen.
-  useEffect(() => {
-    if (!businessId) { setIsLoading(false); return; }
-    setIsLoading(true);
-    const unsubscribe = onSnapshot(
-      doc(db, "missed_call_settings", businessId),
-      snap => {
-        if (snap.exists()) {
-          const data = snap.data();
-          if (typeof data.enabled === "boolean") setEnabled(data.enabled);
-          if (typeof data.messageTemplate === "string" && data.messageTemplate) setMessageTemplate(data.messageTemplate);
-          const watchedPackages: string[] = Array.isArray(data.watchedPackages) ? data.watchedPackages : [];
-          const knownPackageNames = new Set(KNOWN_APPS.map((a) => a.packageName));
-          setWatchedKnownApps(new Set(watchedPackages.filter((p) => knownPackageNames.has(p))));
-          setCustomPackages(watchedPackages.filter((p) => !knownPackageNames.has(p)).join(", "));
-        }
-        setIsLoading(false);
-      },
-      err => {
-        console.error("Error loading missed-call settings:", err);
-        triggerNotification(`Couldn't load your saved settings: ${err.message}`);
-        setIsLoading(false);
-      }
-    );
-    return unsubscribe;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [businessId]);
-
-  const toggleKnownApp = (packageName: string) => {
-    setWatchedKnownApps((prev) => {
-      const next = new Set(prev);
-      if (next.has(packageName)) next.delete(packageName);
-      else next.add(packageName);
-      return next;
-    });
-  };
-
-  const handleSave = async () => {
-    if (!businessId) {
-      triggerNotification("Missing business account — please sign in again.");
-      return;
-    }
-    if (!isAuthorized) {
-      triggerNotification("🚫 Only Owners and Managers can change these settings.");
-      return;
-    }
-    const watchedPackages = [
-      ...Array.from(watchedKnownApps),
-      ...customPackages.split(",").map((p) => p.trim()).filter(Boolean)
-    ];
-    setIsSaving(true);
-    try {
-      await setDoc(
-        doc(db, "missed_call_settings", businessId),
-        { enabled, messageTemplate: messageTemplate || DEFAULT_MESSAGE, watchedPackages },
-        { merge: true }
-      );
-      triggerNotification("💾 Saved. The companion Android app will pick this up next time it syncs.");
-    } catch (err) {
-      console.error("Error saving missed-call settings:", err);
-      const reason = err instanceof Error ? err.message : "unknown error";
-      triggerNotification(`Couldn't save settings: ${reason}`);
-    } finally {
-      setIsSaving(false);
-    }
-  };
-
-  if (isLoading) {
-    return (
-      <div className="bg-[#C7E3FB] rounded-3xl p-6 border border-[#A9CDEE] shadow-sm text-left animate-fade-in">
-        <p className="text-xs text-slate-500 font-sans font-semibold">Loading…</p>
-      </div>
-    );
-  }
-
   return (
     <div className="bg-[#C7E3FB] rounded-3xl p-6 border border-[#A9CDEE] shadow-sm space-y-6 animate-fade-in text-left">
       <div className="bg-[#E3F3FF] p-6 rounded-2xl border border-[#A9CDEE] flex items-center gap-2.5">
@@ -151,97 +60,46 @@ export const MissedCallTextBackPage: React.FC = () => {
             Missed Call Text-Back
           </h1>
           <p className="text-xs text-slate-500 font-sans font-medium">
-            Configure the auto-reply your companion Android app sends when you miss a call.
+            Texts people back automatically when you miss their call. Android app.
           </p>
         </div>
       </div>
 
-      <div className="bg-[#E3F3FF] p-4 rounded-2xl border border-[#A9CDEE] flex items-start gap-2.5">
-        <Info className="h-4 w-4 text-[#315C9F] mt-0.5 flex-shrink-0" />
-        <p className="text-[11px] text-slate-600 font-sans leading-relaxed">
-          Detecting a missed call and sending the text happens on your phone, in the separate{" "}
-          <strong>Missed Call Text-Back</strong> Android app installed there — it reads these
-          settings when you sign in with this same account (and keeps working in the background
-          even after you close the app or lock the phone). Nothing here works without that app
-          installed and its phone/SMS permissions granted. Every call it sees and every auto-reply
-          it sends is logged in real time to the Call Log below and to that customer's Call &amp;
-          Text History on their Customer Card.
-        </p>
-      </div>
-
-      {!isAuthorized && (
-        <div className="bg-amber-50 border border-amber-200 text-amber-700 text-xs font-sans font-semibold rounded-xl p-3">
-          You can view these settings, but only an Owner or Manager can change them.
-        </div>
-      )}
-
-      <div className="bg-[#E3F3FF] p-4.5 rounded-2xl border border-[#A9CDEE] space-y-4">
-        <label className="flex items-center gap-2.5 cursor-pointer w-fit">
-          <input
-            type="checkbox"
-            checked={enabled}
-            disabled={!isAuthorized}
-            onChange={(e) => setEnabled(e.target.checked)}
-            className="h-4 w-4 rounded border-[#A9CDEE] text-[#315C9F]"
-          />
-          <span className="text-xs font-bold text-slate-800 font-sans">
-            Enable auto text-back on missed calls
-          </span>
-        </label>
-
-        <div>
-          <label className="block text-[10px] font-bold uppercase text-slate-500 mb-1">
-            Message to send
-          </label>
-          <textarea
-            value={messageTemplate}
-            disabled={!isAuthorized}
-            onChange={(e) => setMessageTemplate(e.target.value)}
-            rows={3}
-            className="w-full px-3 py-2 bg-white border border-[#A9CDEE] rounded-xl text-xs font-sans disabled:opacity-60"
-          />
-        </div>
-      </div>
-
-      <div className="bg-[#E3F3FF] p-4.5 rounded-2xl border border-[#A9CDEE] space-y-3">
+      <div className="bg-[#E3F3FF] p-5 rounded-2xl border border-[#A9CDEE] space-y-4">
         <div className="flex items-center gap-2">
           <Smartphone className="h-4 w-4 text-[#315C9F]" />
-          <h3 className="text-xs font-extrabold text-[#342D7E] uppercase tracking-wider">
-            Also catch missed calls from these apps
-          </h3>
+          <h3 className="text-xs font-extrabold text-[#342D7E] uppercase tracking-wider">Download for Android</h3>
         </div>
-        <p className="text-[11px] text-slate-500 font-sans leading-relaxed">
-          TextNow, Google Voice, WhatsApp, and similar apps route calls entirely inside
-          themselves, so the phone app catches them by reading that app's own missed-call
-          notification. Only works when that notification actually contains a phone number.
-        </p>
-        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-          {KNOWN_APPS.map((app) => (
-            <label key={app.packageName} className="flex items-center gap-2 cursor-pointer text-xs font-sans text-slate-700">
-              <input
-                type="checkbox"
-                checked={watchedKnownApps.has(app.packageName)}
-                disabled={!isAuthorized}
-                onChange={() => toggleKnownApp(app.packageName)}
-                className="h-4 w-4 rounded border-[#A9CDEE] text-[#315C9F]"
-              />
-              {app.label}
-            </label>
+
+        {onIPhone && (
+          <div className="flex items-start gap-2 bg-amber-50 border border-amber-200 text-amber-800 rounded-xl p-3">
+            <Apple className="h-4 w-4 mt-0.5 shrink-0" />
+            <p className="text-[11px] font-sans leading-relaxed">
+              This app is Android only. Apple doesn't let iPhone apps see missed calls or send texts on their own,
+              including calls through Google Voice or TextNow. Open this page on an Android phone to install it.
+            </p>
+          </div>
+        )}
+
+        <a
+          href={APK_URL}
+          download="MissedCallTextBack.apk"
+          className="flex items-center justify-center gap-2 w-full sm:w-auto sm:inline-flex px-5 py-3 bg-[#315C9F] hover:bg-[#254A84] text-white rounded-xl text-sm font-bold font-sans shadow-sm"
+        >
+          <Download className="h-4 w-4" />
+          Download APK for Android
+        </a>
+        <p className="text-[10.5px] text-slate-500 font-sans">Version {APK_VERSION} · Android 8.0 or newer</p>
+
+        <ol className="list-decimal pl-5 space-y-1.5 text-[11px] text-slate-600 font-sans leading-relaxed">
+          {STEPS.map((step) => (
+            <li key={step}>{step}</li>
           ))}
-        </div>
-        <div>
-          <label className="block text-[10px] font-bold uppercase text-slate-500 mb-1">
-            Other app package names (comma-separated)
-          </label>
-          <input
-            type="text"
-            value={customPackages}
-            disabled={!isAuthorized}
-            onChange={(e) => setCustomPackages(e.target.value)}
-            placeholder="e.g. com.example.callingapp"
-            className="w-full px-3 py-1.5 bg-white border border-[#A9CDEE] rounded-lg text-xs font-mono disabled:opacity-60"
-          />
-        </div>
+        </ol>
+        <p className="text-[11px] text-slate-600 font-sans leading-relaxed">
+          Once it's set up, it works by itself. It catches calls while your phone is asleep or in use, even when this
+          website and the OwnersLOCAL app are closed. All settings are in the Android app.
+        </p>
       </div>
 
       <div className="bg-[#E3F3FF] p-4.5 rounded-2xl border border-[#A9CDEE] space-y-3">
@@ -251,14 +109,10 @@ export const MissedCallTextBackPage: React.FC = () => {
             Call Log ({sortedCallEvents.length})
           </h3>
         </div>
-        <p className="text-[11px] text-slate-500 font-sans leading-relaxed">
-          Every call the companion app has seen for this business, newest first — missed calls it
-          auto-texted back, and answered incoming/outgoing calls it logged for the record.
-        </p>
         <div className="bg-white rounded-xl border border-[#A9CDEE] divide-y divide-[#A9CDEE]/60 max-h-96 overflow-y-auto">
           {sortedCallEvents.length === 0 ? (
             <p className="text-[11px] text-slate-500 font-sans p-3">
-              No calls logged yet. This fills in automatically once the Android app is installed, signed in, and granted its phone/SMS/call-log permissions.
+              No calls yet. They'll show up here once the Android app is installed and signed in.
             </p>
           ) : (
             sortedCallEvents.map((event) => (
@@ -283,16 +137,6 @@ export const MissedCallTextBackPage: React.FC = () => {
             ))
           )}
         </div>
-      </div>
-
-      <div className="flex justify-end">
-        <button
-          onClick={handleSave}
-          disabled={!isAuthorized || isSaving}
-          className="px-4 py-1.5 bg-[#315C9F] hover:bg-[#254A84] text-white rounded-xl text-xs font-bold font-sans cursor-pointer shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
-        >
-          {isSaving ? "Saving…" : "Save"}
-        </button>
       </div>
     </div>
   );

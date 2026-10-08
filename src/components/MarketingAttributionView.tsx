@@ -81,7 +81,7 @@ export const MarketingAttributionView: React.FC<MarketingAttributionViewProps> =
     const blob = new Blob([lines.join("\n")], { type: "text/csv" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
-    a.href = url; a.download = "marketing_attribution.csv"; a.click();
+    a.href = url; a.download = "where_customers_came_from.csv"; a.click();
     URL.revokeObjectURL(url);
   };
 
@@ -160,7 +160,7 @@ export const MarketingAttributionView: React.FC<MarketingAttributionViewProps> =
             </tr>
           </thead>
           <tbody className="divide-y divide-[#9EC8EF]/30">
-            {rows.length === 0 && <tr><td colSpan={8} className="px-4 py-8 text-center text-[#5E7393]">No data matches these filters yet.</td></tr>}
+            {rows.length === 0 && <tr><td colSpan={8} className="px-4 py-8 text-center text-[#5E7393]">No results match these filters.</td></tr>}
             {rows.map(r => (
               <tr key={r.source} className="hover:bg-[#EAF5FF]/60">
                 <td className="px-4 py-3 font-black text-[#1F3557]">{r.source}</td>

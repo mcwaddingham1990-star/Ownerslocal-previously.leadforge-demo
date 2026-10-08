@@ -12,8 +12,9 @@ import { authedFetch } from "../lib/apiClient";
 import { useVisualViewportBottomRight } from "../hooks/useVisualViewportBottomRight";
 import { buildScanSnapshotDocument, SNAPSHOT_PHOTO_MAX_BASE64_LENGTH } from "../lib/scanSnapshotDocument";
 import type { ScannedLineItem } from "../types/scannedReceipt";
-import type { InventoryItem, Customer, Lead, Estimate } from "../types/domain";
+import type { InventoryItem, Lead, Estimate } from "../types/domain";
 import { generateEstimateNumber, formatEstimateDate, estimateExpirationDate } from "../lib/estimateDefaults";
+import { buildNewCustomerRecord } from "../lib/customerDefaults";
 
 type RecordType = "bill" | "customer" | "lead" | "estimate" | "inventory" | "address" | "onboarding" | "material_expense" | "payroll" | "financial" | "unknown";
 
@@ -255,21 +256,13 @@ export function UniversalAIIntake({ snapshotFolder }: UniversalAIIntakeProps = {
       // add, CSV import, lead/estimate conversion) -- so a scanned customer
       // shows up identically everywhere the others do instead of leaving
       // fields blank/NaN (openJobs, lifetimeValue, status, type, isVIP).
-      const customer: Customer = {
-        id: id("cust"),
+      const customer = buildNewCustomerRecord({
+        name: String(fields.contact || fields.name || ""),
         company: String(fields.company || fields.name || fields.contact || "New Customer"),
-        contact: String(fields.contact || fields.name || ""),
         phone: String(fields.phone || ""),
         email: String(fields.email || ""),
-        address: [fields.address, fields.city, fields.state, fields.zip].filter(Boolean).join(", "),
-        openJobs: 0,
-        outstandingBalance: 0,
-        lifetimeValue: 0,
-        status: "Active",
-        type: "Residential",
-        isVIP: false,
-        recentlyAdded: true
-      };
+        address: [fields.address, fields.city, fields.state, fields.zip].filter(Boolean).join(", ")
+      });
       data.setCustomers(prev => [customer, ...prev]);
     } else if (recordType === "lead") {
       // Same real Lead shape LeadsPage's own add-lead form builds, so a
@@ -374,12 +367,12 @@ export function UniversalAIIntake({ snapshotFolder }: UniversalAIIntakeProps = {
       onClick={() => setOpen(true)}
       className="fixed z-40 rounded-full bg-violet-600 px-4 py-3 text-xs font-black text-white shadow-xl hover:bg-violet-700 flex items-center gap-2"
       style={{ bottom: 24 + viewportInset.bottom, right: 210 + viewportInset.right }}
-    ><Camera className="w-4 h-4" /> Snapshot</button>,
+    ><Camera className="w-4 h-4" /> Scan Receipt</button>,
     document.body
   );
   return createPortal(
   <div className="fixed inset-0 z-[90] flex items-center justify-center bg-slate-950/60 p-4 backdrop-blur-sm"><div className="w-full max-w-lg max-h-[92vh] overflow-y-auto rounded-3xl bg-white p-5 shadow-2xl">
-    <div className="flex items-start justify-between gap-3"><div><h3 className="text-sm font-black uppercase text-[#1F3557]">Snapshot</h3><p className="mt-1 text-[10px] text-slate-500">Photograph or upload a receipt, invoice, bill, check, or completed form -- the AI figures out what it is and where it goes. Nothing saves until you review it.</p></div><button onClick={close}><X className="w-5 h-5 text-slate-400" /></button></div>
+    <div className="flex items-start justify-between gap-3"><div><h3 className="text-sm font-black uppercase text-[#1F3557]">Scan Receipt</h3><p className="mt-1 text-[10px] text-slate-500">Photograph or upload a receipt, invoice, bill, check, or completed form -- the AI figures out what it is and where it goes. Nothing saves until you review it.</p></div><button onClick={close}><X className="w-5 h-5 text-slate-400" /></button></div>
     {stage === "choose" && <div className="mt-5 space-y-4"><label className="block text-[10px] font-black uppercase text-slate-500">Record destination<select value={recordType} onChange={e => setRecordType(e.target.value as RecordType)} className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-xs normal-case"><option value="unknown">Auto-detect from document</option>{Object.entries(labels).filter(([key]) => key !== "unknown").map(([key, label]) => <option key={key} value={key}>{label}</option>)}</select></label><input ref={inputRef} type="file" accept="image/*,application/pdf" className="hidden" onChange={e => scan(e.target.files?.[0])} /><button onClick={() => inputRef.current?.click()} className="w-full rounded-2xl border-2 border-dashed border-violet-300 bg-violet-50 p-7 text-violet-700"><FileUp className="mx-auto mb-2 w-7 h-7" /><span className="text-xs font-black">Photograph or upload completed form</span></button><button onClick={() => { setFields({ ...presetFields[recordType] }); setStage("review"); }} className="w-full rounded-xl border border-[#9EC8EF] bg-[#EAF5FF] px-3 py-2.5 text-xs font-bold text-[#315C9F] flex justify-center gap-2"><PencilLine className="w-4 h-4" /> Use editable preset form</button><p className="text-center text-[9px] text-slate-500">Manual entry inside every module remains available.</p></div>}
     {stage === "scanning" && <div className="py-14 text-center"><Loader2 className="mx-auto h-8 w-8 animate-spin text-violet-600" /><p className="mt-3 text-xs font-bold text-[#1F3557]">Reading and classifying the form…</p></div>}
     {stage === "review" && <div className="mt-4 space-y-3"><div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-[10px] text-amber-900"><strong>Owner review required.</strong> Correct every field below before saving. AI confidence: {Math.round(confidence * 100)}%.</div><label className="block text-[9px] font-black uppercase text-slate-500">Save to<select value={recordType} onChange={e => setRecordType(e.target.value as RecordType)} className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-xs normal-case">{Object.entries(labels).map(([key, label]) => <option key={key} value={key}>{label}</option>)}</select></label>{Object.entries(fields).map(([key, value]) => <label key={key} className="block"><span className="text-[9px] font-bold uppercase text-slate-500">{key.replace(/([A-Z])/g, " $1")}</span><input value={String(value ?? "")} onChange={e => setFields(prev => ({ ...prev, [key]: typeof value === "number" ? Number(e.target.value) : typeof value === "boolean" ? e.target.value === "true" : e.target.value }))} className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 text-xs" /></label>)}<button onClick={() => setFields(prev => ({ ...prev, [`field${Object.keys(prev).length + 1}`]: "" }))} className="text-[10px] font-bold text-[#315C9F]">+ Add missing field</button><div className="flex gap-2 pt-2"><button onClick={() => setStage("choose")} className="flex-1 rounded-xl bg-slate-100 py-2.5 text-xs font-bold text-slate-600">Back</button><button onClick={save} className="flex-1 rounded-xl bg-emerald-600 py-2.5 text-xs font-black text-white flex justify-center gap-2"><Check className="w-4 h-4" /> Review Complete — Save</button></div></div>}

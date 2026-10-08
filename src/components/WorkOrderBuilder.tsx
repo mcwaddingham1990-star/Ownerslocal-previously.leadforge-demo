@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useState } from "react";
 import { X, Plus, Trash2, FileText } from "lucide-react";
 import { useAuth } from "../context/AuthContext";
 import { useDomainData } from "../context/DomainDataContext";
@@ -8,6 +8,7 @@ import { PriceBookModal } from "./PriceBookModal";
 import { CreatePurchaseOrderPicker } from "./CreatePurchaseOrderPicker";
 import { PurchaseOrderBuilder } from "./PurchaseOrderBuilder";
 import type { PurchaseOrder } from "../types/purchaseOrder";
+import { useAssignableEmployeeRoster } from "../hooks/useAssignableEmployees";
 
 const uid = (prefix: string) => `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
 const todayStr = () => new Date().toISOString().slice(0, 10);
@@ -57,25 +58,13 @@ const EMPTY_FORM = {
 
 export const WorkOrderBuilder: React.FC<WorkOrderBuilderProps> = ({ isOpen, onClose, prefill, editingWorkOrder, onSaved }) => {
   const { loggedInUser } = useAuth();
-  const { customers, recentRoster, employees, workOrders, setWorkOrders, setSchedulingEvents, setGeneratedPdfDraft, purchaseOrders } = useDomainData();
+  const { customers, workOrders, setWorkOrders, setSchedulingEvents, setGeneratedPdfDraft, purchaseOrders } = useDomainData();
   const { navigateToScreen, logOperationalEvent, triggerNotification } = useNavTelemetry();
   const actor = loggedInUser?.name || loggedInUser?.email || "Staff";
 
-  // Same "active roster" source as Estimates/Scheduling/Dispatch
-  // (EstimatesPage.tsx) -- recentRoster alone is just the invite-code
-  // ledger (often stale "Pending" entries), not the real employee roster,
-  // so real active employees never showed up here on their own.
-  const assignmentCandidates = useMemo(() => {
-    const byName = new Map<string, { id: string; name: string }>();
-    recentRoster
-      .filter(person => person.status?.toLowerCase() !== "inactive")
-      .forEach(person => byName.set(person.name.trim().toLowerCase(), { id: person.id || person.code || person.name, name: person.name }));
-    employees.forEach(employee => {
-      const name = `${employee.firstName} ${employee.lastName}`.trim();
-      if (name) byName.set(name.toLowerCase(), { id: employee.id || employee.email, name });
-    });
-    return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
-  }, [recentRoster, employees]);
+  // Same canonical active roster used everywhere else a job/event/work
+  // order gets assigned to a person (see useAssignableEmployeeRoster).
+  const assignmentCandidates = useAssignableEmployeeRoster();
 
   const [form, setForm] = useState(EMPTY_FORM);
   const [materials, setMaterials] = useState<MaterialRow[]>([]);

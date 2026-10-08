@@ -5,7 +5,7 @@ import { PriceBookFolder, PriceBookModel } from "../types/priceBook";
 import { Membership } from "../types/membership";
 import { PurchaseOrder } from "../types/purchaseOrder";
 import { ReviewRequest, ReviewAutomationSettings } from "../types/reviewRequest";
-import type { GeneratedPdfDraft, EstimatePrefill } from "../types/generatedPdf";
+import type { GeneratedPdfDraft, EstimatePrefill, BuildJobPrefill } from "../types/generatedPdf";
 
 export interface RosterEntry {
   id?: string;
@@ -106,6 +106,9 @@ export interface DomainDataContextValue {
   /** Queued "open the Estimate form pre-filled with this info" request (e.g. from a Lead's "Build Estimate" button) -- consumed by EstimatesPage to open its Add Estimate modal pre-populated, then cleared. */
   estimatePrefill: EstimatePrefill | null;
   setEstimatePrefill: Dispatch<SetStateAction<EstimatePrefill | null>>;
+  /** Queued "open the shared Build Job modal pre-filled with this info" request -- set by a Lead, a Customer card, an accepted Estimate, or the Map, and consumed by JobsPage to open BuildJobModal pre-populated, then cleared. Every entry point in the app funnels through this same field so the popup that opens is always the exact same component. */
+  buildJobPrefill: BuildJobPrefill | null;
+  setBuildJobPrefill: Dispatch<SetStateAction<BuildJobPrefill | null>>;
   /** Queued "Collect Signatures" request (e.g. from a customer card) -- consumed by DocumentsPage to open the PDF Editor straight to its file picker, ready to capture signatures on whatever real document gets opened. */
   pendingSignatureCapture: { customerName?: string; customerPhone?: string; customerEmail?: string } | null;
   setPendingSignatureCapture: Dispatch<SetStateAction<{ customerName?: string; customerPhone?: string; customerEmail?: string } | null>>;

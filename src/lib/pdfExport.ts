@@ -3,8 +3,10 @@
 // sample document). Used by every "Generate PDF" / "Compile Documents"
 // button across Estimates, Accounting (Invoices), Customers, and Documents.
 import { PDFDocument, StandardFonts, rgb, PDFFont, PDFPage, RGB } from "pdf-lib";
-import type { Estimate, Customer, DocumentItem, Lead, MissedCallEvent } from "../types/domain";
+import type { Estimate, Customer, DocumentItem, Lead, MissedCallEvent, TextMessage } from "../types/domain";
 import type { Invoice, InvoiceLineItem } from "../types/accounting";
+import { normalizeContactPhone, normalizeEstimateCompany } from "./contactNormalization";
+import { calculateEstimatePricing } from "./estimatePricing";
 
 export interface BusinessProfile {
   name: string;
@@ -31,7 +33,8 @@ export function bytesToBase64(bytes: Uint8Array): string {
 }
 
 export function base64ToBytes(base64: string): Uint8Array {
-  const binary = atob(base64);
+  const cleanBase64 = base64.includes(",") ? base64.split(",").pop() || "" : base64;
+  const binary = atob(cleanBase64.replace(/\s/g, ""));
   const bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
   return bytes;
@@ -146,7 +149,7 @@ function money(n: number): string {
   return `$${Number(n || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
-function drawLineItemsTable(writer: PdfWriter, items: InvoiceLineItem[], taxRate: number) {
+function drawLineItemsTable(writer: PdfWriter, items: InvoiceLineItem[], taxRate: number, discountPercent = 0) {
   const colDesc = MARGIN, colQty = PAGE_W - MARGIN - 210, colPrice = PAGE_W - MARGIN - 140, colTotal = PAGE_W - MARGIN - 70;
   writer.ensureRoom(24);
   writer.page.drawRectangle({ x: MARGIN, y: writer.y - 4, width: PAGE_W - MARGIN * 2, height: 20, color: rgb(0.918, 0.961, 1) });
@@ -155,10 +158,8 @@ function drawLineItemsTable(writer: PdfWriter, items: InvoiceLineItem[], taxRate
   writer.page.drawText("Unit Price", { x: colPrice, y: writer.y, size: 8.5, font: writer.bold, color: NAVY });
   writer.page.drawText("Total", { x: colTotal, y: writer.y, size: 8.5, font: writer.bold, color: NAVY });
   writer.y -= 22;
-  let subtotal = 0;
   for (const item of items) {
     const lineTotal = Number(item.quantity || 0) * Number(item.unitPrice || 0);
-    subtotal += lineTotal;
     const descLines = writer.wrapLine(item.description || "—", writer.font, 9.5, colQty - colDesc - 12);
     writer.ensureRoom(descLines.length * 12 + 6);
     descLines.forEach((line, i) => {
@@ -170,8 +171,7 @@ function drawLineItemsTable(writer: PdfWriter, items: InvoiceLineItem[], taxRate
     writer.y -= descLines.length * 12 + 6;
   }
   writer.rule();
-  const tax = subtotal * (Number(taxRate || 0) / 100);
-  const total = subtotal + tax;
+  const pricing = calculateEstimatePricing(items, discountPercent, taxRate);
   const summaryX = colPrice;
   const row = (label: string, value: string, bold = false) => {
     writer.ensureRoom(16);
@@ -179,10 +179,11 @@ function drawLineItemsTable(writer: PdfWriter, items: InvoiceLineItem[], taxRate
     writer.page.drawText(value, { x: colTotal, y: writer.y, size: 9.5, font: bold ? writer.bold : writer.font, color: NAVY });
     writer.y -= 15;
   };
-  row("Subtotal", money(subtotal));
-  if (taxRate) row(`Tax (${taxRate}%)`, money(tax));
-  row("Total", money(total), true);
-  return { subtotal, tax, total };
+  row("Subtotal", money(pricing.subtotal));
+  if (pricing.discountAmount > 0) row(`Discount (${pricing.discountPercent}%)`, `-${money(pricing.discountAmount)}`);
+  if (pricing.taxAmount > 0) row(`Tax (${pricing.taxRate}%)`, money(pricing.taxAmount));
+  row("Total", money(pricing.total), true);
+  return pricing;
 }
 
 export async function buildEstimatePdf(estimate: Estimate, customer: Customer | undefined, business: BusinessProfile): Promise<Uint8Array> {
@@ -194,9 +195,11 @@ export async function buildEstimatePdf(estimate: Estimate, customer: Customer | 
 
   writer.heading("Prepared for");
   writer.text(estimate.customerName, { font: bold, gap: 1 });
-  if (estimate.company) writer.text(estimate.company, { gap: 1 });
+  const company = normalizeEstimateCompany(estimate.customerName, estimate.company);
+  if (company) writer.text(company, { gap: 1 });
   if (estimate.address || customer?.address) writer.text(estimate.address || customer?.address || "", { gap: 1 });
-  if (customer?.phone) writer.text(customer.phone, { gap: 1 });
+  const phone = normalizeContactPhone(estimate.phone || customer?.phone);
+  if (phone) writer.text(phone, { gap: 1 });
   if (customer?.email) writer.text(customer.email, { gap: 1 });
   writer.spacer(10);
 
@@ -207,8 +210,14 @@ export async function buildEstimatePdf(estimate: Estimate, customer: Customer | 
   writer.text(`Prepared by: ${estimate.salesRep || "—"}`, { gap: 8 });
   writer.rule();
 
-  writer.heading("Estimated total");
-  writer.text(money(estimate.amount), { size: 16, font: bold, color: NAVY, gap: 10 });
+  if (estimate.lineItems?.length) {
+    writer.heading("Itemized pricing");
+    drawLineItemsTable(writer, estimate.lineItems, estimate.taxRate || 0, estimate.discountPercent || 0);
+    writer.spacer(6);
+  } else {
+    writer.heading("Estimated total");
+    writer.text(money(estimate.amount), { size: 16, font: bold, color: NAVY, gap: 10 });
+  }
 
   if (estimate.projectSpecifics) {
     writer.heading("Project specifics");
@@ -325,7 +334,12 @@ const directionLabel: Record<MissedCallEvent["direction"], string> = {
 };
 
 /** Real record of a customer's call/text history from the Missed Call Text-Back app (see CrmLinker.kt), oldest first, for the Customer Card's "Convert to PDF" button. */
-export async function buildCallTextHistoryPdf(customer: Customer, events: MissedCallEvent[], business: BusinessProfile): Promise<Uint8Array> {
+/** Merges call events and real text messages into one chronological feed for buildCallTextHistoryPdf -- the same merge CustomersPage.tsx's Call & Text History panel builds for on-screen display. */
+type CallTextEntry =
+  | { sortKey: string; kind: "call"; event: MissedCallEvent }
+  | { sortKey: string; kind: "text"; event: TextMessage };
+
+export async function buildCallTextHistoryPdf(customer: Customer, events: MissedCallEvent[], texts: TextMessage[], business: BusinessProfile): Promise<Uint8Array> {
   const doc = await PDFDocument.create();
   const font = await doc.embedFont(StandardFonts.Helvetica);
   const bold = await doc.embedFont(StandardFonts.HelveticaBold);
@@ -336,21 +350,36 @@ export async function buildCallTextHistoryPdf(customer: Customer, events: Missed
   writer.text(customer.contact, { gap: 1 });
   writer.text(customer.phone || "—", { gap: 8 });
 
-  const sorted = [...events].sort((a, b) => a.callTimestamp.localeCompare(b.callTimestamp));
-  if (!sorted.length) {
+  const timeline: CallTextEntry[] = [
+    ...events.map((event): CallTextEntry => ({ sortKey: event.callTimestamp, kind: "call", event })),
+    ...texts.map((event): CallTextEntry => ({ sortKey: event.timestamp, kind: "text", event }))
+  ].sort((a, b) => a.sortKey.localeCompare(b.sortKey));
+
+  if (!timeline.length) {
     writer.text("No calls or texts on file yet.", { color: SLATE, gap: 4 });
     return doc.save();
   }
 
-  for (const event of sorted) {
+  for (const entry of timeline) {
     writer.rule();
-    writer.text(`${directionLabel[event.direction] || "Call"} — ${event.callTimestamp}`, { font: bold, gap: 2 });
-    writer.text(`Number: ${event.phoneNumber}`, { gap: 2 });
-    if (event.autoReplySent && event.autoReplyMessage) {
-      writer.text(`Auto-reply text sent: "${event.autoReplyMessage}"`, { color: SLATE, gap: 2 });
-    }
-    if (event.createdNewLead) {
-      writer.text("A new lead was created from this call.", { color: SLATE, gap: 2 });
+    if (entry.kind === "call") {
+      const event = entry.event;
+      writer.text(`${directionLabel[event.direction] || "Call"} — ${event.callTimestamp}`, { font: bold, gap: 2 });
+      writer.text(`Number: ${event.phoneNumber}`, { gap: 2 });
+      if (event.autoReplySent && event.autoReplyMessage) {
+        writer.text(`Auto-reply text sent: "${event.autoReplyMessage}"`, { color: SLATE, gap: 2 });
+      }
+      if (event.createdNewLead) {
+        writer.text("A new lead was created from this call.", { color: SLATE, gap: 2 });
+      }
+    } else {
+      const event = entry.event;
+      const who = event.direction === "outgoing" ? "Sent" : "Received";
+      writer.text(`Text ${who} — ${event.timestamp}`, { font: bold, gap: 2 });
+      writer.text(`"${event.body}"`, { color: SLATE, gap: 2 });
+      if (event.createdNewLead) {
+        writer.text("A new lead was created from this text.", { color: SLATE, gap: 2 });
+      }
     }
   }
 
@@ -496,7 +525,7 @@ export async function mergePdfs(sources: Array<Uint8Array | string>): Promise<Ui
 /** Appends a real, standard-format signing certificate page (who signed, when, from where, with what evidence) to an existing PDF -- the same pattern DocuSign/Adobe Sign use, and far more robust than trying to burn signature images onto the original document's exact pixel coordinates. */
 export async function appendSignatureCertificate(
   pdfBytes: Uint8Array,
-  signers: Array<{ name: string; role: string; kind: string; timestamp: string; centralTimestamp?: string; selfieDataUrl?: string; coords?: string }>,
+  signers: Array<{ name: string; role: string; kind: string; timestamp: string; centralTimestamp?: string; signatureDataUrl?: string; selfieDataUrl?: string; coords?: string }>,
   business: BusinessProfile
 ): Promise<Uint8Array> {
   const doc = await PDFDocument.load(pdfBytes, { ignoreEncryption: true });
@@ -510,6 +539,19 @@ export async function appendSignatureCertificate(
     writer.text(`${signer.name || "Unnamed signer"} — ${signer.role || ""}`, { font: bold, gap: 2 });
     writer.text(`${signer.kind} completed ${signer.timestamp}${signer.centralTimestamp ? ` (${signer.centralTimestamp})` : ""}`, { gap: 2 });
     if (signer.coords) writer.text(`Location at signing: ${signer.coords}`, { gap: 2 });
+    if (signer.signatureDataUrl) {
+      try {
+        const isPng = signer.signatureDataUrl.startsWith("data:image/png");
+        const bytes = base64ToBytes(signer.signatureDataUrl.split(",")[1] || "");
+        const image = isPng ? await doc.embedPng(bytes) : await doc.embedJpg(bytes);
+        const h = 48, w = Math.min(220, (image.width / image.height) * h);
+        writer.ensureRoom(h + 10);
+        writer.page.drawImage(image, { x: MARGIN, y: writer.y - h, width: w, height: h });
+        writer.y -= h + 10;
+      } catch {
+        // A bad signature image must not prevent the signed PDF from saving.
+      }
+    }
     if (signer.selfieDataUrl) {
       try {
         const isPng = signer.selfieDataUrl.startsWith("data:image/png");

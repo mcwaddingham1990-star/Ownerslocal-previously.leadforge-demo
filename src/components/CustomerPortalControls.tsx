@@ -5,6 +5,7 @@ import { useNavTelemetry } from "../context/NavTelemetryContext";
 import type { Customer } from "../types/domain";
 import { buildCustomerPortalLink } from "../lib/customerPortalClient";
 import { createBusinessInviteCode, disconnectCustomerAccount } from "../lib/customerAccountClient";
+import { ensureCustomerPortalAccess } from "../lib/customerPortalAccess";
 import SendChoiceModal from "./SendChoiceModal";
 
 const newPortalToken = () => `portal_${crypto.randomUUID().replace(/-/g, "")}`;
@@ -39,12 +40,7 @@ export const CustomerPortalControls: React.FC<CustomerPortalControlsProps> = ({ 
     return <p className="text-[10px] font-bold text-slate-400">No matching customer record -- link this to a customer first.</p>;
   }
 
-  const ensureAccess = (): Customer => {
-    if (customer.portalEnabled && customer.portalToken) return customer;
-    const updated: Customer = { ...customer, portalEnabled: true, portalToken: customer.portalToken || newPortalToken(), portalTokenCreatedAt: customer.portalTokenCreatedAt || new Date().toISOString() };
-    setCustomers(prev => prev.map(c => c.id === customer.id ? updated : c));
-    return updated;
-  };
+  const ensureAccess = (): Customer => ensureCustomerPortalAccess(customer, setCustomers);
 
   const openPortal = () => {
     const withAccess = ensureAccess();

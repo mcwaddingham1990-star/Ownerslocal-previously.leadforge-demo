@@ -9,4 +9,235 @@
 }.selfiesave-editor-root /* Imported PDF pages use an absolutely positioned image, .selfiesave-editor-root so they need an
    explicit inline size instead of relying on intrinsic content sizing. */
 .document-pages {justify-items:center}.selfiesave-editor-root .document-pages>.paper {width:100%}
+.selfiesave-editor-root .document-pages {
+  transform:none !important;
+  zoom:var(--pdf-editor-zoom,1);
+}
+.selfiesave-editor-root .pdf-text-layer {
+  touch-action:pan-x pan-y;
+}
+.selfiesave-editor-root .workspace.signature-only-workspace {grid-template-columns:1fr}
+.selfiesave-editor-root .signature-only-workspace .editor-wrap {padding:18px 16px 110px}
+.selfiesave-editor-root .signature-only-workspace .editor-tools>div,
+.selfiesave-editor-root .signature-only-workspace .editor-tools>span:last-child {display:none}
+.selfiesave-editor-root .signature-only-actionbar {justify-content:center;text-align:center;color:#174f9d;padding:12px 18px}
+.selfiesave-editor-root .signature-only-actionbar strong {font-size:13px;line-height:1.4}
+.selfiesave-editor-root {background:#e6f1f8;isolation:isolate}
 
+/* Keep the editor and its controls tied to the real screen, not to the
+   transformed Documents card that opened it. The global AI/receipt pills sit
+   at z-index 40, so the editor stays immediately beneath them. */
+.selfiesave-editor-root {z-index:30}
+.selfiesave-editor-root .app-shell {padding-bottom:174px}
+.selfiesave-editor-root .actionbar {
+  bottom:calc(76px + env(safe-area-inset-bottom));
+  box-shadow:0 -8px 24px #10243e24;
+}
+
+@media(max-width:800px){
+  .selfiesave-editor-root .app-shell {padding-bottom:0}
+  .selfiesave-editor-root .workspace {height:calc(100svh - 220px)}
+  .selfiesave-editor-root .actionbar {
+    min-height:68px;
+    justify-content:flex-start;
+    gap:8px;
+    overflow-x:auto;
+    padding:8px 10px;
+    scrollbar-width:thin;
+  }
+  .selfiesave-editor-root .actionbar .save-draft {display:block}
+  .selfiesave-editor-root .actionbar button {flex:0 0 auto;padding:10px 12px}
+  .selfiesave-editor-root .actionbar .finalize {width:auto}
+}
+
+/* The action dock is portaled to document.body so no app panel, transformed
+   parent, or PDF scroll container can cover or move it. */
+.selfiesave-action-portal {
+  position:fixed;
+  inset:0;
+  z-index:10000;
+  pointer-events:none;
+  --blue:#2c6deb;
+  --navy:#0e2445;
+  font-family:Arial,Helvetica,sans-serif;
+}
+.selfiesave-action-portal * {box-sizing:border-box}
+.selfiesave-action-portal .actionbar {
+  position:absolute;
+  left:0;
+  right:0;
+  bottom:calc(76px + env(safe-area-inset-bottom));
+  min-height:80px;
+  z-index:1;
+  display:flex;
+  align-items:center;
+  justify-content:flex-end;
+  gap:12px;
+  padding:12px 28px;
+  border-top:1px solid #cbd7e3;
+  background:#fff;
+  box-shadow:0 -8px 24px #10243e24;
+  pointer-events:auto;
+}
+.selfiesave-action-portal .actionbar>div {margin-right:auto;display:grid;grid-template-columns:auto 170px;gap:4px 14px;align-items:center}
+.selfiesave-action-portal .actionbar strong {font-size:11px}
+.selfiesave-action-portal .actionbar span {height:4px;background:#e7edf3;border-radius:4px}
+.selfiesave-action-portal .actionbar i {display:block;height:100%;background:var(--blue);border-radius:4px}
+.selfiesave-action-portal .actionbar small {grid-column:1/3;color:#738094;font-size:9px}
+.selfiesave-action-portal .actionbar button {flex:0 0 auto;border-radius:7px;padding:12px 17px;font-size:11px;font-weight:bold;cursor:pointer}
+.selfiesave-action-portal .actionbar button:disabled {cursor:not-allowed;opacity:.45}
+.selfiesave-action-portal .save-draft {background:white;border:1px solid #bdc9d5}
+.selfiesave-action-portal .finalize {background:var(--navy);color:white;border:1px solid var(--navy)}
+.selfiesave-action-portal .signature-only-actionbar {justify-content:center;text-align:center;color:#174f9d;padding:12px 18px}
+
+.selfiesave-editor-root .editor-wrap,
+.selfiesave-editor-root .paper,
+.selfiesave-editor-root .pdf-text-layer,
+.selfiesave-editor-root .canvas-object {touch-action:pan-x pan-y}
+.selfiesave-editor-root .canvas-object.selected,
+.selfiesave-editor-root .grab-handle,
+.selfiesave-editor-root .resize-handle {touch-action:none}
+
+@media(max-width:800px){
+  /* Do not put the PDF actions in another horizontally scrolling strip.
+     That made the "fixed" buttons disappear off the right edge again.
+     All five actions stay visible at once in a compact two-row grid, parked
+     above Owner's AI + Snapshot instead of underneath/through them. */
+  .selfiesave-action-portal .actionbar {
+    bottom:calc(148px + env(safe-area-inset-bottom));
+    min-height:0;
+    display:grid;
+    grid-template-columns:repeat(3,minmax(0,1fr));
+    grid-auto-rows:minmax(46px,auto);
+    gap:7px;
+    overflow:visible;
+    padding:8px 10px;
+  }
+  .selfiesave-action-portal .actionbar>div {display:none}
+  .selfiesave-action-portal .actionbar button {
+    width:100%;
+    min-width:0;
+    padding:8px 7px;
+    font-size:10px;
+    line-height:1.15;
+    white-space:normal;
+    text-align:center;
+  }
+  /* The dock overlays the viewport by design, so give the scrollable PDF
+     enough real bottom runway that the final part of the page can always be
+     scrolled completely above the dock instead of hiding behind it. */
+  .selfiesave-editor-root .editor-wrap {
+    padding-bottom:calc(285px + env(safe-area-inset-bottom));
+  }
+}
+
+
+/* PDF EDITOR — full-screen isolation. Nothing from Owner'sLOCAL behind the
+   editor should be visible while SelfieSave is open. */
+.selfiesave-editor-root {
+  z-index:2147483000 !important;
+  background:#e6f1f8 !important;
+  width:100vw;
+  height:100dvh;
+  max-width:100vw;
+  max-height:100dvh;
+  overflow:hidden !important;
+  isolation:isolate;
+}
+.selfiesave-editor-root .app-shell {
+  width:100%;
+  min-width:100%;
+  height:100dvh;
+  max-height:100dvh;
+  background:#e6f1f8;
+  overflow:hidden;
+}
+.selfiesave-action-portal {
+  z-index:2147483001 !important;
+}
+@media(max-width:800px){
+  .selfiesave-action-portal .actionbar {
+    position:absolute;
+    left:0;
+    right:0;
+    bottom:env(safe-area-inset-bottom);
+    grid-template-columns:repeat(3,minmax(0,1fr));
+  }
+}
+
+
+/* PDF ACTIONS — live directly above the document and remain pinned there
+   while the PDF itself scrolls underneath. */
+.selfiesave-editor-root .selfiesave-action-dock {
+  position:sticky;
+  top:0;
+  z-index:28;
+  width:100%;
+  margin:0 0 12px;
+  background:#fff;
+  border:1px solid #cbd7e3;
+  border-radius:10px;
+  box-shadow:0 6px 18px #10243e24;
+  overflow:hidden;
+}
+.selfiesave-editor-root .selfiesave-action-dock .actionbar {
+  position:static !important;
+  inset:auto !important;
+  width:100%;
+  min-height:0;
+  display:flex;
+  align-items:center;
+  justify-content:flex-end;
+  gap:8px;
+  padding:8px 10px;
+  background:#fff;
+  border:0;
+  box-shadow:none;
+}
+.selfiesave-editor-root .selfiesave-action-dock .actionbar>div {
+  margin-right:auto;
+  display:grid;
+  grid-template-columns:auto 120px;
+  gap:3px 10px;
+  align-items:center;
+  min-width:180px;
+}
+.selfiesave-editor-root .selfiesave-action-dock .actionbar strong {font-size:10px}
+.selfiesave-editor-root .selfiesave-action-dock .actionbar span {height:4px;background:#e7edf3;border-radius:4px}
+.selfiesave-editor-root .selfiesave-action-dock .actionbar i {display:block;height:100%;background:var(--blue);border-radius:4px}
+.selfiesave-editor-root .selfiesave-action-dock .actionbar small {grid-column:1/3;color:#738094;font-size:8px}
+.selfiesave-editor-root .selfiesave-action-dock .actionbar button {
+  flex:0 0 auto;
+  border-radius:7px;
+  padding:9px 10px;
+  font-size:10px;
+  font-weight:bold;
+  cursor:pointer;
+}
+.selfiesave-editor-root .selfiesave-action-dock .save-draft {display:block;background:white;border:1px solid #bdc9d5}
+.selfiesave-editor-root .selfiesave-action-dock .finalize {width:auto;background:var(--navy);color:white;border:1px solid var(--navy)}
+.selfiesave-editor-root .selfiesave-action-dock .signature-only-actionbar {justify-content:center;text-align:center;color:#174f9d}
+
+@media(max-width:800px){
+  .selfiesave-editor-root .workspace {height:calc(100svh - 72px)}
+  .selfiesave-editor-root .editor-wrap {padding-bottom:36px !important}
+  .selfiesave-editor-root .selfiesave-action-dock .actionbar {
+    display:grid;
+    grid-template-columns:repeat(3,minmax(0,1fr));
+    gap:6px;
+    padding:7px;
+  }
+  .selfiesave-editor-root .selfiesave-action-dock .actionbar>div {display:none}
+  .selfiesave-editor-root .selfiesave-action-dock .actionbar button {
+    width:100%;
+    min-width:0;
+    padding:8px 6px;
+    font-size:9px;
+    line-height:1.15;
+    white-space:normal;
+    text-align:center;
+  }
+  .selfiesave-editor-root .selfiesave-action-dock .signature-only-actionbar {
+    display:flex;
+  }
+}

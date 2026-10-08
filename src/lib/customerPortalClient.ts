@@ -79,6 +79,10 @@ export function submitPortalMessage(token: string, body: string) {
   return postJson(`/api/portal/${encodeURIComponent(token)}/messages`, { body });
 }
 
+export function createPortalAccountInvite(token: string) {
+  return postJson(`/api/portal/${encodeURIComponent(token)}/customer-account-invite`) as Promise<{ ok: boolean; error?: string; code?: string }>;
+}
+
 export async function startInvoiceCheckout(token: string, invoiceId: string): Promise<{ ok: boolean; error?: string; url?: string }> {
   return postJson(`/api/portal/${encodeURIComponent(token)}/invoices/${encodeURIComponent(invoiceId)}/checkout`) as Promise<{ ok: boolean; error?: string; url?: string }>;
 }

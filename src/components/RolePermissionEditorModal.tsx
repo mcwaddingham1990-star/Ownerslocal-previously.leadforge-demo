@@ -20,7 +20,7 @@ export interface EditableRole {
 // The full module catalog every role's permissions are configured against.
 // Dashboard isn't included -- like Bulletins/Snapshots/Notifications, it's
 // always visible to everyone, not a module an owner needs to gate.
-export const MODULE_CATALOG: Array<{ id: string; label: string }> = [
+export const MODULE_CATALOG: Array<{ id: string; label: string; singleAction?: PermissionAction }> = [
   { id: "customers", label: "Customers" },
   { id: "leads", label: "Leads" },
   { id: "estimates", label: "Estimates" },
@@ -44,12 +44,14 @@ export const MODULE_CATALOG: Array<{ id: string; label: string }> = [
   { id: "esign", label: "eSign" },
   { id: "messages", label: "Messages" },
   { id: "timeclock", label: "Time Clock" },
+  { id: "timeclock_team_punches", label: "Clock Employees In/Out", singleAction: "edit" },
   { id: "fleet", label: "Fleet" },
   { id: "marketing", label: "Marketing" },
   { id: "reports", label: "Reports" },
   { id: "ai_assistant", label: "AI Assistant" },
   { id: "settings", label: "Settings" },
   { id: "missed_call_textback", label: "Missed Call Text-Back" },
+  { id: "automations", label: "Automations" },
   { id: "view_lead_messages", label: "View Lead Messages in Inbox" },
   { id: "collect_signatures", label: "Collect Signatures" }
 ];
@@ -113,7 +115,7 @@ export function RolePermissionEditorModal<T extends EditableRole>({
           <div>
             <h3 className="text-xs font-extrabold text-blue-950 uppercase tracking-tight flex items-center gap-1.5">
               <Shield className="w-4 h-4 text-blue-600" />
-              <span>Module Permissions</span>
+              <span>Choose What This Role Can Do</span>
             </h3>
             <p style={{ fontSize: "9.5px" }} className="text-blue-600 font-sans font-bold block">
               Editing: {role.name}
@@ -130,7 +132,7 @@ export function RolePermissionEditorModal<T extends EditableRole>({
 
         <div className="flex-1 overflow-y-auto my-3 pr-1 space-y-2 scrollbar-thin scrollbar-thumb-blue-100">
           <p style={{ fontSize: "9px" }} className="text-slate-400 font-sans leading-normal pb-1">
-            Every module is independent — select any combination of View, Create & Edit, and Delete. No Access clears all three.
+            Choose what this role can do in each area. Select View, Add or Edit, and Delete. Choose No Access to hide that area completely.
           </p>
 
           {MODULE_CATALOG.map((mod) => {
@@ -142,40 +144,41 @@ export function RolePermissionEditorModal<T extends EditableRole>({
                 <p style={{ fontSize: "10.5px" }} className="font-sans font-extrabold text-slate-700 mb-1.5">
                   {mod.label}
                 </p>
-                <div className="grid grid-cols-4 gap-1">
+                {mod.singleAction ? (
                   <button
                     type="button"
-                    onClick={() => setNoAccess(mod.id)}
-                    aria-pressed={noAccess}
-                    className={`px-1 py-1.5 text-[8.5px] font-black rounded-lg border cursor-pointer select-none transition-all uppercase leading-tight ${
-                      noAccess
-                        ? "bg-slate-200 text-slate-600 border-slate-300"
-                        : "bg-white text-slate-400 border-slate-200 hover:bg-slate-100"
-                    }`}
+                    onClick={() => toggleAction(mod.id, mod.singleAction!)}
+                    aria-pressed={flags[mod.singleAction]}
+                    className={`w-full px-2 py-1.5 text-[9px] font-black rounded-lg border cursor-pointer select-none transition-all uppercase leading-tight ${flags[mod.singleAction] ? "bg-indigo-100 text-indigo-700 border-indigo-300" : "bg-white text-slate-400 border-slate-200 hover:bg-slate-100"}`}
                   >
-                    {PERMISSION_LEVEL_LABELS.none}
+                    {flags[mod.singleAction] ? "Allowed" : "Not Allowed"}
                   </button>
-                  {actions.map((action) => {
-                    const isSelected = flags[action];
-                    return (
-                      <button
-                        key={action}
-                        type="button"
-                        onClick={() => toggleAction(mod.id, action)}
-                        aria-pressed={isSelected}
-                        className={`px-1 py-1.5 text-[8.5px] font-black rounded-lg border cursor-pointer select-none transition-all uppercase leading-tight ${
-                          isSelected
-                            ? action === "delete"
-                              ? "bg-rose-100 text-rose-700 border-rose-300"
-                              : "bg-indigo-100 text-indigo-700 border-indigo-300"
-                            : "bg-white text-slate-400 border-slate-200 hover:bg-slate-100"
-                        }`}
-                      >
-                        {PERMISSION_LEVEL_LABELS[action]}
-                      </button>
-                    );
-                  })}
-                </div>
+                ) : (
+                  <div className="grid grid-cols-4 gap-1">
+                    <button
+                      type="button"
+                      onClick={() => setNoAccess(mod.id)}
+                      aria-pressed={noAccess}
+                      className={`px-1 py-1.5 text-[8.5px] font-black rounded-lg border cursor-pointer select-none transition-all uppercase leading-tight ${noAccess ? "bg-slate-200 text-slate-600 border-slate-300" : "bg-white text-slate-400 border-slate-200 hover:bg-slate-100"}`}
+                    >
+                      {PERMISSION_LEVEL_LABELS.none}
+                    </button>
+                    {actions.map((action) => {
+                      const isSelected = flags[action];
+                      return (
+                        <button
+                          key={action}
+                          type="button"
+                          onClick={() => toggleAction(mod.id, action)}
+                          aria-pressed={isSelected}
+                          className={`px-1 py-1.5 text-[8.5px] font-black rounded-lg border cursor-pointer select-none transition-all uppercase leading-tight ${isSelected ? (action === "delete" ? "bg-rose-100 text-rose-700 border-rose-300" : "bg-indigo-100 text-indigo-700 border-indigo-300") : "bg-white text-slate-400 border-slate-200 hover:bg-slate-100"}`}
+                        >
+                          {PERMISSION_LEVEL_LABELS[action]}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
             );
           })}

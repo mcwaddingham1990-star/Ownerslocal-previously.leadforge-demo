@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useRef } from "react";
+import React, { useState, useMemo, useRef, useEffect } from "react";
 import { downloadCsv, parseCsv } from "../lib/csv";
 import { parseAddress } from "./StructuredAddressFields";
 import { useDomainActions } from "../hooks/useDomainActions";
@@ -7,6 +7,7 @@ import { useNavTelemetry } from "../context/NavTelemetryContext";
 import { buildLeadPdf, bytesToBase64 } from "../lib/pdfExport";
 import { MAX_INLINE_BASE64_LENGTH } from "../lib/firestoreDocumentLimits";
 import type { DocumentItem } from "../types/domain";
+import { ScheduleHomeVisitModal } from "./ScheduleHomeVisitModal";
 import {
   Search,
   Plus,
@@ -47,9 +48,28 @@ import type { Lead } from "../types/domain";
 // 10 high-quality realistic OwnersLOCAL leads
 export const INITIAL_LEADS: Lead[] = [];
 
+const LEAD_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+/**
+ * Mobile autofill/input-method replay can occasionally append an email to
+ * itself (for example jane@example.comjane@example.com). Never persist that
+ * exact duplicated value. This intentionally repairs only an exact repeated
+ * valid email so legitimate unusual addresses are otherwise left alone.
+ */
+function normalizeLeadEmail(value: string): string {
+  const cleaned = String(value || "").trim().replace(/\s+/g, "");
+  let current = cleaned;
+  while (current.length > 1 && current.length % 2 === 0) {
+    const half = current.slice(0, current.length / 2);
+    if (half !== current.slice(current.length / 2) || !LEAD_EMAIL_RE.test(half)) break;
+    current = half;
+  }
+  return current;
+}
+
 export const LeadsPage: React.FC = () => {
   const { convertLeadToCustomer } = useDomainActions();
-  const { leads: propsLeads, setLeads, setDocuments, businessProfile, setGeneratedPdfDraft, setEstimatePrefill } = useDomainData();
+  const { leads: propsLeads, setLeads, setDocuments, businessProfile, setGeneratedPdfDraft, setEstimatePrefill, setBuildJobPrefill } = useDomainData();
   const {
     openPlaceholderPage: onOpenPlaceholder,
     takeSnapshot: onTakeSnapshot,
@@ -79,6 +99,21 @@ export const LeadsPage: React.FC = () => {
   const [formStatus, setFormStatus] = useState<Lead["status"]>("New");
   const [formEstimatedValue, setFormEstimatedValue] = useState<number>(0);
   const [formNotes, setFormNotes] = useState("");
+  const repairedLeadEmailsRef = useRef(new Set<string>());
+
+  useEffect(() => {
+    if (!setLeads || !propsLeads?.length) return;
+    const repairs = new Map<string, string>();
+    for (const lead of propsLeads) {
+      const normalized = normalizeLeadEmail(lead.email || "");
+      if (normalized !== (lead.email || "") && !repairedLeadEmailsRef.current.has(lead.id)) {
+        repairedLeadEmailsRef.current.add(lead.id);
+        repairs.set(lead.id, normalized);
+      }
+    }
+    if (!repairs.size) return;
+    setLeads(prev => prev.map(lead => repairs.has(lead.id) ? { ...lead, email: repairs.get(lead.id)! } : lead));
+  }, [propsLeads, setLeads]);
 
   const importInputRef = useRef<HTMLInputElement>(null);
   const LEAD_SOURCES = ["Google Business Profile", "Website", "Facebook", "Instagram", "Referral", "Phone Call", "Walk-In", "Manual Entry", "Other"];
@@ -106,7 +141,7 @@ export const LeadsPage: React.FC = () => {
         name: r[iName]?.trim() || "",
         company: (iCompany >= 0 ? r[iCompany]?.trim() : "") || "",
         phone: iPhone >= 0 ? r[iPhone]?.trim() : "",
-        email: iEmail >= 0 ? r[iEmail]?.trim() : "",
+        email: normalizeLeadEmail(iEmail >= 0 ? r[iEmail]?.trim() || "" : ""),
         source: (iSource >= 0 && LEAD_SOURCES.includes(r[iSource]?.trim())) ? r[iSource].trim() as Lead["source"] : "Manual Entry",
         salesRep: (iRep >= 0 ? r[iRep]?.trim() : "") || "Unassigned",
         status: (iStatus >= 0 && LEAD_STATUSES.includes(r[iStatus]?.trim())) ? r[iStatus].trim() as Lead["status"] : "New",
@@ -140,10 +175,10 @@ export const LeadsPage: React.FC = () => {
     setIsAddModalOpen(true);
   };
 
-  // Builds a real PDF from the lead's own data, saves it to the Documents
-  // Hub, then opens the PDF Editor so it can be reviewed/finished and
-  // mailed -- same pattern as EstimatesPage's generateEstimatePdf.
-  const generateLeadPdf = async (lead: Lead) => {
+  // Builds a real PDF from the lead's own data and saves it to the
+  // Documents Hub. Shared by "Save (and Store as PDF)" (stops here) and
+  // "Save & Generate PDF" (goes on to open the PDF Editor) below.
+  const buildAndStoreLeadPdf = async (lead: Lead) => {
     const bytes = await buildLeadPdf(lead, businessProfile);
     const pdfBase64 = bytesToBase64(bytes);
     const docId = `doc_lead_${lead.id}_${Date.now()}`;
@@ -174,8 +209,16 @@ export const LeadsPage: React.FC = () => {
       triggerNotification?.("This PDF is too large to store inline -- the Documents record was saved, but regenerate it for a fresh copy since the file itself wasn't attached.");
     }
     setDocuments(prev => [...prev, newDoc]);
+    return { pdfBase64, docName: newDoc.name };
+  };
+
+  // Builds + stores the PDF, then opens the PDF Editor so it can be
+  // reviewed/finished and mailed -- same pattern as EstimatesPage's
+  // generateEstimatePdf.
+  const generateLeadPdf = async (lead: Lead) => {
+    const { pdfBase64, docName } = await buildAndStoreLeadPdf(lead);
     setGeneratedPdfDraft({
-      filename: newDoc.name,
+      filename: docName,
       title: `Lead Summary — ${lead.name}`,
       sourceType: "Lead",
       sourceId: lead.id,
@@ -188,6 +231,13 @@ export const LeadsPage: React.FC = () => {
     });
     onNavigateToScreen("documents");
     if (logOperationalEvent) logOperationalEvent("Lead PDF Generated", `Lead summary for ${lead.name}`, "📄");
+  };
+
+  // "Save (and Store as PDF)" -- builds + stores the PDF into Documents same
+  // as above, but stays on this page instead of opening the PDF Editor.
+  const storeLeadPdf = async (lead: Lead) => {
+    await buildAndStoreLeadPdf(lead);
+    if (logOperationalEvent) logOperationalEvent("Lead PDF Stored", `Lead summary for ${lead.name} saved to Documents`, "📄");
   };
 
   // Queues the Estimate form to open pre-filled with this lead's info
@@ -206,6 +256,23 @@ export const LeadsPage: React.FC = () => {
     onNavigateToScreen("estimates");
   };
 
+  // Queues the shared Build Job popup pre-filled with this lead's info via
+  // the buildJobPrefill handoff, then navigates to Jobs -- same pattern as
+  // openEstimateFromLead above, so "build a job straight from a lead" opens
+  // the exact same popup as building one from a Customer or an Estimate.
+  const openBuildJobFromLead = (lead: Lead) => {
+    setBuildJobPrefill({
+      customerName: lead.name,
+      customerPhone: lead.phone,
+      customerAddress: lead.address,
+      notes: lead.notes,
+      budget: lead.estimatedValue,
+      sourceLeadId: lead.id,
+      source: lead.source
+    });
+    onNavigateToScreen("jobs");
+  };
+
   const buildNewLeadFromForm = (): Lead | null => {
     if (!formName.trim()) return null;
     const phoneStr = formPhones.map(p => p.trim()).filter(Boolean).join(", ") || "(555) 000-0000";
@@ -216,7 +283,7 @@ export const LeadsPage: React.FC = () => {
       name: formName.trim(),
       company: formCompany.trim(),
       phone: phoneStr,
-      email: formEmail.trim() || `${formName.toLowerCase().replace(/\s+/g, "")}@example.com`,
+      email: normalizeLeadEmail(formEmail),
       source: formSource,
       salesRep: "Self",
       status: formStatus,
@@ -228,7 +295,7 @@ export const LeadsPage: React.FC = () => {
     };
   };
 
-  const handleAddLead = (action: "save" | "pdf" | "estimate" = "save") => {
+  const handleAddLead = (action: "save" | "pdf" | "pdf-store" | "estimate" = "save") => {
     const newLead = buildNewLeadFromForm();
     if (!newLead) return;
 
@@ -240,6 +307,7 @@ export const LeadsPage: React.FC = () => {
     setIsAddModalOpen(false);
     if (logOperationalEvent) logOperationalEvent("Lead Added", `New lead '${newLead.name}' added`, "🎯", { screen: "leads" });
     if (action === "pdf") void generateLeadPdf(newLead);
+    if (action === "pdf-store") void storeLeadPdf(newLead);
     if (action === "estimate") openEstimateFromLead(newLead);
   };
 
@@ -252,7 +320,7 @@ export const LeadsPage: React.FC = () => {
     const phones = (ld.phone || "").split(",").map(p => p.trim()).filter(Boolean);
     setFormPhones(phones.length > 0 ? phones : [""]);
     
-    setFormEmail(ld.email);
+    setFormEmail(normalizeLeadEmail(ld.email || ""));
     
     // Parse address
     const parts = (ld.address || "").split(",").map(s => s.trim());
@@ -283,17 +351,17 @@ export const LeadsPage: React.FC = () => {
     setIsEditMode(false);
   };
 
-  const handleSaveEdit = () => {
+  const handleSaveEdit = (action: "save" | "pdf" | "pdf-store" = "save") => {
     if (!selectedLead) return;
     const phoneStr = formPhones.map(p => p.trim()).filter(Boolean).join(", ");
     const combinedAddress = [formAddress.trim(), formCityState.trim(), formZip.trim()].filter(Boolean).join(", ");
-    
+
     const updated = {
       ...selectedLead,
       name: formName.trim(),
       company: formCompany.trim(),
       phone: phoneStr,
-      email: formEmail.trim(),
+      email: normalizeLeadEmail(formEmail),
       address: combinedAddress,
       source: formSource,
       status: formStatus,
@@ -308,6 +376,8 @@ export const LeadsPage: React.FC = () => {
     }
     setSelectedLead(updated);
     setIsEditMode(false);
+    if (action === "pdf") void generateLeadPdf(updated);
+    if (action === "pdf-store") void storeLeadPdf(updated);
   };
 
   const handleConvertLead = () => {
@@ -320,6 +390,22 @@ export const LeadsPage: React.FC = () => {
     if (!selectedLead) return;
     openEstimateFromLead(selectedLead);
     setSelectedLead(null);
+  };
+
+  const handleBuildJob = () => {
+    if (!selectedLead) return;
+    openBuildJobFromLead(selectedLead);
+    setSelectedLead(null);
+  };
+
+  // Unlike the other CRM actions, this one stays layered on top of the
+  // Lead Details modal instead of closing it -- scheduling (or skipping)
+  // a home visit is one step among several you might take on the same
+  // lead, not a terminal action like converting or building an estimate.
+  const [isHomeVisitOpen, setIsHomeVisitOpen] = useState(false);
+  const handleScheduleHomeVisit = () => {
+    if (!selectedLead) return;
+    setIsHomeVisitOpen(true);
   };
 
   const leads = propsLeads || localLeads;
@@ -427,7 +513,7 @@ export const LeadsPage: React.FC = () => {
               Lead Management
             </h2>
             <p className="text-xs text-[#5E7393] font-sans font-semibold mt-1">
-              Track new opportunities, follow-ups, and sales progress
+              Track potential customers from first contact to completed sale.
             </p>
           </div>
           <div className="flex flex-wrap gap-2.5">
@@ -583,10 +669,10 @@ export const LeadsPage: React.FC = () => {
       <div className="bg-[#C7E3FA] rounded-2xl p-5 border border-[#9EC8EF] shadow-sm space-y-4">
         <div>
           <h3 className="text-xs font-display font-black text-[#1F3557] uppercase tracking-wider">
-            Sales Pipeline Breakdown
+            Lead Status
           </h3>
           <p className="text-[10.5px] text-[#5E7393] font-sans font-semibold mt-0.5">
-            Interactive metrics. Click any funnel phase below to apply an instant table filter.
+            Select a status to show matching leads.
           </p>
         </div>
 
@@ -670,14 +756,28 @@ export const LeadsPage: React.FC = () => {
               defaultValue=""
               onChange={(event) => {
                 const action = event.target.value;
-                if (action === "customer") onOpenPlaceholder("Convert Lead to Customer Profile", "👤");
-                if (action === "estimate") onOpenPlaceholder("Lead Estimate Creation Builder", "📝");
-                if (action === "schedule") {
-                  if (onNavigateToScreen) onNavigateToScreen("scheduling");
-                  else onOpenPlaceholder("Lead Dispatch Calendar", "📅");
+                if (action === "customer") {
+                  if (selectedLead) {
+                    handleConvertLead();
+                  } else {
+                    onNavigateToScreen("customers");
+                    triggerNotification?.("Open Add Customer, or open a lead and use Convert to Client to carry its details over.");
+                  }
                 }
-                if (action === "message") onOpenPlaceholder("Lead SMS & Email Board", "💬");
-                if (action === "follow-up") onOpenPlaceholder("Lead Follow-Up Automator", "⏰");
+                if (action === "estimate") {
+                  if (selectedLead) openEstimateFromLead(selectedLead);
+                  else triggerNotification?.("Select a lead before creating an estimate.");
+                }
+                if (action === "schedule") {
+                  onNavigateToScreen("scheduling");
+                }
+                if (action === "message") {
+                  onNavigateToScreen("messages");
+                }
+                if (action === "follow-up") {
+                  onNavigateToScreen("scheduling");
+                  triggerNotification?.("Create a Follow-Up event from Scheduling.");
+                }
                 event.currentTarget.value = "";
               }}
               className="w-full px-3 py-2.5 bg-[#EAF5FF] border border-[#9EC8EF] rounded-xl text-xs font-bold text-[#1F3557] cursor-pointer focus:outline-none focus:ring-2 focus:ring-[#6FAFE7]"
@@ -713,7 +813,7 @@ export const LeadsPage: React.FC = () => {
                 {filteredLeads.length === 0 ? (
                   <tr>
                     <td colSpan={9} className="py-12 text-center text-[#5E7393] text-xs font-semibold">
-                      No matching leads found. Try relaxing your search query or filters.
+                      No leads found. Clear your filters or add a lead.
                     </td>
                   </tr>
                 ) : (
@@ -726,7 +826,7 @@ export const LeadsPage: React.FC = () => {
                       <td className="py-3 px-4 font-bold text-[#1F3557]">{ld.name}</td>
                       <td className="py-3 px-4 text-[#5E7393] font-semibold">{ld.company || "—"}</td>
                       <td className="py-3 px-4 font-mono text-[#5E7393]">{ld.phone}</td>
-                      <td className="py-3 px-4 text-[#5E7393] truncate max-w-[120px]">{ld.email}</td>
+                      <td className="py-3 px-4 text-[#5E7393] truncate max-w-[120px]">{normalizeLeadEmail(ld.email || "")}</td>
                       <td className="py-3 px-4">
                         <span className="px-2 py-0.5 bg-[#EAF5FF] text-[#1F3557] font-sans font-bold text-[10px] rounded-lg border border-[#9EC8EF]/40">
                           {ld.source}
@@ -751,6 +851,11 @@ export const LeadsPage: React.FC = () => {
                         >
                           {ld.status}
                         </span>
+                        {(ld.priority === "High" || ld.priority === "Urgent") && (
+                          <span className="ml-1 inline-block px-2 py-0.5 rounded text-[9px] font-extrabold uppercase bg-rose-600 text-white">
+                            {ld.priority}
+                          </span>
+                        )}
                       </td>
                       <td className="py-3 px-4 text-right font-bold font-mono text-[#1F3557]">
                         ${ld.estimatedValue.toLocaleString()}
@@ -766,10 +871,10 @@ export const LeadsPage: React.FC = () => {
           {/* Footer of table */}
           <div className="mt-4 pt-3 border-t border-[#9EC8EF]/40 flex justify-between items-center text-[10.5px] font-sans font-bold text-[#5E7393]">
             <span>
-              Showing {filteredLeads.length} of {leads.length} opportunities loaded
+              {filteredLeads.length} leads
             </span>
             <span className="px-2 py-0.5 bg-[#EAF5FF] border border-[#9EC8EF]/60 rounded-lg text-[#1F3557]">
-              Pipeline Connected
+              Lead list is up to date
             </span>
           </div>
         </div>
@@ -780,7 +885,7 @@ export const LeadsPage: React.FC = () => {
       <div className="space-y-3.5">
         <h3 className="text-xs font-display font-black text-[#1F3557] uppercase tracking-wider flex items-center gap-1.5">
           <Sparkles className="w-3.5 h-3.5" />
-          Lead Insights & Performance
+          Lead Summary
         </h3>
         
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
@@ -790,7 +895,7 @@ export const LeadsPage: React.FC = () => {
             <div>
               <div className="flex justify-between items-start">
                 <span className="text-[9.5px] bg-[#EAF5FF] border border-[#9EC8EF] text-[#1F3557] px-2 py-0.5 rounded font-black uppercase tracking-wider">
-                  New Opportunities
+                  New Leads
                 </span>
                 <Clock className="w-4 h-4 text-[#1F3557]" />
               </div>
@@ -806,7 +911,7 @@ export const LeadsPage: React.FC = () => {
             <div>
               <div className="flex justify-between items-start">
                 <span className="text-[9.5px] bg-[#EAF5FF] border border-[#9EC8EF] text-[#1F3557] px-2 py-0.5 rounded font-black uppercase tracking-wider">
-                  Highest Value
+                  Highest-Value Lead
                 </span>
                 <DollarSign className="w-4 h-4 text-[#1F3557]" />
               </div>
@@ -822,7 +927,7 @@ export const LeadsPage: React.FC = () => {
             <div>
               <div className="flex justify-between items-start">
                 <span className="text-[9.5px] bg-[#EAF5FF] border border-rose-300 text-rose-600 px-2 py-0.5 rounded font-black uppercase tracking-wider">
-                  Attention Required
+                  Needs Follow-Up
                 </span>
                 <AlertCircle className="w-4 h-4 text-rose-600" />
               </div>
@@ -838,7 +943,7 @@ export const LeadsPage: React.FC = () => {
             <div>
               <div className="flex justify-between items-start">
                 <span className="text-[9.5px] bg-[#EAF5FF] border border-[#9EC8EF] text-[#1F3557] px-2 py-0.5 rounded font-black uppercase tracking-wider">
-                  Acquisition
+                  Sales Results
                 </span>
                 <TrendingUp className="w-4 h-4 text-[#1F3557]" />
               </div>
@@ -858,7 +963,7 @@ export const LeadsPage: React.FC = () => {
                 </span>
                 <Briefcase className="w-4 h-4 text-[#1F3557]" />
               </div>
-              <p className="text-xs font-extrabold text-[#1F3557] mt-3">Open Pipeline Value</p>
+              <p className="text-xs font-extrabold text-[#1F3557] mt-3">Value of Open Leads</p>
               <p className="text-[11px] text-[#5E7393] font-medium mt-1 leading-normal">
                 {openPipelineValue === 0 ? "No open leads with a value yet." : `$${openPipelineValue.toLocaleString()} across all open leads.`}
               </p>
@@ -981,10 +1086,16 @@ export const LeadsPage: React.FC = () => {
               <div className="space-y-1">
                 <label className="text-[10px] uppercase font-bold text-[#5E7393]">Email Address</label>
                 <input 
-                  type="email" 
+                  type="email"
+                  name="leadEmail"
+                  inputMode="email"
+                  autoComplete="email"
+                  autoCapitalize="none"
+                  spellCheck={false}
                   value={formEmail}
-                  onChange={e => setFormEmail(e.target.value)}
+                  onChange={e => setFormEmail(normalizeLeadEmail(e.currentTarget.value))}
                   placeholder="e.g. john@resistance.com"
+                  style={{ color: "#1F3557", WebkitTextFillColor: "#1F3557", caretColor: "#1F3557" }}
                   className="w-full text-xs bg-[#EAF5FF] border border-[#9EC8EF] rounded-xl px-3 py-2.5 focus:outline-none focus:border-[#4A86F7] font-semibold text-[#1F3557]"
                 />
               </div>
@@ -1110,6 +1221,14 @@ export const LeadsPage: React.FC = () => {
               <button
                 type="button"
                 disabled={!formName.trim()}
+                onClick={() => handleAddLead("pdf-store")}
+                className="px-4 py-2 bg-white hover:bg-slate-100 border border-emerald-600 text-emerald-700 font-bold rounded-xl text-xs uppercase tracking-wider disabled:border-slate-300 disabled:text-slate-300 transition-colors cursor-pointer"
+              >
+                Save (and Store as PDF)
+              </button>
+              <button
+                type="button"
+                disabled={!formName.trim()}
                 onClick={() => handleAddLead("pdf")}
                 className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl text-xs uppercase tracking-wider disabled:bg-slate-300 transition-colors cursor-pointer"
               >
@@ -1216,9 +1335,15 @@ export const LeadsPage: React.FC = () => {
                   <div className="space-y-1">
                     <label className="text-[10px] uppercase font-bold text-[#5E7393]">Email Address</label>
                     <input 
-                      type="email" 
+                      type="email"
+                      name="leadEmailEdit"
+                      inputMode="email"
+                      autoComplete="email"
+                      autoCapitalize="none"
+                      spellCheck={false}
                       value={formEmail}
-                      onChange={e => setFormEmail(e.target.value)}
+                      onChange={e => setFormEmail(normalizeLeadEmail(e.currentTarget.value))}
+                      style={{ color: "#1F3557", WebkitTextFillColor: "#1F3557", caretColor: "#1F3557" }}
                       className="w-full text-xs bg-[#EAF5FF] border border-[#9EC8EF] rounded-xl px-3 py-2.5 focus:outline-none focus:border-[#4A86F7] font-semibold text-[#1F3557]"
                     />
                   </div>
@@ -1340,7 +1465,7 @@ export const LeadsPage: React.FC = () => {
                       </div>
                       <div>
                         <p className="text-[10px] uppercase font-bold text-[#5E7393]">Email</p>
-                        <p className="text-[#1F3557] font-bold mt-0.5">{selectedLead.email}</p>
+                        <p className="text-[#1F3557] font-bold mt-0.5">{normalizeLeadEmail(selectedLead.email || "")}</p>
                       </div>
                       {(() => {
                         const addrParts = parseAddress(selectedLead.address || "");
@@ -1386,6 +1511,13 @@ export const LeadsPage: React.FC = () => {
                     <p className="text-[10px] uppercase font-bold text-[#5E7393] mb-2.5">CRM System Operations</p>
                     <div className="grid grid-cols-2 gap-2.5">
                       <button
+                        onClick={handleScheduleHomeVisit}
+                        className="px-4 py-2.5 bg-[#EAF5FF] hover:bg-[#BDDDF8] border border-[#9EC8EF] text-[#1F3557] hover:text-[#1F3557] font-bold rounded-xl text-xs uppercase tracking-wider transition-colors cursor-pointer flex items-center justify-center gap-1.5 shadow-xs"
+                      >
+                        <Calendar className="w-4 h-4 text-amber-600" />
+                        Schedule Home Visit
+                      </button>
+                      <button
                         onClick={handleConvertLead}
                         className="px-4 py-2.5 bg-[#EAF5FF] hover:bg-[#BDDDF8] border border-[#9EC8EF] text-[#1F3557] hover:text-[#1F3557] font-bold rounded-xl text-xs uppercase tracking-wider transition-colors cursor-pointer flex items-center justify-center gap-1.5 shadow-xs"
                       >
@@ -1398,6 +1530,13 @@ export const LeadsPage: React.FC = () => {
                       >
                         <FileText className="w-4 h-4 text-blue-600" />
                         Build Estimate
+                      </button>
+                      <button
+                        onClick={handleBuildJob}
+                        className="px-4 py-2.5 bg-[#EAF5FF] hover:bg-[#BDDDF8] border border-[#9EC8EF] text-[#1F3557] hover:text-[#1F3557] font-bold rounded-xl text-xs uppercase tracking-wider transition-colors cursor-pointer flex items-center justify-center gap-1.5 shadow-xs"
+                      >
+                        <Briefcase className="w-4 h-4 text-[#315C9F]" />
+                        Build Job
                       </button>
                     </div>
                   </div>
@@ -1424,11 +1563,29 @@ export const LeadsPage: React.FC = () => {
                 >
                   Close
                 </button>
+                {!isEditMode && selectedLead && (
+                  <button
+                    type="button"
+                    onClick={() => void storeLeadPdf(selectedLead)}
+                    className="px-4 py-2 bg-white hover:bg-slate-100 border border-emerald-600 text-emerald-700 font-bold rounded-xl text-xs uppercase tracking-wider transition-colors cursor-pointer"
+                  >
+                    Store as PDF
+                  </button>
+                )}
+                {!isEditMode && selectedLead && (
+                  <button
+                    type="button"
+                    onClick={() => void generateLeadPdf(selectedLead)}
+                    className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl text-xs uppercase tracking-wider transition-colors cursor-pointer"
+                  >
+                    Generate PDF
+                  </button>
+                )}
                 {isEditMode && (
                   <button
                     type="button"
                     disabled={!formName.trim()}
-                    onClick={handleSaveEdit}
+                    onClick={() => handleSaveEdit("save")}
                     className={`px-4 py-2 text-white font-bold rounded-xl text-xs uppercase tracking-wider transition-colors cursor-pointer ${
                       formName.trim() ? "bg-[#315C9F] hover:bg-[#1F3557]" : "bg-slate-300 cursor-not-allowed"
                     }`}
@@ -1436,11 +1593,32 @@ export const LeadsPage: React.FC = () => {
                     Save Changes
                   </button>
                 )}
+                {isEditMode && (
+                  <button
+                    type="button"
+                    disabled={!formName.trim()}
+                    onClick={() => handleSaveEdit("pdf-store")}
+                    className="px-4 py-2 bg-white hover:bg-slate-100 border border-emerald-600 text-emerald-700 font-bold rounded-xl text-xs uppercase tracking-wider disabled:border-slate-300 disabled:text-slate-300 transition-colors cursor-pointer"
+                  >
+                    Save (and Store as PDF)
+                  </button>
+                )}
+                {isEditMode && (
+                  <button
+                    type="button"
+                    disabled={!formName.trim()}
+                    onClick={() => handleSaveEdit("pdf")}
+                    className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl text-xs uppercase tracking-wider disabled:bg-slate-300 transition-colors cursor-pointer"
+                  >
+                    Save &amp; Generate PDF
+                  </button>
+                )}
               </div>
             </div>
           </div>
         </div>
       )}
+      <ScheduleHomeVisitModal isOpen={isHomeVisitOpen} onClose={() => setIsHomeVisitOpen(false)} lead={selectedLead} />
     </div>
   );
 };

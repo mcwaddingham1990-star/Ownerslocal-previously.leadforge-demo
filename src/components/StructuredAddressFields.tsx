@@ -12,7 +12,12 @@ export function parseAddress(value = ""): AddressParts {
   const remainder = parts.join(", ");
   // Treat an in-progress ZIP as a ZIP too. Requiring all five digits here makes
   // digits 1-4 get reparsed into City/State after every controlled-input update.
-  const zipMatch = remainder.match(/(?:^|,\s*)(\d{1,5}(?:-\d{0,4})?)\s*$/);
+  // The boundary before the digits can be a comma OR plain whitespace --
+  // standard "City, ST ZIP" addresses have no comma between the state and
+  // the ZIP, and requiring one left the ZIP embedded in City/State (showing
+  // an empty ZIP box for a perfectly normal address and inviting it to be
+  // typed a second time, duplicating it).
+  const zipMatch = remainder.match(/(?:^|[,\s])(\d{1,5}(?:-\d{0,4})?)\s*$/);
   const zip = zipMatch?.[1]?.trim() || "";
   const cityState = zip ? remainder.slice(0, remainder.lastIndexOf(zip)).replace(/,\s*$/, "").trim() : remainder;
   return { street, cityState, zip };

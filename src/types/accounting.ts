@@ -99,6 +99,8 @@ export interface Invoice {
    * Cleared once Stripe reports the dispute closed. */
   disputeStatus?: string;
   disputedAmount?: number;
+  /** Set when an Automation (WHEN -> IF -> DO) created this invoice; also keeps that creation from firing other "Invoice Created" automations. */
+  createdByAutomationId?: string;
 }
 
 export interface Bill {

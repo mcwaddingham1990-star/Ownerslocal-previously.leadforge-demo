@@ -1,8 +1,12 @@
 import React, { useState, useMemo, useEffect, useRef } from "react";
+import { confirmJobCompletion } from "../lib/completionGuard";
 import { useAuth } from "../context/AuthContext";
 import { useDomainData } from "../context/DomainDataContext";
 import { useNavTelemetry } from "../context/NavTelemetryContext";
 import { CreateWorkOrderPicker } from "./CreateWorkOrderPicker";
+import { AssignEmployeeField } from "./AssignEmployeeField";
+import { useAssignableEmployeeNames } from "../hooks/useAssignableEmployees";
+import { hasEffectivePermission } from "../types/permissions";
 import {
   Search,
   Filter,
@@ -76,12 +80,9 @@ const STATUSES: Array<DispatchEvent["status"]> = [
 export const DispatchPage: React.FC = () => {
   const { loggedInUser, simulatedRole } = useAuth();
   const activeRole = simulatedRole || loggedInUser?.role || "Owner";
-  const { schedulingEvents: events, setSchedulingEvents: setEvents, customers: customersList, employees } = useDomainData();
+  const { schedulingEvents: events, setSchedulingEvents: setEvents, customers: customersList } = useDomainData();
   const [isWorkOrderPickerOpen, setIsWorkOrderPickerOpen] = useState(false);
-  const AVAILABLE_TECHNICIANS = useMemo(() => employees
-    .map(employee => `${employee.firstName} ${employee.lastName}`.trim())
-    .filter((name, index, names) => name.length > 0 && names.indexOf(name) === index)
-    .sort((a, b) => a.localeCompare(b)), [employees]);
+  const AVAILABLE_TECHNICIANS = useAssignableEmployeeNames();
   const AVAILABLE_CREWS = useMemo(() => ["None", ...Array.from(new Set(events.map(event => event.assignedCrew).filter((crew): crew is string => !!crew && crew !== "None"))).sort()], [events]);
   const AVAILABLE_VEHICLES = useMemo(() => ["None", ...Array.from(new Set(events.map(event => event.assignedVehicle).filter((vehicle): vehicle is string => !!vehicle && vehicle !== "None"))).sort()], [events]);
   const {
@@ -130,10 +131,10 @@ export const DispatchPage: React.FC = () => {
   const [tempVehicle, setTempVehicle] = useState("");
   const [tempStatus, setTempStatus] = useState<DispatchEvent["status"]>("Assigned");
 
-  // Determine if active user role has WRITE PERMISSIONS for dispatch
-  // Owners, Managers, Schedulers, Dispatchers can assign and modify.
-  // Technicians, Drivers, Installers can only view dispatches assigned to them.
-  const hasWriteAccess = useMemo(() => {
+  // Real sessions obey the Owner-configured Dispatch permission matrix.
+  // Workspace Simulator keeps its existing role-template preview behavior.
+  const isOwner = activeRole.trim().toLowerCase() === "owner";
+  const previewDispatchWrite = useMemo(() => {
     const roleLower = activeRole.toLowerCase();
     return (
       roleLower.includes("owner") ||
@@ -143,8 +144,22 @@ export const DispatchPage: React.FC = () => {
       activeRole === "Office Manager"
     );
   }, [activeRole]);
+  const hasWriteAccess = simulatedRole
+    ? previewDispatchWrite
+    : isOwner || hasEffectivePermission(loggedInUser?.granularPermissions, loggedInUser?.permissions, "dispatch", "edit");
+  const hasFullViewAccess = simulatedRole
+    ? previewDispatchWrite
+    : isOwner || hasEffectivePermission(loggedInUser?.granularPermissions, loggedInUser?.permissions, "dispatch", "view");
+  const currentUserIdentity = useMemo(
+    () => [loggedInUser?.name, loggedInUser?.email]
+      .filter(Boolean)
+      .map(value => String(value).trim().toLowerCase()),
+    [loggedInUser?.name, loggedInUser?.email]
+  );
 
   // Handle setting status / assigning dispatch
+  // Set while a completion the user already confirmed re-enters handleUpdateDispatch.
+  const completionConfirmedRef = useRef(false);
   const handleUpdateDispatch = (
     eventId: string,
     updates: {
@@ -159,6 +174,18 @@ export const DispatchPage: React.FC = () => {
       if (logOperationalEvent) {
         logOperationalEvent("Permission Denied", "Attempted to modify dispatch without write permissions", "⚠️");
       }
+      return;
+    }
+    const target = events.find(evt => evt.id === eventId);
+    if (updates.status === "Completed" && target?.eventType === "Job" && target.status !== "Completed" && !completionConfirmedRef.current) {
+      void confirmJobCompletion(eventId).then(ok => {
+        if (!ok) {
+          if (selectedEvent?.id === eventId) setSelectedEvent(prev => prev ? { ...prev, status: target.status as DispatchEvent["status"] } : null);
+          return;
+        }
+        completionConfirmedRef.current = true;
+        try { handleUpdateDispatch(eventId, updates); } finally { completionConfirmedRef.current = false; }
+      });
       return;
     }
 
@@ -260,17 +287,11 @@ export const DispatchPage: React.FC = () => {
   const filteredEvents = useMemo(() => {
     let result = [...normalizedEvents];
 
-    // 1. Role Restrictions -- compare against the real logged-in user's
-    // real name, not a hardcoded fake name or their role title (a job
-    // title like "technician" isn't a person's name, so that comparison
-    // never matched either — restricted roles would have seen almost
-    // nothing, not even their own real assigned jobs).
-    const roleLower = activeRole.toLowerCase();
-    const isRestrictedRole = roleLower.includes("technician") || roleLower.includes("driver") || roleLower.includes("installer");
-    if (isRestrictedRole) {
-      const myName = (loggedInUser?.name || "").trim().toLowerCase();
-      result = result.filter(
-        (e) => !!myName && e.assignedEmployee.trim().toLowerCase() === myName
+    // Without Dispatch View permission, keep the existing narrow worker
+    // fallback: only an event assigned to this signed-in identity is visible.
+    if (!hasFullViewAccess) {
+      result = result.filter((e) =>
+        currentUserIdentity.includes((e.assignedEmployee || "").trim().toLowerCase())
       );
     }
 
@@ -328,6 +349,8 @@ export const DispatchPage: React.FC = () => {
   }, [
     normalizedEvents,
     activeRole,
+    hasFullViewAccess,
+    currentUserIdentity,
     selectedDate,
     searchQuery,
     filterEmployee,
@@ -380,14 +403,14 @@ export const DispatchPage: React.FC = () => {
           </div>
           <div>
             <div className="flex items-center gap-2">
-              <h2 className="text-base font-sans font-extrabold text-[#1F3557] uppercase tracking-wider">Dispatch Center</h2>
+              <h2 className="text-base font-sans font-extrabold text-[#1F3557] uppercase tracking-wider">Dispatch</h2>
               {!hasWriteAccess && (
                 <span className="flex items-center gap-1 text-[10px] bg-amber-100 text-amber-800 border border-amber-200 px-1.5 py-0.5 rounded-md font-bold">
                   <Lock className="w-2.5 h-2.5" /> View-Only (Technician View)
                 </span>
               )}
             </div>
-            <p className="text-xs text-slate-500 font-sans font-semibold">Real-time scheduling, tracking, and fleet distribution hub</p>
+            <p className="text-xs text-slate-500 font-sans font-semibold">Assign jobs and see where your crew is.</p>
           </div>
           {hasWriteAccess && (
             <button
@@ -721,7 +744,7 @@ export const DispatchPage: React.FC = () => {
         <div className="lg:col-span-7 flex flex-col gap-3 min-h-[350px]">
           <div className="flex items-center justify-between">
             <h3 className="text-xs font-black text-slate-700 uppercase tracking-wider flex items-center gap-1.5">
-              <span>📋 Dispatch Queue</span>
+              <span>📋 Jobs Waiting for Dispatch</span>
               <span className="px-2 py-0.5 bg-slate-100 border border-slate-200 text-slate-800 text-[10px] font-mono font-bold rounded-lg">
                 {filteredEvents.length} active
               </span>
@@ -739,7 +762,7 @@ export const DispatchPage: React.FC = () => {
                 <AlertCircle className="w-8 h-8 text-[#5E7393]/60 mb-2" />
                 <h4 className="text-xs font-black text-slate-700 uppercase tracking-wider">No Dispatches Found</h4>
                 <p className="text-[11px] text-slate-500 mt-1 max-w-xs leading-relaxed">
-                  No active events meet the filter requirements for {selectedDate}. Adjust filters or add scheduling assignments.
+                  No jobs match these filters. Clear the filters or schedule a job.
                 </p>
               </div>
             ) : (
@@ -1107,14 +1130,11 @@ export const DispatchPage: React.FC = () => {
               {(assignType === "technician" || assignType === "all") && (
                 <div>
                   <label className="block text-[10px] font-black text-[#5E7393] uppercase mb-1">Technician Assignee</label>
-                  <select
+                  <AssignEmployeeField
                     value={tempEmployee}
-                    onChange={(e) => setTempEmployee(e.target.value)}
+                    onChange={setTempEmployee}
                     className="w-full bg-white border border-[#A9CDEE] rounded-lg p-2 font-bold text-[#1F3557] outline-none"
-                  >
-                    <option value="">Unassigned</option>
-                    {AVAILABLE_TECHNICIANS.map(t => <option key={t} value={t}>{t}</option>)}
-                  </select>
+                  />
                 </div>
               )}
 
@@ -1208,12 +1228,12 @@ export const DispatchPage: React.FC = () => {
       <div className="bg-[#E3F3FF] p-3 rounded-xl border border-[#A9CDEE] text-[10.5px] font-sans font-semibold text-slate-600 flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-2">
           <span className="w-2 h-2 rounded-full bg-blue-500 animate-ping shrink-0" />
-          <span>Fleet telemetry operational • Regional dispatch loop synced with Scheduling calendar database</span>
+          <span>Dispatch is connected to your schedule.</span>
         </div>
         <div className="flex items-center gap-3">
-          <button onClick={() => handleNavigateToScreen("timeclock", "Clock details")} className="hover:underline text-[#315C9F] font-bold">⏱️ Clock-in Tracker</button>
+          <button onClick={() => handleNavigateToScreen("timeclock", "Clock details")} className="hover:underline text-[#315C9F] font-bold">⏱️ See Who’s Clocked In</button>
           <span className="text-slate-300">|</span>
-          <button onClick={() => handleNavigateToScreen("ai_assistant", "AI chat helper")} className="hover:underline text-indigo-600 font-bold">🤖 Operational Assistant</button>
+          <button onClick={() => handleNavigateToScreen("ai_assistant", "AI chat helper")} className="hover:underline text-indigo-600 font-bold">🤖 Ask for Dispatch Help</button>
         </div>
       </div>
 

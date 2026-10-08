@@ -11,9 +11,11 @@ export interface SendChoiceModalProps {
   email?: string;
   /** Pre-filled subject/body. Left blank by default -- the point of this
    * button is handing off to the device's own text/email app with the
-   * recipient already filled in, not writing the message for the user. */
+   * recipient already filled in when available. Without a saved contact, the
+   * device app still opens with a blank recipient so the user can enter one. */
   subject?: string;
   body?: string;
+  attachment?: { filename: string; mimeType: string; base64: string };
   /** Fires after the device app is handed off to, so the caller can e.g.
    * mark the record "Sent". */
   onSent?: (channel: "email" | "sms") => void;
@@ -22,15 +24,38 @@ export interface SendChoiceModalProps {
 /**
  * The universal "Send" popup: pick Text or Email, then hand off to the
  * device's own SMS/mail app (via sms:/mailto: links) with the recipient
- * pre-filled and the message left blank for the user to write. Reusable
+ * pre-filled when known. If no recipient is known, it opens a blank email or
+ * text instead of blocking the user. Reusable
  * across every Save/Generate PDF flow in the app -- Estimates, Invoices,
  * Jobs, the PDF Editor -- so each only needs to pass in a label + contact.
  */
-export default function SendChoiceModal({ isOpen, onClose, label, phone, email, subject, body, onSent }: SendChoiceModalProps) {
+function base64ToFile(attachment: { filename: string; mimeType: string; base64: string }) {
+  const clean = attachment.base64.includes(",") ? attachment.base64.split(",").pop() || "" : attachment.base64;
+  const binary = atob(clean);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+  return new File([bytes], attachment.filename, { type: attachment.mimeType });
+}
+
+export default function SendChoiceModal({ isOpen, onClose, label, phone, email, subject, body, attachment, onSent }: SendChoiceModalProps) {
   if (!isOpen) return null;
   const hasPhone = !!phone?.trim();
   const hasEmail = !!email?.trim();
-  const send = (channel: "email" | "sms") => {
+  const send = async (channel: "email" | "sms") => {
+    if (attachment && navigator.share) {
+      const file = base64ToFile(attachment);
+      const sharePayload = { title: subject || label, text: body || "", files: [file] };
+      if (!navigator.canShare || navigator.canShare(sharePayload)) {
+        try {
+          await navigator.share(sharePayload);
+          onSent?.(channel);
+          onClose();
+          return;
+        } catch (error) {
+          if ((error as DOMException).name === "AbortError") return;
+        }
+      }
+    }
     if (channel === "email") composeEmail({ to: email, subject, body });
     else composeSms({ to: phone, body });
     onSent?.(channel);
@@ -45,31 +70,29 @@ export default function SendChoiceModal({ isOpen, onClose, label, phone, email, 
             <X className="w-4 h-4" />
           </button>
         </div>
-        <p className="text-xs text-[#5E7393] font-semibold mb-4">Text or email it? This opens your phone's own messaging or mail app, ready to send.</p>
+        <p className="text-xs text-[#5E7393] font-semibold mb-4">{attachment ? "Text or email it? If your phone supports file sharing, the PDF is handed to your messaging or mail app with the message." : "Text or email it? This opens your phone's own messaging or mail app, ready to send."}</p>
         <div className="grid grid-cols-2 gap-2.5">
           <button
             type="button"
-            disabled={!hasPhone}
             onClick={() => send("sms")}
-            className="p-3.5 bg-[#EAF5FF] hover:bg-[#BDDDF8] disabled:opacity-40 disabled:cursor-not-allowed border border-[#9EC8EF] rounded-2xl flex flex-col items-center gap-1.5 text-center cursor-pointer transition-colors"
+            className="p-3.5 bg-[#EAF5FF] hover:bg-[#BDDDF8] border border-[#9EC8EF] rounded-2xl flex flex-col items-center gap-1.5 text-center cursor-pointer transition-colors"
           >
             <MessageCircle className="w-5 h-5 text-[#315C9F]" />
             <span className="text-[10px] font-black uppercase text-[#1F3557]">Text</span>
-            <span className="text-[9px] text-[#5E7393] truncate w-full">{hasPhone ? phone : "No phone on file"}</span>
+            <span className="text-[9px] text-[#5E7393] truncate w-full">{hasPhone ? phone : "Enter number in text app"}</span>
           </button>
           <button
             type="button"
-            disabled={!hasEmail}
             onClick={() => send("email")}
-            className="p-3.5 bg-[#EAF5FF] hover:bg-[#BDDDF8] disabled:opacity-40 disabled:cursor-not-allowed border border-[#9EC8EF] rounded-2xl flex flex-col items-center gap-1.5 text-center cursor-pointer transition-colors"
+            className="p-3.5 bg-[#EAF5FF] hover:bg-[#BDDDF8] border border-[#9EC8EF] rounded-2xl flex flex-col items-center gap-1.5 text-center cursor-pointer transition-colors"
           >
             <Mail className="w-5 h-5 text-[#315C9F]" />
             <span className="text-[10px] font-black uppercase text-[#1F3557]">Email</span>
-            <span className="text-[9px] text-[#5E7393] truncate w-full">{hasEmail ? email : "No email on file"}</span>
+            <span className="text-[9px] text-[#5E7393] truncate w-full">{hasEmail ? email : "Enter email in mail app"}</span>
           </button>
         </div>
         {!hasPhone && !hasEmail && (
-          <p className="text-[10px] text-rose-600 font-bold mt-3">No phone or email on file for this customer yet -- add one to their profile first.</p>
+          <p className="text-[10px] text-[#5E7393] font-semibold mt-3">No contact selected. Choose Text or Email, then enter the recipient in your phone's app.</p>
         )}
       </div>
     </div>

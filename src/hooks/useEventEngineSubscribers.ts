@@ -4,15 +4,12 @@ import { useDomainData } from "../context/DomainDataContext";
 import { useNavTelemetry } from "../context/NavTelemetryContext";
 import { SchedulingEvent, Estimate } from "../types/domain";
 import type { Invoice } from "../types/accounting";
-import type { ReviewRequest } from "../types/reviewRequest";
 import { postJobCompletionRevenueEntry } from "../lib/accountingEngine";
+import { sendPushBestEffort } from "../lib/notificationsService";
+import { buildScheduledReviewRequest, reviewRequestBlockedReason, reviewRequestExists } from "../lib/reviewRequests";
 
 function generateRevenueEventId(): string {
   return `rev_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-}
-
-function uid(prefix: string): string {
-  return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
 /**
@@ -45,27 +42,13 @@ export function useEventEngineSubscribers(): void {
     excludedByJob?: boolean;
   }) => {
     if (!reviewAutomationSettings.enabled || reviewAutomationSettings.trigger !== params.trigger) return;
-    if (!reviewAutomationSettings.message.trim() || !reviewAutomationSettings.reviewLink.trim()) return;
-    if (params.excludedByJob) return;
-    if (params.customerId && reviewAutomationSettings.excludedCustomerIds.includes(params.customerId)) return;
+    if (reviewRequestBlockedReason(reviewAutomationSettings, params)) return;
 
-    const now = new Date().toISOString();
-    const request: ReviewRequest = {
-      id: uid("review"),
-      customerId: params.customerId || "",
-      customerName: params.customerName,
-      customerPhone: params.customerPhone,
-      customerEmail: params.customerEmail,
-      jobId: params.jobId,
-      invoiceId: params.invoiceId,
-      trigger: params.trigger,
-      status: "Scheduled",
-      message: reviewAutomationSettings.message,
-      reviewLink: reviewAutomationSettings.reviewLink,
-      createdAt: now,
+    const request = buildScheduledReviewRequest({
+      ...params,
       createdBy: "Automated Review Requests",
-      activity: [{ id: uid("act"), timestamp: now, action: `Auto-scheduled (${params.trigger === "job_completed" ? "job completed" : "invoice paid"})`, by: "Event Engine" }]
-    };
+      activityBy: "Event Engine"
+    }, reviewAutomationSettings);
     // De-dup check lives INSIDE the updater (always sees the very latest
     // state, not whatever `reviewRequests` this closure was created with)
     // so two near-simultaneous cascade firings for the same job can never
@@ -73,8 +56,7 @@ export function useEventEngineSubscribers(): void {
     // revenue-recognition cascade above already uses for the same reason.
     let created = false;
     setReviewRequests(prev => {
-      const alreadyExists = prev.some(r => params.jobId ? r.jobId === params.jobId : (r.customerId === params.customerId && !r.jobId));
-      if (alreadyExists) return prev;
+      if (reviewRequestExists(prev, params)) return prev;
       created = true;
       return [request, ...prev];
     });
@@ -179,4 +161,22 @@ export function useEventEngineSubscribers(): void {
     return unsubscribe;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [customers, schedulingEvents, reviewAutomationSettings]);
+
+  // Push every new Alert Center notification to its recipient's devices, so
+  // it reaches them (and pulses the Missed Call Text-Back widget) with this
+  // site closed. "created" only fires on the client that wrote the
+  // notification, so each one is pushed exactly once.
+  useEffect(() => {
+    const unsubscribe = onCollectionEvent("notifications", (evt: CollectionEvent) => {
+      if (evt.type !== "created") return;
+      const { recipientEmail, title, description, id, type } = evt.item || {};
+      if (!recipientEmail || !title) return;
+      void sendPushBestEffort([recipientEmail], title, description || title, {
+        kind: "notification",
+        notificationId: String(id || ""),
+        type: String(type || "general"),
+      });
+    });
+    return unsubscribe;
+  }, []);
 }

@@ -21,7 +21,8 @@ self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
 
   // Never touch API calls or cross-origin requests (Firebase, Google Maps, Gemini, etc.).
-  if (url.origin !== self.location.origin || url.pathname.startsWith("/api/")) {
+  // Downloads (the Android APKs) go straight to the network: never cache multi-MB files.
+  if (url.origin !== self.location.origin || url.pathname.startsWith("/api/") || url.pathname.startsWith("/downloads/")) {
     return;
   }
 
@@ -57,22 +58,26 @@ self.addEventListener("fetch", (event) => {
 });
 
 // --- Firebase Cloud Messaging (background push) ---
-// Same public Firebase web config already bundled into the app's own client
-// JS (see firebase-applet-config.json / src/firebase.ts) — not a secret;
-// Firestore security rules protect data, not hiding this config. Wrapped so
-// an unsupported browser/context can never break the offline shell caching
-// above.
+// Standalone demo build: this must NOT point at the real app's Firebase
+// project (see firebase-applet-config.json / src/firebase.ts for the same
+// fake, disconnected config used everywhere else). The real app's own
+// sw.js hardcodes its real project here since a service worker can't
+// import the JSON config file the rest of the app reads it from -- so a
+// wholesale copy of that file would silently reconnect this one surface
+// to the real backend even though every other part of the app is
+// disconnected. Push notifications are simply inert against a project
+// that doesn't exist; the offline app-shell caching above still works.
 try {
   importScripts("https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js");
   importScripts("https://www.gstatic.com/firebasejs/10.14.1/firebase-messaging-compat.js");
 
   firebase.initializeApp({
-    apiKey: "AIzaSyCrtpCjin92MUH1IJrIiHgLutDUIQoB7DI",
-    authDomain: "gen-lang-client-0834040446.firebaseapp.com",
-    projectId: "gen-lang-client-0834040446",
-    storageBucket: "gen-lang-client-0834040446.firebasestorage.app",
-    messagingSenderId: "1077711892994",
-    appId: "1:1077711892994:web:6220911716c3e0985cad1b",
+    apiKey: "demo-disconnected-no-real-key",
+    authDomain: "ownerslocal-demo-disconnected.firebaseapp.com",
+    projectId: "ownerslocal-demo-disconnected",
+    storageBucket: "ownerslocal-demo-disconnected.firebasestorage.app",
+    messagingSenderId: "0000000000",
+    appId: "1:0000000000:web:0000000000000000000000",
   });
 
   const messaging = firebase.messaging();

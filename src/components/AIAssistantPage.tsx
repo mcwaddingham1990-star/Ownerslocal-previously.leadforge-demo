@@ -235,7 +235,7 @@ export const AIAssistantPage: React.FC<AIAssistantPageProps> = ({
               Your Business Assistant
             </h2>
             <p className="text-xs text-[#5E7393] font-sans font-semibold">
-              Ask it anything, run reports, and get real answers from your own business data
+              Ask questions about your customers, jobs, schedule, and money.
             </p>
           </div>
         </div>
@@ -315,11 +315,11 @@ export const AIAssistantPage: React.FC<AIAssistantPageProps> = ({
             <div className="bg-[#C7E3FB] rounded-3xl p-5 border border-[#A9CDEE] space-y-4 shadow-sm">
               <div className="flex justify-between items-center border-b border-[#A9CDEE] pb-3">
                 <div>
-                  <h3 className="text-xs font-extrabold text-[#342D7E] uppercase tracking-wider">What's Been Done</h3>
-                  <p className="text-[10.5px] text-slate-500 mt-0.5">A running log of everything your assistant has handled across the app.</p>
+                  <h3 className="text-xs font-extrabold text-[#342D7E] uppercase tracking-wider">AI Activity</h3>
+                  <p className="text-[10.5px] text-slate-500 mt-0.5">See the tasks Owner's AI has completed.</p>
                 </div>
                 <span className="text-[10px] bg-white text-[#315C9F] border border-[#A9CDEE] px-2.5 py-1 rounded-xl font-mono font-bold">
-                  {recentAiActions.length} Logged
+                  {recentAiActions.length === 0 ? "No AI activity yet" : `${recentAiActions.length} Logged`}
                 </span>
               </div>
 
@@ -327,7 +327,7 @@ export const AIAssistantPage: React.FC<AIAssistantPageProps> = ({
                 <div className="py-10 text-center space-y-2">
                   <p className="text-3xl">🤖</p>
                   <p className="text-xs font-bold text-slate-500">No AI activity yet</p>
-                  <p className="text-[10.5px] text-slate-400 max-w-sm mx-auto">Use any AI-powered feature and it'll show up here. You can undo anything from this list.</p>
+                  <p className="text-[10.5px] text-slate-400 max-w-sm mx-auto">Tasks completed by Owner's AI will appear here. Safe actions may include an Undo button.</p>
                 </div>
               ) : (
                 <div className="space-y-3">
@@ -668,11 +668,11 @@ export const AIAssistantPage: React.FC<AIAssistantPageProps> = ({
             </div>
             <div className="space-y-1">
               <span className="text-[9.5px] bg-[#4A86F7] text-white px-2 py-0.5 rounded font-black tracking-widest uppercase">
-                Core Engine Status
+                AI Status
               </span>
-              <h3 className="text-base font-extrabold uppercase mt-1.5 tracking-wider">Active Workspace AI</h3>
+              <h3 className="text-base font-extrabold uppercase mt-1.5 tracking-wider">Owner's AI</h3>
               <p className="text-[10.5px] text-slate-300 leading-normal font-sans font-medium">
-                Owner's AI watches active module screens, syncing real-time inputs to optimize task proposal flows.
+                Owner's AI uses your business information to answer questions and help with tasks.
               </p>
             </div>
             
@@ -688,11 +688,11 @@ export const AIAssistantPage: React.FC<AIAssistantPageProps> = ({
           <div className="bg-white rounded-3xl p-5 border border-[#9EC8EF]/40 shadow-sm space-y-4">
             <div className="flex justify-between items-center border-b border-slate-100 pb-3">
               <div>
-                <h3 className="text-xs font-black text-[#1F3557] uppercase tracking-wider">Recent Activity</h3>
-                <p className="text-[10px] text-slate-400 font-sans font-medium">Hit undo on anything you want to walk back.</p>
+                <h3 className="text-xs font-black text-[#1F3557] uppercase tracking-wider">Recent AI Activity</h3>
+                <p className="text-[10px] text-slate-400 font-sans font-medium">Select Undo when it is available and you want to reverse an action.</p>
               </div>
               <span className="text-[9px] bg-[#EAF5FF] text-[#315C9F] border border-[#9EC8EF]/30 px-2 py-0.5 rounded font-mono font-black">
-                {recentAiActions.filter(a => a.status === "Completed").length} Active
+                {recentAiActions.filter(a => a.status === "Completed").length === 0 ? "No recent activity" : `${recentAiActions.filter(a => a.status === "Completed").length} Active`}
               </span>
             </div>
 

@@ -1,12 +1,14 @@
 import React, { useEffect, useMemo, useState, useCallback } from "react";
 import {
   Briefcase, FileText, CalendarClock, Receipt, FolderOpen, ShieldCheck, ClipboardList, MessageSquare,
-  Users, Search, LogOut, ChevronDown, Loader2, CheckCircle2, XCircle, ExternalLink, Send, Plus, Building2
+  Users, Search, LogOut, ChevronDown, ChevronLeft, ChevronRight, Loader2, CheckCircle2, XCircle, ExternalLink, Send, Plus, Building2, CalendarPlus
 } from "lucide-react";
+import BookServiceFlow from "./BookServiceFlow";
+import { customerAccountBookingApi } from "../lib/onlineBookingClient";
 import type { CustomerSession } from "../types/customerAccount";
 import * as api from "../lib/customerAccountClient";
 
-type TabId = "jobs" | "estimates" | "appointments" | "invoices" | "documents" | "memberships" | "request" | "messages" | "professionals" | "find";
+type TabId = "jobs" | "estimates" | "appointments" | "invoices" | "documents" | "memberships" | "book" | "request" | "messages" | "professionals" | "find";
 
 const TABS: Array<{ id: TabId; label: string; icon: React.ReactNode; comingSoon?: boolean }> = [
   { id: "jobs", label: "My Jobs", icon: <Briefcase className="w-[18px] h-[18px]" /> },
@@ -15,13 +17,23 @@ const TABS: Array<{ id: TabId; label: string; icon: React.ReactNode; comingSoon?
   { id: "invoices", label: "Invoices", icon: <Receipt className="w-[18px] h-[18px]" /> },
   { id: "documents", label: "Documents", icon: <FolderOpen className="w-[18px] h-[18px]" /> },
   { id: "memberships", label: "Memberships", icon: <ShieldCheck className="w-[18px] h-[18px]" /> },
+  { id: "book", label: "Book Service", icon: <CalendarPlus className="w-[18px] h-[18px]" /> },
   { id: "request", label: "Request Service", icon: <ClipboardList className="w-[18px] h-[18px]" /> },
   { id: "messages", label: "Messages", icon: <MessageSquare className="w-[18px] h-[18px]" /> },
-  { id: "professionals", label: "Your Service Professionals", icon: <Users className="w-[18px] h-[18px]" /> },
+  { id: "professionals", label: "My Service Providers", icon: <Users className="w-[18px] h-[18px]" /> },
   { id: "find", label: "Find a Service Professional", icon: <Search className="w-[18px] h-[18px]" />, comingSoon: true }
 ];
 
-const fmtMoney = (n: number) => `$${(n || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+const fmtMoney = (n: number) => `${(n || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+const BrandIcon: React.FC<{ className?: string }> = ({ className = "" }) => (
+  <img
+    src="/branding/owners-sidebar-icon-1000043699.png"
+    alt=""
+    aria-hidden="true"
+    className={`object-contain ${className}`}
+  />
+);
 
 export interface CustomerAppShellProps {
   session: CustomerSession;
@@ -41,12 +53,14 @@ export interface CustomerAppShellProps {
  */
 export const CustomerAppShell: React.FC<CustomerAppShellProps> = ({ session, onSignOut }) => {
   const [activeTab, setActiveTab] = useState<TabId>("jobs");
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [professionals, setProfessionals] = useState<api.ServiceProfessionalCard[]>([]);
   const [pending, setPending] = useState<api.PendingConnection[]>([]);
   const [professionalsLoaded, setProfessionalsLoaded] = useState(false);
   const [businessFilter, setBusinessFilter] = useState<string>(""); // "" == All Businesses
   const [viewingBusinessId, setViewingBusinessId] = useState<string | null>(null);
   const [toast, setToast] = useState<string>("");
+  const [liveRefreshVersion, setLiveRefreshVersion] = useState(0);
 
   const showToast = useCallback((msg: string) => {
     setToast(msg);
@@ -63,6 +77,25 @@ export const CustomerAppShell: React.FC<CustomerAppShellProps> = ({ session, onS
   }, []);
 
   useEffect(() => { refreshProfessionals(); }, [refreshProfessionals]);
+
+  // Keep the customer account close to realtime without weakening Firestore
+  // rules or duplicating business data. All reads still come from the same
+  // business collections; this only re-queries the authenticated API.
+  useEffect(() => {
+    const refresh = () => {
+      if (document.visibilityState !== "visible") return;
+      setLiveRefreshVersion(v => v + 1);
+      void refreshProfessionals();
+    };
+    const timer = window.setInterval(refresh, 4000);
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", refresh);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", refresh);
+    };
+  }, [refreshProfessionals]);
 
   // A business's invite link (?joinCode=CODE) can land here for someone who
   // already has an account and is just now signing back in -- redeem it
@@ -91,71 +124,140 @@ export const CustomerAppShell: React.FC<CustomerAppShellProps> = ({ session, onS
 
   const goToBusiness = (businessId: string) => setViewingBusinessId(businessId);
 
+  const activeTabConfig = TABS.find(tab => tab.id === activeTab) || TABS[0];
+
   return (
-    <div className="w-full min-h-[100dvh] flex items-center justify-center p-2 sm:p-4" style={{ background: "linear-gradient(135deg,#EAF5FF,#C7E3FA)" }}>
-      <div className="w-full h-[calc(100vh-16px)] sm:h-[calc(100vh-32px)] min-h-[500px] bg-[#EAF5FF] border border-[#9EC8EF] overflow-hidden flex flex-row shadow-2xl relative max-w-7xl mx-auto rounded-2xl">
-        {/* LEFT NAV -- fixed, no role-based visibility, nothing editable */}
-        <div className="hidden sm:flex flex-col w-[240px] shrink-0 border-r border-[#9EC8EF] text-[#1F3557]" style={{ backgroundColor: "#C7E3FA" }}>
-          <div className="p-4 border-b border-[#9EC8EF]">
-            <div className="flex items-center gap-2">
-              <div className="w-8 h-8 rounded-lg bg-[#315C9F] flex items-center justify-center shrink-0">
-                <Building2 className="w-4 h-4 text-white" />
-              </div>
-              <span className="font-sans font-black tracking-tight text-sm text-[#1F3557]">OwnersLOCAL</span>
+    <div className="min-h-[100dvh] w-full bg-[#F5FAFF] p-2 sm:p-4 flex items-center justify-center">
+      <div
+        className="w-full h-[calc(100dvh-16px)] sm:h-[calc(100dvh-32px)] min-h-[650px] bg-[#EAF5FF] border border-[#9EC8EF] overflow-hidden flex flex-row shadow-2xl relative max-w-7xl mx-auto workspace-theme theme-light-basic"
+        style={{ borderRadius: "24px" }}
+      >
+        {/* CUSTOMER ACCOUNT — mirrors the main Owner'sLOCAL workspace shell. */}
+        <aside
+          style={{
+            width: isSidebarCollapsed ? "72px" : "240px",
+            backgroundColor: "#C7E3FA",
+            transition: "width 0.2s ease-in-out"
+          }}
+          className="flex flex-col border-r border-[#9EC8EF] text-[#1F3557] shrink-0 relative"
+        >
+          <div className="p-4 border-b border-[#9EC8EF] flex flex-col gap-2 relative">
+            <div className="flex items-center justify-between">
+              {!isSidebarCollapsed ? (
+                <div className="flex items-center gap-2 min-w-0">
+                  <div className="w-8 h-8 rounded-lg overflow-hidden flex items-center justify-center shrink-0">
+                    <BrandIcon className="w-full h-full" />
+                  </div>
+                  <span className="font-sans font-black tracking-tight text-sm text-[#1F3557] select-none truncate">OwnersLOCAL</span>
+                  <span className="text-[7.5px] px-1.5 py-0.5 bg-[#4A86F7]/10 text-[#1F3557] rounded font-black uppercase tracking-wider select-none shrink-0">Customer</span>
+                </div>
+              ) : (
+                <div className="mx-auto w-8 h-8 rounded-lg overflow-hidden flex items-center justify-center">
+                  <BrandIcon className="w-full h-full" />
+                </div>
+              )}
+
+              <button
+                type="button"
+                onClick={() => setIsSidebarCollapsed(v => !v)}
+                style={{ width: "24px", height: "24px" }}
+                className="absolute -right-3 top-5 bg-[#4A86F7] hover:bg-[#3977EE] border border-[#9EC8EF] rounded-full flex items-center justify-center text-white shadow-md hover:scale-105 active:scale-95 transition-all cursor-pointer z-20"
+                title={isSidebarCollapsed ? "Expand Menu" : "Collapse Menu"}
+              >
+                {isSidebarCollapsed ? <ChevronRight className="w-3.5 h-3.5" /> : <ChevronLeft className="w-3.5 h-3.5" />}
+              </button>
             </div>
-            <p className="mt-2.5 text-[10px] font-bold text-[#5E7393] truncate">{session.name || session.email}</p>
-            <span className="mt-1 inline-block text-[7.5px] px-1.5 py-0.5 bg-[#4A86F7]/10 text-[#1F3557] rounded font-black uppercase tracking-wider">Customer Account</span>
+
+            {!isSidebarCollapsed && (
+              <div className="mt-2.5 px-0.5 animate-fade-in text-left min-w-0">
+                <p className="font-sans font-black text-xs text-[#1F3557] tracking-wider uppercase leading-normal truncate">
+                  {session.name || "Customer"}
+                </p>
+                <p className="mt-1 text-[9px] font-bold uppercase tracking-wide text-[#5E7393] truncate">Customer Account</p>
+              </div>
+            )}
           </div>
 
-          <div className="flex-1 overflow-y-auto py-3 px-2 space-y-1">
+          <nav className="flex-1 overflow-y-auto py-3 px-2 space-y-1 scrollbar-none">
             {TABS.map(tab => {
               const isCurrent = activeTab === tab.id && !viewingBusinessId;
               const badgeCount = tab.id === "professionals" ? pending.length : 0;
               return (
                 <button
                   key={tab.id}
+                  type="button"
                   onClick={() => { setActiveTab(tab.id); setViewingBusinessId(null); }}
-                  className={`w-full rounded-xl px-3 py-2 flex items-center gap-2.5 transition-all ${
-                    isCurrent ? "bg-gradient-to-r from-[#2E7BEF] to-[#1485F4] text-white font-bold shadow-[0_0_10px_rgba(20,133,244,0.45)]" : "hover:bg-[#BDDDF8] text-[#5E7393] hover:text-[#1F3557]"
+                  className={`sidebar-nav-btn rounded-xl transition-all duration-200 cursor-pointer flex items-center relative group w-full ${
+                    isSidebarCollapsed ? "justify-center p-2" : "px-3 py-2"
+                  } ${
+                    isCurrent
+                      ? "sidebar-nav-btn-active bg-gradient-to-r from-[#2E7BEF] to-[#1485F4] text-white font-bold shadow-[0_0_10px_rgba(20,133,244,0.45)]"
+                      : "hover:bg-[#BDDDF8] text-[#5E7393] hover:text-[#1F3557] border border-transparent"
                   }`}
+                  title={tab.label}
                 >
-                  <span className={`shrink-0 ${isCurrent ? "text-white" : ""}`}>{tab.icon}</span>
-                  <span className="font-sans font-bold text-xs flex-1 text-left truncate">{tab.label}</span>
-                  {tab.comingSoon && <span className="text-[7px] bg-[#1F3557]/10 px-1 py-0.5 rounded font-black uppercase">Soon</span>}
-                  {badgeCount > 0 && <span className="flex h-2 w-2 rounded-full bg-red-500" />}
+                  {isSidebarCollapsed ? (
+                    <span className={`shrink-0 select-none ${isCurrent ? "text-white" : "text-[#5E7393] group-hover:text-[#1F3557]"}`}>
+                      {tab.icon}
+                    </span>
+                  ) : (
+                    <div className="flex items-center gap-2.5 w-full min-w-0">
+                      <span className={`shrink-0 select-none ${isCurrent ? "text-white" : "text-[#5E7393] group-hover:text-[#1F3557]"}`}>
+                        {tab.icon}
+                      </span>
+                      <span className={`font-sans font-bold tracking-wide text-xs flex-1 text-left truncate ${isCurrent ? "text-white" : "text-[#5E7393] group-hover:text-[#1F3557]"}`}>
+                        {tab.label}
+                      </span>
+                      {tab.comingSoon && <span className="text-[7px] bg-[#1F3557]/10 px-1 py-0.5 rounded font-black uppercase">Soon</span>}
+                    </div>
+                  )}
+                  {badgeCount > 0 && <span className="absolute top-2 right-2 flex h-2 w-2 rounded-full bg-red-500 ring-1 ring-white" />}
                 </button>
               );
             })}
-          </div>
+          </nav>
 
-          <div className="p-3 border-t border-[#9EC8EF]">
-            <button onClick={onSignOut} className="w-full flex items-center justify-center gap-2 rounded-xl border border-[#9EC8EF] bg-white/60 px-3 py-2 text-xs font-bold text-[#315C9F] hover:bg-white">
-              <LogOut className="w-3.5 h-3.5" /> Sign Out
-            </button>
-          </div>
-        </div>
-
-        {/* Mobile top bar (menu becomes a horizontal scroller) */}
-        <div className="flex-1 flex flex-col min-w-0">
-          <div className="sm:hidden flex items-center justify-between gap-2 p-3 border-b border-[#9EC8EF] bg-[#C7E3FA]">
-            <span className="font-black text-sm text-[#1F3557]">OwnersLOCAL</span>
-            <button onClick={onSignOut} className="p-2 text-[#315C9F]"><LogOut className="w-4 h-4" /></button>
-          </div>
-          <div className="sm:hidden flex overflow-x-auto gap-1.5 p-2 border-b border-[#9EC8EF] bg-[#EAF5FF] scrollbar-none">
-            {TABS.map(tab => (
+          <div className="p-3 border-t border-[#9EC8EF] bg-transparent">
+            <div className={`flex ${isSidebarCollapsed ? "flex-col items-center gap-2.5" : "items-center gap-2 justify-between"} overflow-hidden`}>
+              <div className={`flex ${isSidebarCollapsed ? "flex-col items-center" : "items-center gap-2"} min-w-0`}>
+                <div className="w-10 h-10 rounded-full bg-[#A9CEF5] text-[#1F3557] flex items-center justify-center text-xs font-black shrink-0 border border-[#9EC8EF] uppercase select-none">
+                  {(session.name || session.email || "CU").slice(0, 2)}
+                </div>
+                {!isSidebarCollapsed && (
+                  <div className="flex-1 min-w-0 animate-fade-in text-left">
+                    <p className="text-xs font-sans font-extrabold text-[#1F3557] truncate leading-tight">{session.name || session.email}</p>
+                    <div className="flex items-center gap-1.5 mt-0.5">
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                      <p className="text-[10px] font-mono text-[#1F3557]/60 truncate uppercase tracking-wider leading-none">Customer</p>
+                    </div>
+                  </div>
+                )}
+              </div>
               <button
-                key={tab.id}
-                onClick={() => { setActiveTab(tab.id); setViewingBusinessId(null); }}
-                className={`shrink-0 flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[10px] font-bold whitespace-nowrap ${activeTab === tab.id && !viewingBusinessId ? "bg-[#315C9F] text-white" : "bg-white border border-[#9EC8EF] text-[#5E7393]"}`}
+                type="button"
+                onClick={onSignOut}
+                className="p-1.5 bg-[#EAF5FF] hover:bg-rose-100/50 border border-[#9EC8EF] hover:border-rose-200 rounded-xl text-[#315C9F] hover:text-rose-600 transition-all cursor-pointer flex items-center justify-center shrink-0"
+                title="Sign Out Session"
               >
-                {tab.icon} {tab.label}
+                <LogOut className="w-3.5 h-3.5" />
               </button>
-            ))}
+            </div>
+          </div>
+        </aside>
+
+        <main className="flex-1 flex flex-col min-w-0 min-h-[640px] overflow-hidden relative bg-[#EAF5FF]">
+          <div className="px-5 py-3 border-b border-[#9EC8EF] bg-[#C7E3FA] flex flex-col sm:flex-row sm:items-center justify-between gap-3 shrink-0">
+            <div className="flex items-center gap-2 min-w-0">
+              <span className="text-[10px] font-bold text-[#5E7393] uppercase font-mono tracking-wider shrink-0">CURRENT PAGE:</span>
+              <span className="text-xs font-extrabold text-[#1F3557] bg-[#EAF5FF] border border-[#9EC8EF] px-2.5 py-1 rounded-xl truncate">
+                {viewingBusinessId ? "Service Provider" : activeTabConfig.label}
+              </span>
+            </div>
+            <span className="shrink-0 rounded-xl border border-emerald-300/70 bg-emerald-50 px-2.5 py-1 text-[9px] font-black uppercase tracking-wider text-emerald-700">● Live sync</span>
           </div>
 
-          {/* Business filter bar */}
           {!viewingBusinessId && ["jobs", "estimates", "appointments", "invoices", "documents", "memberships"].includes(activeTab) && (
-            <div className="flex items-center gap-2 px-4 py-2.5 border-b border-[#9EC8EF] bg-white/60">
+            <div className="flex items-center gap-2 px-5 py-2.5 border-b border-[#9EC8EF] bg-[#EAF5FF]">
               <span className="text-[10px] font-bold uppercase tracking-wide text-[#5E7393]">Showing:</span>
               <div className="relative">
                 <select
@@ -171,19 +273,20 @@ export const CustomerAppShell: React.FC<CustomerAppShellProps> = ({ session, onS
             </div>
           )}
 
-          <div className="flex-1 overflow-y-auto p-4">
+          <div className="flex-1 overflow-y-auto p-4 pb-28 md:p-6 md:pb-10 space-y-6 scrollbar-thin">
             {viewingBusinessId ? (
               <ViewBusinessPanel businessId={viewingBusinessId} onBack={() => setViewingBusinessId(null)} />
             ) : (
               <>
-                {activeTab === "jobs" && <JobsTab businessFilter={businessFilter} />}
-                {activeTab === "estimates" && <EstimatesTab businessFilter={businessFilter} onToast={showToast} />}
-                {activeTab === "appointments" && <AppointmentsTab businessFilter={businessFilter} />}
-                {activeTab === "invoices" && <InvoicesTab businessFilter={businessFilter} onToast={showToast} />}
-                {activeTab === "documents" && <DocumentsTab businessFilter={businessFilter} />}
-                {activeTab === "memberships" && <MembershipsTab businessFilter={businessFilter} />}
+                {activeTab === "jobs" && <JobsTab businessFilter={businessFilter} refreshVersion={liveRefreshVersion} />}
+                {activeTab === "estimates" && <EstimatesTab businessFilter={businessFilter} onToast={showToast} refreshVersion={liveRefreshVersion} />}
+                {activeTab === "appointments" && <AppointmentsTab businessFilter={businessFilter} refreshVersion={liveRefreshVersion} />}
+                {activeTab === "invoices" && <InvoicesTab businessFilter={businessFilter} onToast={showToast} refreshVersion={liveRefreshVersion} />}
+                {activeTab === "documents" && <DocumentsTab businessFilter={businessFilter} refreshVersion={liveRefreshVersion} />}
+                {activeTab === "memberships" && <MembershipsTab businessFilter={businessFilter} refreshVersion={liveRefreshVersion} />}
+                {activeTab === "book" && <BookServiceTab businesses={activeBusinesses} onViewAppointments={() => setActiveTab("appointments")} />}
                 {activeTab === "request" && <RequestServiceTab businesses={activeBusinesses} onToast={showToast} />}
-                {activeTab === "messages" && <MessagesTab businesses={activeBusinesses} />}
+                {activeTab === "messages" && <MessagesTab businesses={activeBusinesses} refreshVersion={liveRefreshVersion} />}
                 {activeTab === "professionals" && (
                   <ServiceProfessionalsTab
                     professionals={professionals}
@@ -198,7 +301,7 @@ export const CustomerAppShell: React.FC<CustomerAppShellProps> = ({ session, onS
               </>
             )}
           </div>
-        </div>
+        </main>
 
         {toast && (
           <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-50 rounded-xl bg-[#1F3557] text-white text-xs font-bold px-4 py-2.5 shadow-2xl max-w-[90%] text-center">
@@ -234,14 +337,13 @@ const BusinessTag: React.FC<{ name: string }> = ({ name }) => (
 // My Jobs
 // ---------------------------------------------------------------------------
 
-const JobsTab: React.FC<{ businessFilter: string }> = ({ businessFilter }) => {
+const JobsTab: React.FC<{ businessFilter: string; refreshVersion: number }> = ({ businessFilter, refreshVersion }) => {
   const [jobs, setJobs] = useState<api.TaggedJob[] | null>(null);
   const [error, setError] = useState("");
 
   useEffect(() => {
-    setJobs(null);
     api.getJobs(businessFilter || undefined).then(r => r.ok ? setJobs(r.jobs || []) : setError(r.error || "Could not load your jobs."));
-  }, [businessFilter]);
+  }, [businessFilter, refreshVersion]);
 
   if (error) return <ErrorState error={error} />;
   if (!jobs) return <Loading />;
@@ -281,7 +383,7 @@ const JobsTab: React.FC<{ businessFilter: string }> = ({ businessFilter }) => {
 // Estimates
 // ---------------------------------------------------------------------------
 
-const EstimatesTab: React.FC<{ businessFilter: string; onToast: (m: string) => void }> = ({ businessFilter, onToast }) => {
+const EstimatesTab: React.FC<{ businessFilter: string; onToast: (m: string) => void; refreshVersion: number }> = ({ businessFilter, onToast, refreshVersion }) => {
   const [estimates, setEstimates] = useState<api.TaggedEstimate[] | null>(null);
   const [error, setError] = useState("");
   const [decliningId, setDecliningId] = useState<string | null>(null);
@@ -289,11 +391,10 @@ const EstimatesTab: React.FC<{ businessFilter: string; onToast: (m: string) => v
   const [busyId, setBusyId] = useState<string | null>(null);
 
   const load = useCallback(() => {
-    setEstimates(null);
     api.getEstimates(businessFilter || undefined).then(r => r.ok ? setEstimates(r.estimates || []) : setError(r.error || "Could not load your estimates."));
   }, [businessFilter]);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => { load(); }, [load, refreshVersion]);
 
   const decide = async (estimate: api.TaggedEstimate, decision: "Accepted" | "Declined", reason?: string) => {
     setBusyId(estimate.id);
@@ -362,14 +463,13 @@ const EstimatesTab: React.FC<{ businessFilter: string; onToast: (m: string) => v
 // Appointments
 // ---------------------------------------------------------------------------
 
-const AppointmentsTab: React.FC<{ businessFilter: string }> = ({ businessFilter }) => {
+const AppointmentsTab: React.FC<{ businessFilter: string; refreshVersion: number }> = ({ businessFilter, refreshVersion }) => {
   const [appointments, setAppointments] = useState<api.TaggedAppointment[] | null>(null);
   const [error, setError] = useState("");
 
   useEffect(() => {
-    setAppointments(null);
     api.getAppointments(businessFilter || undefined).then(r => r.ok ? setAppointments(r.appointments || []) : setError(r.error || "Could not load your appointments."));
-  }, [businessFilter]);
+  }, [businessFilter, refreshVersion]);
 
   if (error) return <ErrorState error={error} />;
   if (!appointments) return <Loading />;
@@ -395,15 +495,14 @@ const AppointmentsTab: React.FC<{ businessFilter: string }> = ({ businessFilter 
 // Invoices
 // ---------------------------------------------------------------------------
 
-const InvoicesTab: React.FC<{ businessFilter: string; onToast: (m: string) => void }> = ({ businessFilter, onToast }) => {
+const InvoicesTab: React.FC<{ businessFilter: string; onToast: (m: string) => void; refreshVersion: number }> = ({ businessFilter, onToast, refreshVersion }) => {
   const [invoices, setInvoices] = useState<api.TaggedInvoice[] | null>(null);
   const [error, setError] = useState("");
   const [payingId, setPayingId] = useState<string | null>(null);
 
   useEffect(() => {
-    setInvoices(null);
     api.getInvoices(businessFilter || undefined).then(r => r.ok ? setInvoices(r.invoices || []) : setError(r.error || "Could not load your invoices."));
-  }, [businessFilter]);
+  }, [businessFilter, refreshVersion]);
 
   const pay = async (inv: api.TaggedInvoice) => {
     setPayingId(inv.id);
@@ -447,15 +546,14 @@ const InvoicesTab: React.FC<{ businessFilter: string; onToast: (m: string) => vo
 // Documents
 // ---------------------------------------------------------------------------
 
-const DocumentsTab: React.FC<{ businessFilter: string }> = ({ businessFilter }) => {
+const DocumentsTab: React.FC<{ businessFilter: string; refreshVersion: number }> = ({ businessFilter, refreshVersion }) => {
   const [documents, setDocuments] = useState<api.TaggedDocument[] | null>(null);
   const [error, setError] = useState("");
   const [openingId, setOpeningId] = useState<string | null>(null);
 
   useEffect(() => {
-    setDocuments(null);
     api.getDocuments(businessFilter || undefined).then(r => r.ok ? setDocuments(r.documents || []) : setError(r.error || "Could not load your documents."));
-  }, [businessFilter]);
+  }, [businessFilter, refreshVersion]);
 
   const open = async (doc: api.TaggedDocument) => {
     setOpeningId(doc.id);
@@ -491,14 +589,13 @@ const DocumentsTab: React.FC<{ businessFilter: string }> = ({ businessFilter }) 
 // Memberships
 // ---------------------------------------------------------------------------
 
-const MembershipsTab: React.FC<{ businessFilter: string }> = ({ businessFilter }) => {
+const MembershipsTab: React.FC<{ businessFilter: string; refreshVersion: number }> = ({ businessFilter, refreshVersion }) => {
   const [memberships, setMemberships] = useState<api.TaggedMembership[] | null>(null);
   const [error, setError] = useState("");
 
   useEffect(() => {
-    setMemberships(null);
     api.getMemberships(businessFilter || undefined).then(r => r.ok ? setMemberships(r.memberships || []) : setError(r.error || "Could not load your memberships."));
-  }, [businessFilter]);
+  }, [businessFilter, refreshVersion]);
 
   if (error) return <ErrorState error={error} />;
   if (!memberships) return <Loading />;
@@ -520,6 +617,35 @@ const MembershipsTab: React.FC<{ businessFilter: string }> = ({ businessFilter }
           </div>
         </div>
       ))}
+    </div>
+  );
+};
+
+// ---------------------------------------------------------------------------
+// Book Service -- online booking against a connected business's live
+// Scheduling (server/onlineBooking.ts). The server re-checks the Active
+// relationship for whichever business is picked here.
+// ---------------------------------------------------------------------------
+
+const BookServiceTab: React.FC<{ businesses: Array<{ id: string; name: string }>; onViewAppointments: () => void }> = ({ businesses, onViewAppointments }) => {
+  const [businessId, setBusinessId] = useState("");
+  const effectiveBusinessId = businesses.length === 1 ? businesses[0].id : businessId;
+  const bookingApi = useMemo(() => (effectiveBusinessId ? customerAccountBookingApi(effectiveBusinessId) : null), [effectiveBusinessId]);
+
+  if (!businesses.length) return <EmptyState label="Connect with a service provider first (see My Service Providers) to book service online." />;
+
+  return (
+    <div className="space-y-4">
+      {businesses.length > 1 && (
+        <label className="block max-w-lg">
+          <span className="text-[10px] font-black uppercase tracking-wide text-[#5E7393]">Service Professional</span>
+          <select value={businessId} onChange={e => setBusinessId(e.target.value)} className="mt-1 w-full rounded-xl border border-[#9EC8EF] p-2.5 text-sm">
+            <option value="">Choose one...</option>
+            {businesses.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
+          </select>
+        </label>
+      )}
+      {bookingApi && <div key={effectiveBusinessId}><BookServiceFlow api={bookingApi} onViewAppointments={onViewAppointments} /></div>}
     </div>
   );
 };
@@ -550,7 +676,7 @@ const RequestServiceTab: React.FC<{ businesses: Array<{ id: string; name: string
     }
   };
 
-  if (!businesses.length) return <EmptyState label="Connect with a service professional first (see Your Service Professionals) to request service." />;
+  if (!businesses.length) return <EmptyState label="Connect with a service provider first (see My Service Providers) to request service." />;
 
   return (
     <div className="max-w-lg space-y-3">
@@ -589,7 +715,7 @@ const RequestServiceTab: React.FC<{ businesses: Array<{ id: string; name: string
 // Messages
 // ---------------------------------------------------------------------------
 
-const MessagesTab: React.FC<{ businesses: Array<{ id: string; name: string }> }> = ({ businesses }) => {
+const MessagesTab: React.FC<{ businesses: Array<{ id: string; name: string }>; refreshVersion: number }> = ({ businesses, refreshVersion }) => {
   const [businessId, setBusinessId] = useState("");
   const [messages, setMessages] = useState<api.TaggedMessage[]>([]);
   const [content, setContent] = useState("");
@@ -600,13 +726,13 @@ const MessagesTab: React.FC<{ businesses: Array<{ id: string; name: string }> }>
 
   const load = useCallback(async () => {
     if (!businessId) return;
-    setLoading(true);
+    if (messages.length === 0) setLoading(true);
     const result = await api.getMessages(businessId);
     setLoading(false);
     if (result.ok) setMessages(result.messages || []);
-  }, [businessId]);
+  }, [businessId, messages.length]);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => { void load(); }, [load, refreshVersion]);
 
   const send = async () => {
     if (!content.trim() || !businessId) return;

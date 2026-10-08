@@ -1,4 +1,5 @@
 import React, { useState, useMemo, useEffect } from "react";
+import { confirmJobCompletion } from "../lib/completionGuard";
 import {
   Calendar as CalendarIcon,
   ChevronLeft,
@@ -38,9 +39,16 @@ import { CreateMembershipPicker } from "./CreateMembershipPicker";
 import { MembershipBuilder } from "./MembershipBuilder";
 import type { Membership } from "../types/membership";
 import { CustomerPortalControls } from "./CustomerPortalControls";
+import { OnlineBookingDetails } from "./OnlineBookingDetails";
 import { resolveCustomerByIdOrName } from "../lib/resolveCustomer";
 import { BulkImportModal } from "./BulkImportModal";
 import type { ImportFieldSpec, DuplicateCheckResult } from "../lib/spreadsheetImport";
+import { BuildJobModal } from "./BuildJobModal";
+import type { BuildJobPrefill } from "../types/generatedPdf";
+import { buildNewCustomerRecord } from "../lib/customerDefaults";
+import { AssignEmployeeField } from "./AssignEmployeeField";
+import { useAssignableEmployeeNames } from "../hooks/useAssignableEmployees";
+import { hasEffectivePermission } from "../types/permissions";
 
 type JobImportKey = "customer" | "eventType" | "date" | "startTime" | "endTime" | "assignedEmployee" | "address" | "notes" | "status";
 const JOB_IMPORT_FIELDS: ImportFieldSpec<JobImportKey>[] = [
@@ -154,6 +162,14 @@ const RecurringMaintenanceView: React.FC = () => {
 export const SchedulingPage: React.FC = () => {
   const { loggedInUser, simulatedRole } = useAuth();
   const activeRole = simulatedRole || loggedInUser?.role || "Owner";
+  const currentUserIdentity = useMemo(
+    () => [loggedInUser?.name, loggedInUser?.email]
+      .filter(Boolean)
+      .map(value => String(value).trim().toLowerCase()),
+    [loggedInUser?.name, loggedInUser?.email]
+  );
+  const isAssignedToCurrentUser = (event: SchedulingEvent) =>
+    currentUserIdentity.includes((event.assignedEmployee || "").trim().toLowerCase());
   const {
     schedulingEvents: events,
     setSchedulingEvents: setEvents,
@@ -161,13 +177,9 @@ export const SchedulingPage: React.FC = () => {
     setCustomers,
     setNotifications,
     preSelectedDate,
-    preSelectedCustomerId,
-    employees
+    preSelectedCustomerId
   } = useDomainData();
-  const EMPLOYEES = useMemo(() => employees
-    .map(employee => `${employee.firstName} ${employee.lastName}`.trim())
-    .filter((name, index, names) => name.length > 0 && names.indexOf(name) === index)
-    .sort((a, b) => a.localeCompare(b)), [employees]);
+  const EMPLOYEES = useAssignableEmployeeNames();
   const selectableCustomers = useMemo(() => {
     const byKey = new Map<string, { id: string; contact: string; company: string; phone: string; email: string; address: string }>();
     customersList.forEach(customer => byKey.set(customer.id, customer));
@@ -327,6 +339,15 @@ export const SchedulingPage: React.FC = () => {
   const [isDetailsOpen, setIsDetailsOpen] = useState(false);
   const [selectedEvent, setSelectedEvent] = useState<SchedulingEvent | null>(null);
   const [isEditingEvent, setIsEditingEvent] = useState(false);
+  // "Job" is one of the many event types this page's own New Event form can
+  // create -- but a Job specifically needs to go through the same shared
+  // BuildJobModal every other job entry point (Jobs page, Leads, Customers,
+  // Estimates, Map) uses, not a second independently-coded write path with
+  // its own copy of the "quick add a customer" logic and no idempotency
+  // guard. See handleSaveEvent/handleOpenEditForm below.
+  const [isBuildJobOpen, setIsBuildJobOpen] = useState(false);
+  const [buildJobEditingEvent, setBuildJobEditingEvent] = useState<SchedulingEvent | null>(null);
+  const [buildJobLocalPrefill, setBuildJobLocalPrefill] = useState<BuildJobPrefill | null>(null);
 
   // New/Edit Event Form Fields
   const [formType, setFormType] = useState("Job");
@@ -369,12 +390,29 @@ export const SchedulingPage: React.FC = () => {
   // a real number instead of one code path leaving it blank.
   const [formBudget, setFormBudget] = useState("");
 
-  // Check if role has create/edit permissions
-  // Schedulers, Dispatchers, Owners, Managers can do everything.
-  const isHighPrivilege = useMemo(() => {
+  // Real sessions use the Owner-configured Scheduling permission matrix.
+  // Workspace Simulator has no employee permission payload, so preserve its
+  // existing role-template preview behavior without using it for real auth.
+  const isOwner = activeRole.trim().toLowerCase() === "owner";
+  const previewSchedulingManager = useMemo(() => {
     const editRoles = ["Owner", "General Manager", "Office Manager", "Operations Manager", "Scheduler", "Dispatcher", "Admin"];
     return editRoles.includes(activeRole);
   }, [activeRole]);
+  const canViewAllScheduling = simulatedRole
+    ? previewSchedulingManager
+    : isOwner || hasEffectivePermission(loggedInUser?.granularPermissions, loggedInUser?.permissions, "scheduling", "view");
+  const canEditScheduling = simulatedRole
+    ? previewSchedulingManager
+    : isOwner || hasEffectivePermission(loggedInUser?.granularPermissions, loggedInUser?.permissions, "scheduling", "edit");
+  const canDeleteScheduling = simulatedRole
+    ? previewSchedulingManager
+    : isOwner || hasEffectivePermission(loggedInUser?.granularPermissions, loggedInUser?.permissions, "scheduling", "delete");
+  const canEditAssignedSharedEvent = simulatedRole
+    ? previewSchedulingManager
+    : isOwner
+      || hasEffectivePermission(loggedInUser?.granularPermissions, loggedInUser?.permissions, "scheduling", "edit")
+      || hasEffectivePermission(loggedInUser?.granularPermissions, loggedInUser?.permissions, "jobs", "edit")
+      || hasEffectivePermission(loggedInUser?.granularPermissions, loggedInUser?.permissions, "dispatch", "edit");
 
   // Handle pre-populated customer from Customers/Leads
   useEffect(() => {
@@ -560,15 +598,13 @@ export const SchedulingPage: React.FC = () => {
       // Real fix: compare against the actual logged-in user's name, not their role title
       // (the old heuristic compared assignedEmployee to activeRole, which are different
       // concepts — a job title isn't a person's name).
-      if (!isHighPrivilege) {
-        const myName = (loggedInUser?.name || "").trim().toLowerCase();
-        const isAssigned = !!myName && evt.assignedEmployee.trim().toLowerCase() === myName;
-        if (!isAssigned) return false;
+      if (!canViewAllScheduling && !isAssignedToCurrentUser(evt)) {
+        return false;
       }
 
       return true;
     });
-  }, [events, searchQuery, filterEmployee, filterCrew, filterCustomer, filterEventType, filterPriority, filterStatus, filterCompleted, filterDateStart, filterDateEnd, isHighPrivilege, activeRole, loggedInUser]);
+  }, [events, searchQuery, filterEmployee, filterCrew, filterCustomer, filterEventType, filterPriority, filterStatus, filterCompleted, filterDateStart, filterDateEnd, canViewAllScheduling, activeRole, loggedInUser]);
 
   // Month View Days Generation
   const monthDays = useMemo(() => {
@@ -643,8 +679,8 @@ export const SchedulingPage: React.FC = () => {
     e.preventDefault();
 
     // Permission Guard
-    if (!isHighPrivilege) {
-      triggerNotification(`Role Restricted: Only Owners, Managers, Schedulers, and Dispatchers can create or edit events. Your current role is '${activeRole}'.`);
+    if (!canEditScheduling) {
+      triggerNotification("You do not have Add/Edit permission for Scheduling.");
       return;
     }
 
@@ -673,24 +709,49 @@ export const SchedulingPage: React.FC = () => {
     // everywhere this event's .customer field is read.
     if (!customerName) customerName = descriptor;
 
+    // A "Job" isn't just another calendar event type -- hand off to the
+    // same shared Build Job popup every other job entry point uses instead
+    // of writing a second, independently-coded SchedulingEvent here (which
+    // previously had no sourceEstimateId idempotency guard and re-typed its
+    // own copy of the "quick add a customer" block below). Whatever's
+    // already been filled in here carries over; BuildJobModal owns
+    // resolving/creating the customer record from that point on, same as
+    // when this popup is reached from an Estimate, a Lead, or the Map.
+    if (formType === "Job") {
+      setIsNewEventOpen(false);
+      setIsDetailsOpen(false);
+      if (isEditingEvent && selectedEvent) {
+        setBuildJobEditingEvent(selectedEvent);
+        setBuildJobLocalPrefill(null);
+      } else {
+        setBuildJobEditingEvent(null);
+        setBuildJobLocalPrefill({
+          customerId: formCustomerMode === "search" ? selectedCustomerId || undefined : undefined,
+          customerName, customerPhone, customerEmail, customerAddress,
+          title: descriptor, notes: formNotes.trim(),
+          budget: formBudget.trim() ? Number(formBudget) : undefined
+        });
+      }
+      setIsBuildJobOpen(true);
+      return;
+    }
+
     // Only create a customer record if a real contact name was actually
     // typed -- not just because "Add Customer" mode was left selected while
     // the field itself stayed empty (customerName would otherwise silently
     // fall back to the descriptor text above).
     if (formCustomerMode === "custom" && formCustomName.trim()) {
-      resolvedCustomerId = `cust_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-      setCustomers(prev => [{
-        id: resolvedCustomerId, company: customerName, contact: customerName,
-        phone: customerPhone, email: customerEmail, address: customerAddress,
-        openJobs: 0, outstandingBalance: 0, lifetimeValue: 0,
-        status: "Active", type: "Residential", isVIP: false, recentlyAdded: true,
-        requireFollowUp: false, pendingConfirmation: true, createdFrom: "schedule_job"
-      }, ...prev]);
+      const newCustomer = buildNewCustomerRecord({
+        name: customerName, company: customerName, phone: customerPhone, email: customerEmail,
+        address: customerAddress, createdFrom: "schedule_job", pendingConfirmation: true
+      });
+      resolvedCustomerId = newCustomer.id;
+      setCustomers(prev => [newCustomer, ...prev]);
       setNotifications(prev => [{
         id: `customer_review_${resolvedCustomerId}`, screenId: "customers",
         title: "Edit and confirm new customer",
-        message: `${customerName} was added while scheduling a job. Review and confirm the customer record.`,
-        isRead: false, timestamp: new Date().toISOString()
+        description: `${customerName} was added while scheduling this event. Review and confirm the customer record.`,
+        isRead: false, time: new Date().toISOString()
       }, ...prev]);
     }
 
@@ -762,8 +823,19 @@ export const SchedulingPage: React.FC = () => {
   // Open Edit Form for Event
   const handleOpenEditForm = (evt: SchedulingEvent) => {
     // Check permission
-    if (!isHighPrivilege) {
-      triggerNotification(`Role Restricted: Only Owners, Managers, Schedulers, and Dispatchers can edit event times/dates.`);
+    if (!canEditScheduling) {
+      triggerNotification("You do not have Add/Edit permission for Scheduling.");
+      return;
+    }
+
+    // An existing Job goes straight to the same shared Build Job popup
+    // every other job entry point edits through, instead of this page's
+    // own generic event-edit form.
+    if (evt.eventType === "Job") {
+      setIsDetailsOpen(false);
+      setBuildJobEditingEvent(evt);
+      setBuildJobLocalPrefill(null);
+      setIsBuildJobOpen(true);
       return;
     }
 
@@ -833,16 +905,17 @@ export const SchedulingPage: React.FC = () => {
     const eventToUpdate = events.find(e => e.id === evtId);
     if (!eventToUpdate) return;
 
-    const isAssigned = eventToUpdate.assignedEmployee.toLowerCase().includes(activeRole.toLowerCase()) || 
-                       activeRole.toLowerCase() === "owner" || 
-                       activeRole.toLowerCase() === "general manager" || 
-                       activeRole.toLowerCase() === "office manager" ||
-                       activeRole.toLowerCase() === "operations manager" ||
-                       activeRole.toLowerCase() === "scheduler" ||
-                       activeRole.toLowerCase() === "dispatcher";
-
-    if (!isAssigned) {
-      triggerNotification("Role Permission Error: You can only update the status of events assigned directly to you.");
+    if (!canEditScheduling && !(canEditAssignedSharedEvent && isAssignedToCurrentUser(eventToUpdate))) {
+      triggerNotification("You can only update assigned events when your permissions allow it.");
+      return;
+    }
+    if (newStatus === "Completed" && eventToUpdate.eventType === "Job" && eventToUpdate.status !== "Completed") {
+      void confirmJobCompletion(evtId).then(ok => {
+        if (!ok) return;
+        setEvents(prev => prev.map(e => e.id === evtId ? { ...e, status: newStatus } : e));
+        setSelectedEvent(prev => prev && prev.id === evtId ? { ...prev, status: newStatus } : prev);
+        if (logOperationalEvent) logOperationalEvent("Status Changed", `Event status for ${eventToUpdate.customer} changed to ${newStatus}`, "🔄");
+      });
       return;
     }
 
@@ -857,14 +930,21 @@ export const SchedulingPage: React.FC = () => {
   };
 
   const handleDuplicateEvent = (evt: SchedulingEvent) => {
-    if (!isHighPrivilege) {
-      triggerNotification("Permission Restricted: Duplicate is only available to coordinators.");
+    if (!canEditScheduling) {
+      triggerNotification("You do not have Add/Edit permission for Scheduling.");
       return;
     }
     const dup: SchedulingEvent = {
       ...evt,
       id: "evt_" + Math.random().toString(36).substring(2, 9),
-      status: "Scheduled"
+      status: "Scheduled",
+      // A duplicate is a genuinely new, separate appointment -- carrying
+      // over the original's sourceEstimateId/sourceLeadId would let two
+      // jobs both claim to be "the job for that estimate/lead," which
+      // breaks createJob's idempotency lookup (it would find whichever one
+      // happens to match first and treat the estimate as already handled).
+      sourceEstimateId: undefined,
+      sourceLeadId: undefined
     };
     setEvents(prev => [...prev, dup]);
     if (logOperationalEvent) {
@@ -874,8 +954,8 @@ export const SchedulingPage: React.FC = () => {
   };
 
   const handleDeleteEvent = (evtId: string) => {
-    if (!isHighPrivilege) {
-      triggerNotification("Permission Restricted: Deletion is only available to managers/schedulers.");
+    if (!canDeleteScheduling) {
+      triggerNotification("You do not have Delete permission for Scheduling.");
       return;
     }
     const match = events.find(e => e.id === evtId);
@@ -993,54 +1073,65 @@ export const SchedulingPage: React.FC = () => {
       .sort((a, b) => (a.date === b.date ? a.startTime.localeCompare(b.startTime) : a.date < b.date ? -1 : 1))
       .map(evt => ({ id: evt.id, label: evt.title || evt.customer || "Job", sub: evt.date }));
 
-    const renderTicker = (items: Array<{ id: string; label: string; sub: string }>, emptyText: string, tone: "upcoming" | "pastDue") => (
-      <div className="bg-[linear-gradient(145deg,rgba(224,242,255,0.94),rgba(195,227,251,0.96))] rounded-lg border border-white/95 shadow-[0_0_14px_rgba(56,189,248,0.36),inset_0_0_18px_rgba(255,255,255,0.82)] h-40 overflow-hidden relative">
-        {items.length === 0 ? (
-          <div className="h-full flex items-center justify-center text-[11px] font-mono text-[#2473aa]/60">{emptyText}</div>
-        ) : (
-          <div
-            className="absolute inset-x-0 top-0 hover:[animation-play-state:paused]"
-            style={{ animation: `ticker-scroll ${Math.max(12, items.length * 3)}s linear infinite` }}
-          >
-            {[0, 1].map(copy => (
-              <div key={copy}>
-                {items.map((item, idx) => (
-                  <div key={`${copy}_${item.id}_${idx}`} className="flex items-center justify-between gap-3 px-4 py-2.5 border-b border-sky-500/15 text-xs font-mono">
-                    <span
-                      className={`font-semibold truncate ${tone === "upcoming" ? "text-[#00C853]" : "text-[#FF1744]"}`}
-                      style={{ textShadow: tone === "upcoming" ? "0 0 6px rgba(0,230,118,0.85), 0 0 14px rgba(0,200,83,0.5)" : "0 0 6px rgba(255,23,68,0.85), 0 0 14px rgba(255,23,68,0.5)" }}
-                    >
-                      {item.label}
-                    </span>
-                    <span
-                      className={`font-mono font-bold shrink-0 ${tone === "upcoming" ? "text-[#00C853]" : "text-[#FF1744]"}`}
-                      style={{ textShadow: tone === "upcoming" ? "0 0 7px rgba(0,230,118,0.9), 0 0 16px rgba(0,200,83,0.6)" : "0 0 7px rgba(255,23,68,0.9), 0 0 16px rgba(255,23,68,0.55)" }}
-                    >
-                      {new Date(item.sub + "T00:00:00").toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-    );
+    const renderTicker = (items: Array<{ id: string; label: string; sub: string }>, emptyText: string, tone: "upcoming" | "pastDue") => {
+      // De-duplicate by job document ID -- a job can only ever appear once
+      // in "This Week's Jobs" regardless of how many source fields overlap.
+      const uniqueItems = Array.from(new Map(items.map(item => [item.id, item])).values());
+      // Only repeat the list for the seamless marquee loop when there are
+      // enough rows to actually need scrolling. With few items, a single
+      // static copy fits the fixed-height container and looks correct;
+      // rendering the [0, 1] duplicate copy in that case made a single real
+      // job look like two identical entries.
+      const needsScroll = uniqueItems.length > 4;
+      return (
+        <div className="bg-[linear-gradient(145deg,rgba(224,242,255,0.94),rgba(195,227,251,0.96))] rounded-lg border border-white/95 shadow-[0_0_14px_rgba(56,189,248,0.36),inset_0_0_18px_rgba(255,255,255,0.82)] h-40 overflow-hidden relative">
+          {uniqueItems.length === 0 ? (
+            <div className="h-full flex items-center justify-center text-[11px] font-mono text-[#2473aa]/60">{emptyText}</div>
+          ) : (
+            <div
+              className="absolute inset-x-0 top-0 hover:[animation-play-state:paused]"
+              style={needsScroll ? { animation: `ticker-scroll ${Math.max(12, uniqueItems.length * 3)}s linear infinite` } : undefined}
+            >
+              {(needsScroll ? [0, 1] : [0]).map(copy => (
+                <div key={copy}>
+                  {uniqueItems.map((item, idx) => (
+                    <div key={`${copy}_${item.id}_${idx}`} className="flex items-center justify-between gap-3 px-4 py-2.5 border-b border-sky-500/15 text-xs font-mono">
+                      <span
+                        className={`font-semibold truncate ${tone === "upcoming" ? "text-[#00C853]" : "text-[#FF1744]"}`}
+                        style={{ textShadow: tone === "upcoming" ? "0 0 6px rgba(0,230,118,0.85), 0 0 14px rgba(0,200,83,0.5)" : "0 0 6px rgba(255,23,68,0.85), 0 0 14px rgba(255,23,68,0.5)" }}
+                      >
+                        {item.label}
+                      </span>
+                      <span
+                        className={`font-mono font-bold shrink-0 ${tone === "upcoming" ? "text-[#00C853]" : "text-[#FF1744]"}`}
+                        style={{ textShadow: tone === "upcoming" ? "0 0 7px rgba(0,230,118,0.9), 0 0 16px rgba(0,200,83,0.6)" : "0 0 7px rgba(255,23,68,0.9), 0 0 16px rgba(255,23,68,0.55)" }}
+                      >
+                        {new Date(item.sub + "T00:00:00").toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      );
+    };
 
     return (
       <div className="bg-[#C7E3FA] rounded-3xl p-6 border border-[#9EC8EF] shadow-sm">
         <div className="border-b border-[#9EC8EF] pb-3 mb-4 text-left">
           <h3 className="text-sm font-sans font-extrabold text-[#1F3557] uppercase tracking-wider">This Week's Jobs</h3>
-          <p className="text-xs text-slate-500">Sun–Sat &middot; unfinished jobs drop to Past Due once their date passes</p>
+          <p className="text-xs text-slate-500">Jobs are marked Past Due when their scheduled date passes.</p>
         </div>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div>
             <p className="text-[10px] font-mono font-black text-[#07599a] uppercase tracking-widest mb-2">Upcoming</p>
-            {renderTicker(upcoming, "Nothing left scheduled this week.", "upcoming")}
+            {renderTicker(upcoming, "No upcoming jobs this week.", "upcoming")}
           </div>
           <div>
             <p className="text-[10px] font-mono font-black text-[#07599a] uppercase tracking-widest mb-2">Past Due</p>
-            {renderTicker(pastDue, "Nothing overdue -- nice.", "pastDue")}
+            {renderTicker(pastDue, "No overdue jobs.", "pastDue")}
           </div>
         </div>
       </div>
@@ -1057,15 +1148,15 @@ export const SchedulingPage: React.FC = () => {
             <div className="flex items-center gap-2">
               <CalendarDays className="w-5 h-5 text-[#315C9F]" />
               <h2 className="text-xl font-display font-extrabold text-[#1F3557] tracking-tight uppercase">
-                Scheduling Center
+                Schedule
               </h2>
             </div>
             <p className="text-xs text-[#5E7393] font-sans font-semibold mt-1">
-              Plan appointments, assign crews, and keep dispatch schedules up to date
+              Schedule jobs, appointments, employees, and crews.
             </p>
           </div>
           <div className="flex flex-wrap gap-2.5">
-            {isHighPrivilege ? (
+            {canEditScheduling ? (
               <>
                 <button
                   onClick={() => { resetForm(); setIsNewEventOpen(true); }}
@@ -1177,7 +1268,7 @@ export const SchedulingPage: React.FC = () => {
                 onClick={() => setActiveView("recurring")}
                 className={`px-3 py-1.5 rounded-lg font-bold text-xs uppercase tracking-wider transition-all ${activeView === "recurring" ? "bg-[#315C9F] text-white shadow-xs" : "text-[#1F3557] hover:bg-[#BDDDF8]/50"}`}
               >
-                Recurring Maintenance
+                Repeating Jobs
               </button>
             </div>
           </div>
@@ -1875,17 +1966,13 @@ export const SchedulingPage: React.FC = () => {
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                 <div className="space-y-1">
                   <label className="text-[9px] uppercase tracking-wider text-slate-400 font-extrabold">Assign Employee</label>
-                  <select
+                  <AssignEmployeeField
                     value={formEmployee}
-                    onChange={(e) => setFormEmployee(e.target.value)}
+                    onChange={setFormEmployee}
                     className="w-full bg-[#F5FAFF] border border-[#A9CDEE] rounded-xl px-3 py-2 font-semibold"
-                  >
-                    {EMPLOYEES.length === 0 && <option value="">No team members yet</option>}
-                    {formEmployee === "" && EMPLOYEES.length > 0 && <option value="" disabled>Select employee...</option>}
-                    {EMPLOYEES.map(emp => (
-                      <option key={emp} value={emp}>{emp}</option>
-                    ))}
-                  </select>
+                    noOptionsLabel="No team members yet"
+                    placeholderLabel="Select employee..."
+                  />
                 </div>
 
                 <div className="space-y-1">
@@ -2070,6 +2157,10 @@ export const SchedulingPage: React.FC = () => {
                 </div>
               </div>
 
+              {selectedEvent.bookingSource && (
+                <OnlineBookingDetails bookingSource={selectedEvent.bookingSource} onlineBookingId={selectedEvent.onlineBookingId} />
+              )}
+
               {/* Customer Portal */}
               <div className="space-y-1.5 border-b border-slate-50 pb-3">
                 <span className="text-[9px] uppercase tracking-wider text-slate-400 font-extrabold block">Customer Portal</span>
@@ -2127,7 +2218,7 @@ export const SchedulingPage: React.FC = () => {
               {/* Management Action buttons */}
               <div className="flex flex-wrap justify-between items-center gap-2 border-t border-slate-50 pt-4 mt-6">
                 <div className="flex gap-2">
-                  {isHighPrivilege ? (
+                  {canEditScheduling ? (
                     <>
                       <button
                         onClick={() => handleOpenEditForm(selectedEvent)}
@@ -2148,7 +2239,7 @@ export const SchedulingPage: React.FC = () => {
                   ) : null}
                 </div>
 
-                {isHighPrivilege && (
+                {canDeleteScheduling && (
                   <button
                     onClick={() => handleDeleteEvent(selectedEvent.id)}
                     className="px-3.5 py-2 bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 font-bold rounded-xl transition-colors flex items-center gap-1.5"
@@ -2179,6 +2270,12 @@ export const SchedulingPage: React.FC = () => {
 
       <CreateWorkOrderPicker isOpen={isWorkOrderPickerOpen} onClose={() => setIsWorkOrderPickerOpen(false)} />
       <CreateMembershipPicker isOpen={isMembershipPickerOpen} onClose={() => setIsMembershipPickerOpen(false)} />
+      <BuildJobModal
+        isOpen={isBuildJobOpen}
+        onClose={() => { setIsBuildJobOpen(false); setBuildJobEditingEvent(null); setBuildJobLocalPrefill(null); setSelectedEvent(null); }}
+        editingJob={buildJobEditingEvent}
+        prefill={buildJobLocalPrefill}
+      />
 
       {isBulkImportOpen && (
         <BulkImportModal<JobImportKey>

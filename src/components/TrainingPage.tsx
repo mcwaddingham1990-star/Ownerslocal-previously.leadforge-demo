@@ -705,11 +705,11 @@ export const TrainingPage: React.FC = () => {
           <div className="flex items-center gap-2">
             <span className="text-2xl">🎓</span>
             <h2 className="text-base font-sans font-extrabold text-[#342D7E] uppercase tracking-wider">
-              Training Center & Academy
+              Employee Training
             </h2>
           </div>
           <p className="text-xs text-slate-500 font-sans font-semibold">
-            Enterprise safety curriculum, role-based onboarding, and AI lesson planner.
+            Create lessons, train employees, and track completed courses.
           </p>
         </div>
 
@@ -742,7 +742,7 @@ export const TrainingPage: React.FC = () => {
             }}
             className="px-3.5 py-2 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white text-xs font-bold rounded-xl transition-all shadow-sm flex items-center gap-1.5 cursor-pointer uppercase tracking-wider"
           >
-            <Sparkles className="w-4 h-4 text-amber-300" /> AI Create Lesson
+            <Sparkles className="w-4 h-4 text-amber-300" /> Create Lesson with AI
           </button>
 
           <button
@@ -853,7 +853,7 @@ export const TrainingPage: React.FC = () => {
             <option value="employee">Employee</option>
             <option value="course">Course Name</option>
             <option value="certification">Certification</option>
-            <option value="role">Role Prerequisite</option>
+            <option value="role">Required for Role</option>
           </select>
         </div>
 
@@ -1290,17 +1290,17 @@ export const TrainingPage: React.FC = () => {
           <div className="bg-[#E3F3FF]/80 p-5 rounded-2xl border border-[#A9CDEE] space-y-4 shadow-sm text-left">
             <div>
               <h4 className="text-xs font-black text-[#342D7E] uppercase tracking-wider flex items-center gap-1.5">
-                <Sparkles className="w-4 h-4 text-amber-500" /> AI Classroom Builder & Diagnostic Assistant
+                <Sparkles className="w-4 h-4 text-amber-500" /> Create Training with AI
               </h4>
               <p className="text-[10.5px] text-slate-500 mt-0.5 leading-normal font-sans font-semibold">
-                Generate safety manuals, role-specific onboarding lessons, quizzes, or translations in seconds.
+                Create safety lessons, employee training, quizzes, or translations.
               </p>
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
               {/* Type Select */}
               <div className="space-y-1">
-                <label className="text-[9px] uppercase tracking-wider text-slate-400 font-black">AI Content Template</label>
+                <label className="text-[9px] uppercase tracking-wider text-slate-400 font-black">What do you want to create?</label>
                 <select
                   value={aiSelectedType}
                   onChange={(e: any) => setAiSelectedType(e.target.value)}
@@ -1315,7 +1315,7 @@ export const TrainingPage: React.FC = () => {
 
               {/* Target Role */}
               <div className="space-y-1">
-                <label className="text-[9px] uppercase tracking-wider text-slate-400 font-black">Target Team Role</label>
+                <label className="text-[9px] uppercase tracking-wider text-slate-400 font-black">Who is this training for?</label>
                 <select
                   value={aiRoleSubject}
                   onChange={(e) => setAiRoleSubject(e.target.value)}
@@ -1331,7 +1331,7 @@ export const TrainingPage: React.FC = () => {
 
               {/* Custom Topic Input */}
               <div className="space-y-1">
-                <label className="text-[9px] uppercase tracking-wider text-slate-400 font-black">Custom Focus Subject (Optional)</label>
+                <label className="text-[9px] uppercase tracking-wider text-slate-400 font-black">Training topic (Optional)</label>
                 <input
                   type="text"
                   value={aiCustomTopic}
@@ -1422,10 +1422,10 @@ export const TrainingPage: React.FC = () => {
           <div className="bg-[#E3F3FF] p-5 rounded-2xl border border-[#A9CDEE] space-y-4 shadow-xs text-left">
             <div className="border-b border-[#A9CDEE]/40 pb-2">
               <h3 className="text-xs font-black uppercase text-[#342D7E] tracking-wider flex items-center gap-1.5">
-                <UserCheck className="w-4 h-4 text-[#4A9BFF]" /> Employee Training Profiles
+                <UserCheck className="w-4 h-4 text-[#4A9BFF]" /> Employee Progress
               </h3>
               <p className="text-[10px] text-slate-400 font-sans mt-0.5 leading-normal">
-                Review assigned lessons, certified standards, and compliance status.
+                See assigned lessons, completed training, and expired certifications.
               </p>
             </div>
 
@@ -1614,14 +1614,14 @@ export const TrainingPage: React.FC = () => {
             <div className="border-b border-[#A9CDEE]/40 pb-2 flex justify-between items-center">
               <div>
                 <h3 className="text-xs font-black uppercase text-[#342D7E] tracking-wider flex items-center gap-1.5">
-                  <ShieldAlert className="w-4 h-4 text-rose-500" /> Compliance Lockouts & Audits
+                  <ShieldAlert className="w-4 h-4 text-rose-500" /> Expired or Missing Training
                 </h3>
                 <p className="text-[10px] text-slate-400 font-sans mt-0.5">
-                  Auto-flagging team technicians with expired federal safety certifications.
+                  Employees with expired or missing certifications appear here.
                 </p>
               </div>
               <span className="text-[9.5px] px-2 py-0.5 bg-rose-100 text-rose-600 font-mono font-bold border border-rose-200 rounded">
-                Alert Active
+                Training Check On
               </span>
             </div>
 

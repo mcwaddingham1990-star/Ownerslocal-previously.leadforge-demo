@@ -1061,14 +1061,11 @@ export const InventoryPage: React.FC<InventoryPageProps> = () => {
         
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
           <div className="space-y-1">
-            <span className="px-3 py-1 bg-[#E3F3FF] text-[#4A9BFF] text-[9.5px] font-mono font-bold rounded-xl border border-[#A9CDEE] uppercase">
-              Operational Ledger
-            </span>
             <h1 className="text-xl font-sans font-extrabold text-[#342D7E] uppercase tracking-wider flex items-center gap-2">
-              <Package className="w-5 h-5 text-[#4A9BFF]" /> Inventory Management
+              <Package className="w-5 h-5 text-[#4A9BFF]" /> Inventory
             </h1>
             <p className="text-xs text-slate-500 font-sans font-semibold">
-              Master material database with dynamic geofencing, receipts optical character logic, and asset tracking.
+              Track supplies, tools, equipment, purchases, and receipts.
             </p>
           </div>
 
@@ -1090,7 +1087,7 @@ export const InventoryPage: React.FC<InventoryPageProps> = () => {
               }}
               className="px-3 py-2 bg-gradient-to-r from-violet-500 to-indigo-600 text-white text-xs font-bold rounded-xl flex items-center gap-1.5 shadow-sm transition-all hover:opacity-90 cursor-pointer"
             >
-              <Camera className="w-3.5 h-3.5" /> Snapshot AI
+              <Camera className="w-3.5 h-3.5" /> Scan Receipt
             </button>
 
             <button
@@ -1179,7 +1176,7 @@ export const InventoryPage: React.FC<InventoryPageProps> = () => {
           <span className="p-1.5 bg-[#C7E3FB] rounded-lg inline-block mb-1.5 text-emerald-600">
             <DollarSign className="w-4 h-4" />
           </span>
-          <p className="text-[10px] text-slate-500 font-bold uppercase font-mono tracking-tight">Ledger Value</p>
+          <p className="text-[10px] text-slate-500 font-bold uppercase font-mono tracking-tight">Inventory Value</p>
           <p className="text-lg font-mono font-black text-slate-800 mt-0.5">${stats.totalVal.toLocaleString()}</p>
         </button>
 
@@ -1516,7 +1513,7 @@ export const InventoryPage: React.FC<InventoryPageProps> = () => {
                     <th className="py-3 px-3 text-right">Unit Cost</th>
                     <th className="py-3 px-3 text-right">Selling Price</th>
                     <th className="py-3 px-3 text-right">Value</th>
-                    <th className="py-3 px-3">Storage Pin</th>
+                    <th className="py-3 px-3">Storage Location</th>
                     <th className="py-3 px-3 text-center">Status</th>
                     <th className="py-3 px-3 text-center w-24">Actions</th>
                   </tr>
@@ -1525,7 +1522,7 @@ export const InventoryPage: React.FC<InventoryPageProps> = () => {
                   {filteredInventory.length === 0 ? (
                     <tr>
                       <td colSpan={13} className="py-12 text-center text-slate-400 font-semibold uppercase tracking-wider">
-                        No inventory items match your search. Try changing the search or filters.
+                        No inventory items found. Clear your filters or add an item.
                       </td>
                     </tr>
                   ) : (
@@ -1607,7 +1604,7 @@ export const InventoryPage: React.FC<InventoryPageProps> = () => {
 
           {/* VISUAL CATEGORY GRID */}
           <div className="space-y-2">
-            <h4 className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Fast Category Navigators</h4>
+            <h4 className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Browse by Category</h4>
             <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2 items-start">
               {visibleCategoryShortcuts.map(cat => (
                 <button
@@ -2336,7 +2333,7 @@ export const InventoryPage: React.FC<InventoryPageProps> = () => {
             
             <div className="flex justify-between items-center border-b border-[#A9CDEE]/40 pb-2">
               <h3 className="text-xs font-sans font-extrabold text-[#342D7E] uppercase tracking-wider flex items-center gap-1.5">
-                <Camera className="w-5 h-5 text-indigo-500 animate-pulse" /> OwnersLOCAL Snapshot AI Camera
+                <Camera className="w-5 h-5 text-indigo-500 animate-pulse" /> Scan Receipt
               </h3>
               <button 
                 onClick={() => { 
@@ -2816,7 +2813,7 @@ export const InventoryPage: React.FC<InventoryPageProps> = () => {
 
       {/* FRAMEWORK CONNECTIONS SUMMARY */}
       <div className="p-4 bg-[#E3F3FF] border border-[#A9CDEE] rounded-2xl space-y-3 font-sans font-medium text-slate-600">
-        <h4 className="text-xs font-extrabold text-[#342D7E] uppercase tracking-wider">Inventory Connections</h4>
+        <h4 className="text-xs font-extrabold text-[#342D7E] uppercase tracking-wider">Connected Tools</h4>
         <div className="grid grid-cols-2 md:grid-cols-4 gap-y-2 gap-x-4 text-xs font-semibold">
           <div className="flex items-center gap-2">
             <span className="text-emerald-500">✓</span>

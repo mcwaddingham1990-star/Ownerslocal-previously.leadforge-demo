@@ -32,14 +32,14 @@ type ConnectStatus =
 // Shown (grayed out) before Stripe is connected, so an owner can see
 // everything Payments will unlock without having to go find out elsewhere.
 const FEATURE_PREVIEW: Array<{ icon: React.ReactNode; label: string; description: string }> = [
-  { icon: <CreditCard className="h-4 w-4" />, label: "Accept customer payments", description: "Card payments on invoices and estimates, with a Pay button customers can use directly." },
-  { icon: <Receipt className="h-4 w-4" />, label: "Send Stripe invoices", description: "Invoices with a built-in Pay button, tracked automatically." },
-  { icon: <Smartphone className="h-4 w-4" />, label: "In-person payments", description: "Stripe Terminal / Tap to Pay for payment collected on-site." },
+  { icon: <CreditCard className="h-4 w-4" />, label: "Take card payments", description: "Customers can pay estimates and invoices online." },
+  { icon: <Receipt className="h-4 w-4" />, label: "Send invoices with a Pay button", description: "Invoices with a built-in Pay button, tracked automatically." },
+  { icon: <Smartphone className="h-4 w-4" />, label: "Take payments in person", description: "Stripe Terminal / Tap to Pay for payment collected on-site." },
   { icon: <Percent className="h-4 w-4" />, label: "Automatic sales tax", description: "Stripe Tax calculates the right rate for every transaction." },
   { icon: <RefreshCw className="h-4 w-4" />, label: "Refunds", description: "Issue a refund straight from this tab." },
   { icon: <ShieldAlert className="h-4 w-4" />, label: "Disputes & fraud alerts", description: "See and respond to chargebacks and fraud warnings here." },
   { icon: <Wallet className="h-4 w-4" />, label: "Balance & payouts", description: "Real-time balance, payout history, and Instant Payout when eligible." },
-  { icon: <Landmark className="h-4 w-4" />, label: "Automatic status updates", description: "Payments, invoices, jobs, and revenue/accounting stay in sync automatically." },
+  { icon: <Landmark className="h-4 w-4" />, label: "Payments update automatically", description: "Payments, invoices, jobs, and revenue/accounting stay in sync automatically." },
 ];
 
 const STRIPE_APPEARANCE = {
@@ -106,7 +106,9 @@ export const PaymentsPage: React.FC = () => {
 
   const startOnboarding = async () => {
     if (!publishableKey) {
-      triggerNotification("Payments aren't necessary for this demo.");
+      const message = "Payments aren't necessary for this demo.";
+      setStatus({ state: "error", message });
+      triggerNotification(message);
       return;
     }
     setIsStartingOnboarding(true);
@@ -185,7 +187,7 @@ export const PaymentsPage: React.FC = () => {
         <div>
           <h1 className="text-base font-sans font-extrabold text-[#342D7E] uppercase tracking-wider">Payments</h1>
           <p className="text-xs text-slate-500 font-sans font-medium">
-            Accept payments, manage payouts, and keep revenue in sync — powered by Stripe.
+            Use Stripe to accept customer payments and send money to your bank.
           </p>
         </div>
       </div>
@@ -209,7 +211,7 @@ export const PaymentsPage: React.FC = () => {
               className="px-5 py-3 bg-[#315C9F] hover:bg-[#254A84] text-white rounded-xl text-xs font-bold font-sans cursor-pointer shadow-sm disabled:opacity-50 flex items-center gap-2"
             >
               {isStartingOnboarding && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-              Integrate Stripe for financial updates and customer payment options
+              Connect Stripe
             </button>
           </div>
         </>

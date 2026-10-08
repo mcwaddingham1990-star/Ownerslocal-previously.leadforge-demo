@@ -2,7 +2,7 @@ import React, { useState, useMemo, useEffect } from "react";
 import { useAuth } from "../context/AuthContext";
 import { useDomainData } from "../context/DomainDataContext";
 import { useNavTelemetry } from "../context/NavTelemetryContext";
-import { resolveApproverEmails, buildTimeClockApprovalNotifications, sendPushBestEffort } from "../lib/notificationsService";
+import { resolveApproverEmails, buildTimeClockApprovalNotifications } from "../lib/notificationsService";
 import { TimeClockApprovalModal } from "./TimeClockApprovalModal";
 import {
   Clock,
@@ -38,6 +38,7 @@ import {
 } from "lucide-react";
 import { SchedulingEvent } from "./SchedulingPage";
 import { TimeClockLog } from "../types/domain";
+import { hasPermission } from "../types/permissions";
 import { clockInTransaction, clockOutTransaction } from "../lib/timeClockService";
 import { GpsPrivacyNotice } from "./GpsPrivacyNotice";
 import { RecentRoutesSection } from "./RecentRoutesSection";
@@ -148,6 +149,7 @@ export const TimeClockPage: React.FC<TimeClockPageProps> = ({
   const [manualJobId, setManualJobId] = useState("");
   const [manualRoute, setManualRoute] = useState("");
   const [manualVehicle, setManualVehicle] = useState("");
+  const [teamPunchEmpId, setTeamPunchEmpId] = useState("");
 
   // Edit Time fields
   const [editingLogId, setEditingLogId] = useState<string | null>(null);
@@ -195,6 +197,14 @@ export const TimeClockPage: React.FC<TimeClockPageProps> = ({
     const rolesWithPermission = ["Owner", "General Manager", "Office Manager", "Operations Manager", "Payroll", "Accountant / Bookkeeper", "Accountant"];
     return rolesWithPermission.includes(activeRole);
   }, [activeRole]);
+  const hasExplicitTeamPunchSetting = !!loggedInUser?.granularPermissions &&
+    Object.prototype.hasOwnProperty.call(loggedInUser.granularPermissions, "timeclock_team_punches");
+  const legacyManagerTeamPunchDefault = ["General Manager", "Office Manager", "Operations Manager"].includes(activeRole) && !hasExplicitTeamPunchSetting;
+  const canClockOtherEmployees =
+    (!simulatedRole && !loggedInUser?.isEmployee) ||
+    activeRole === "Owner" ||
+    hasPermission(loggedInUser?.granularPermissions, "timeclock_team_punches", "edit") ||
+    legacyManagerTeamPunchDefault;
   const canEditAllRecords = isManagementRole;
   const canViewAllRecords = isManagementRole;
 
@@ -304,6 +314,8 @@ export const TimeClockPage: React.FC<TimeClockPageProps> = ({
 
     return roster;
   }, [employeeRecords, timeClockLogs, loggedInUser, activeRole, clockInDuration]);
+  const teamPunchEmployee = employees.find(employee => employee.id === teamPunchEmpId) || null;
+
 
   // Reset Filters helper
   const handleResetFilters = () => {
@@ -433,13 +445,8 @@ export const TimeClockPage: React.FC<TimeClockPageProps> = ({
       time: log.time,
       recipientEmails
     });
+    // Pushed to each approver by the notifications subscriber in useEventEngineSubscribers.
     setNotifications(prev => [...prev, ...notifs]);
-    void sendPushBestEffort(
-      recipientEmails,
-      "Clock Verification Needed",
-      `${log.employeeName} needs approval for ${log.type} at ${log.time}.`,
-      { type: "time_clock_approval", logId: log.id }
-    );
   };
 
   const performClockIn = async (jobId: string, route: string, vehicle: string) => {
@@ -574,6 +581,73 @@ export const TimeClockPage: React.FC<TimeClockPageProps> = ({
 
   const handleClockOut = async () => {
     await performClockOut();
+  };
+
+  // Authorized team punch: Owner or a role with the explicit
+  // "Clock Employees In/Out" capability can create a real active shift for
+  // another employee or close that employee's current shift. We deliberately
+  // do NOT capture the manager's GPS and pretend it belongs to the employee.
+  const handleTeamPunch = async () => {
+    if (!canClockOtherEmployees || !teamPunchEmployee || !businessId || !loggedInUser?.email || punchPending) return;
+
+    const targetLogs = timeClockLogs
+      .filter(log => log.employeeEmail === teamPunchEmployee.id)
+      .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+    const lastTargetLog = targetLogs[targetLogs.length - 1];
+    const targetLooksActive = !!lastTargetLog && lastTargetLog.type !== "Clock Out";
+    const clockingOut = teamPunchEmployee.status !== "Off Duty" || targetLooksActive;
+    const { timeStr, dateStr, iso } = nowStamp();
+    const performedBy = loggedInUser.name || loggedInUser.email;
+
+    const log: TimeClockLog = {
+      id: `log_team_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      employeeEmail: teamPunchEmployee.id,
+      employeeName: teamPunchEmployee.name,
+      type: clockingOut ? "Clock Out" : "Clock In",
+      date: dateStr,
+      time: timeStr,
+      timestamp: iso,
+      gps: `Remote punch by ${performedBy} (${activeRole}); employee device location not captured`,
+      approved: true,
+      approvalStatus: "approved",
+      approvedBy: loggedInUser.email,
+      approvedAt: iso,
+      enteredManually: true,
+      verifiedBy: performedBy,
+      verifierRole: activeRole
+    };
+
+    setPunchPending(true);
+    try {
+      if (clockingOut) {
+        await clockOutTransaction(businessId, log, targetLooksActive);
+      } else {
+        await clockInTransaction(businessId, log);
+      }
+
+      setTimeClockLogs(previous => previous.some(entry => entry.id === log.id) ? previous : [...previous, log]);
+
+      if (teamPunchEmployee.id === loggedInUser.email) {
+        setIsClockedIn(!clockingOut);
+        setClockInTime(clockingOut ? null : timeStr);
+        if (clockingOut) setClockInDuration(0);
+      }
+
+      logOperationalEvent?.(
+        clockingOut ? "Employee Clocked Out by Management" : "Employee Clocked In by Management",
+        `${performedBy} ${clockingOut ? "clocked out" : "clocked in"} ${teamPunchEmployee.name} at ${timeStr}.`,
+        clockingOut ? "🚪" : "⏱️"
+      );
+      triggerLocalNotification(`${teamPunchEmployee.name} ${clockingOut ? "clocked out" : "clocked in"} at ${timeStr}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Employee punch could not be saved.";
+      triggerLocalNotification(message);
+      if (message.toLowerCase().includes("already clocked in")) {
+        await refreshTimeClockLogs().catch(() => undefined);
+      }
+    } finally {
+      setPunchPending(false);
+    }
   };
 
   // Action: Start Break
@@ -723,7 +797,7 @@ export const TimeClockPage: React.FC<TimeClockPageProps> = ({
               <Clock className="w-5 h-5" />
             </span>
             <h2 className="text-base font-sans font-extrabold text-[#342D7E] uppercase tracking-wider">
-              {canViewAllRecords ? "Corporate Time Clock Dashboard" : "My Time Clock"}
+              {canViewAllRecords ? "Time Clock" : "My Time Clock"}
             </h2>
           </div>
           <p className="text-xs text-slate-500 mt-1 font-sans font-semibold">
@@ -892,6 +966,43 @@ export const TimeClockPage: React.FC<TimeClockPageProps> = ({
         )}
       </div>
 
+      {canClockOtherEmployees && (
+        <div className="rounded-2xl border border-[#A9CDEE] bg-white p-3 shadow-sm">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
+            <label className="flex-1">
+              <span className="mb-1 block text-[9.5px] font-black uppercase tracking-wider text-[#5E7393]">Team Clock</span>
+              <select
+                value={teamPunchEmpId}
+                onChange={e => setTeamPunchEmpId(e.target.value)}
+                className="w-full rounded-xl border border-[#A9CDEE] bg-white px-3 py-2 text-xs font-bold text-[#1F3557]"
+              >
+                <option value="">Select employee…</option>
+                {employees.map(employee => (
+                  <option key={employee.id} value={employee.id}>
+                    {employee.name} — {employee.status}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button
+              type="button"
+              onClick={() => void handleTeamPunch()}
+              disabled={!teamPunchEmployee || punchPending}
+              className={`rounded-xl px-4 py-2 text-xs font-black text-white disabled:cursor-not-allowed disabled:opacity-40 ${teamPunchEmployee && teamPunchEmployee.status !== "Off Duty" ? "bg-rose-500" : "bg-emerald-600"}`}
+            >
+              {punchPending
+                ? "Saving…"
+                : teamPunchEmployee && teamPunchEmployee.status !== "Off Duty"
+                  ? "Clock Employee Out"
+                  : "Clock Employee In"}
+            </button>
+          </div>
+          <p className="mt-1.5 text-[9px] text-[#5E7393]">
+            Authorized management punch. The action is saved to that employee’s real time card with the manager recorded as verifier.
+          </p>
+        </div>
+      )}
+
       {/* SUMMARY STATS METRIC CARDS -- company-wide, management only */}
       {canViewAllRecords && (
         <div className="grid grid-cols-2 md:grid-cols-6 gap-3.5">
@@ -899,9 +1010,9 @@ export const TimeClockPage: React.FC<TimeClockPageProps> = ({
             { key: "ClockedIn", label: "Clocked In", value: summaryMetrics.clockedIn, sub: "Active shift", color: "text-[#315C9F] border-blue-200 bg-blue-50/50" },
             { key: "Working", label: "Working", value: summaryMetrics.working, sub: "Field & dispatch", color: "text-emerald-700 border-emerald-200 bg-emerald-50/40" },
             { key: "OnBreak", label: "On Break", value: summaryMetrics.onBreak, sub: "Rest periods", color: "text-amber-700 border-amber-200 bg-amber-50/40" },
-            { key: "TotalHours", label: "Labor Hours Today", value: `${summaryMetrics.totalHoursToday} hrs`, sub: "Accrued shift total", color: "text-slate-800 border-slate-200 bg-slate-50/50" },
-            { key: "Payroll", label: "Payroll Projected", value: `$${summaryMetrics.totalPayroll.toLocaleString()}`, sub: "This period gross", color: "text-purple-700 border-purple-200 bg-purple-50/40" },
-            { key: "Overtime", label: "Overtime Hours", value: `${summaryMetrics.overtimeHours} hrs`, sub: "1.5x Premium rate", color: "text-rose-700 border-rose-200 bg-rose-50/40" }
+            { key: "TotalHours", label: "Labor Hours Today", value: `${summaryMetrics.totalHoursToday} hrs`, sub: "Hours worked today", color: "text-slate-800 border-slate-200 bg-slate-50/50" },
+            { key: "Payroll", label: "Estimated Pay", value: `$${summaryMetrics.totalPayroll.toLocaleString()}`, sub: "Estimated pay this period", color: "text-purple-700 border-purple-200 bg-purple-50/40" },
+            { key: "Overtime", label: "Overtime Hours", value: `${summaryMetrics.overtimeHours} hrs`, sub: "Paid at 1.5 times the regular rate", color: "text-rose-700 border-rose-200 bg-rose-50/40" }
           ].map((card) => {
             const isSelected = activeSummaryFilter === card.key;
             return (
@@ -928,7 +1039,7 @@ export const TimeClockPage: React.FC<TimeClockPageProps> = ({
       {canViewAllRecords && (
         <div className="bg-[#E3F3FF] p-4 rounded-2xl border border-[#A9CDEE]">
           <h4 className="text-[10px] font-black uppercase tracking-widest text-[#342D7E] mb-3 flex items-center gap-1.5">
-            <Activity className="w-3.5 h-3.5 text-[#4A9BFF] animate-pulse" /> Live Operational Team Status
+            <Activity className="w-3.5 h-3.5 text-[#4A9BFF] animate-pulse" /> Employee Status
           </h4>
           <div className="flex flex-wrap gap-2.5">
             {employees.map((emp) => {
@@ -980,7 +1091,7 @@ export const TimeClockPage: React.FC<TimeClockPageProps> = ({
         <div className="xl:col-span-7 bg-white rounded-2xl border border-[#A9CDEE] overflow-hidden shadow-sm">
           <div className="bg-[#E3F3FF]/50 px-4 py-3.5 border-b border-[#A9CDEE] flex items-center justify-between">
             <h3 className="text-xs font-black uppercase text-[#342D7E] tracking-wider font-sans">
-              Active Shift Ledger ({filteredEmployees.length} listed)
+              Who’s Clocked In ({filteredEmployees.length} listed)
             </h3>
             {activeSummaryFilter !== "All" && (
               <button
@@ -1073,7 +1184,7 @@ export const TimeClockPage: React.FC<TimeClockPageProps> = ({
         <div className={`${canViewAllRecords ? "xl:col-span-5" : "xl:col-span-12"} bg-white rounded-2xl border border-[#A9CDEE] shadow-sm overflow-hidden flex flex-col`}>
           <div className="bg-[#E3F3FF]/50 px-4 py-3.5 border-b border-[#A9CDEE] flex items-center justify-between">
             <h3 className="text-xs font-black uppercase text-[#342D7E] tracking-wider font-sans">
-              Employee Ledger Details
+              Employee Hours
             </h3>
             {selectedEmployee.approved ? (
               <span className="px-2 py-0.5 bg-emerald-50 text-emerald-600 border border-emerald-200 rounded text-[9px] font-mono font-bold uppercase">
@@ -1154,7 +1265,7 @@ export const TimeClockPage: React.FC<TimeClockPageProps> = ({
 
             {/* Payroll calculation values */}
             <div className="bg-[#F9FAFB] border border-slate-200 rounded-xl p-3.5 space-y-2">
-              <h5 className="text-[10px] font-black text-slate-500 uppercase tracking-wider">Period Payroll Estimate</h5>
+              <h5 className="text-[10px] font-black text-slate-500 uppercase tracking-wider">Estimated Pay for This Period</h5>
               <div className="space-y-1.5 text-xs">
                 <div className="flex justify-between font-semibold text-slate-600">
                   <span>Regular (Max 40 hrs):</span>
@@ -1180,7 +1291,7 @@ export const TimeClockPage: React.FC<TimeClockPageProps> = ({
 
             {/* History logs & break histories */}
             <div className="space-y-2">
-              <h5 className="text-[10px] font-black text-[#342D7E] uppercase tracking-wider">Punch Log History</h5>
+              <h5 className="text-[10px] font-black text-[#342D7E] uppercase tracking-wider">Clock-In History</h5>
               <div className="space-y-2 max-h-44 overflow-y-auto pr-1">
                 {selectedEmployee.history.length === 0 ? (
                   <p className="text-xs text-slate-400 font-semibold italic text-center py-4">No logged history for current pay period.</p>
@@ -1331,10 +1442,10 @@ export const TimeClockPage: React.FC<TimeClockPageProps> = ({
       <div className="bg-white rounded-2xl border border-[#A9CDEE] p-5 space-y-4">
         <div>
           <h4 className="text-xs font-black uppercase text-[#342D7E] tracking-wider font-sans">
-            Historical Payroll & Timecard Ledger
+            Past Hours and Pay
           </h4>
           <p className="text-[11px] text-slate-400 font-semibold font-sans mt-0.5">
-            Audit logs matching company-wide active tax projections. Search for any technician to reveal pay historicals.
+            Search for an employee to view their previous hours and estimated pay.
           </p>
         </div>
 
@@ -1346,13 +1457,13 @@ export const TimeClockPage: React.FC<TimeClockPageProps> = ({
             </p>
           </div>
           <div className="space-y-0.5">
-            <span className="text-[9px] font-black text-slate-400 uppercase">Premium Overtime Hours</span>
+            <span className="text-[9px] font-black text-slate-400 uppercase">Overtime Hours</span>
             <p className="text-base font-mono font-black text-rose-600">
               {employees.reduce((sum, e) => sum + e.overtimeHours, 0).toFixed(2)} hrs
             </p>
           </div>
           <div className="space-y-0.5">
-            <span className="text-[9px] font-black text-slate-400 uppercase">Estimated Period Gross Payroll</span>
+            <span className="text-[9px] font-black text-slate-400 uppercase">Estimated Total Pay</span>
             <p className="text-base font-mono font-black text-emerald-600">
               ${employees.reduce((sum, e) => {
                 const reg = Math.min(40, e.hoursThisPayPeriod - e.overtimeHours);
@@ -1361,7 +1472,7 @@ export const TimeClockPage: React.FC<TimeClockPageProps> = ({
             </p>
           </div>
           <div className="space-y-0.5">
-            <span className="text-[9px] font-black text-slate-400 uppercase">Audit Status</span>
+            <span className="text-[9px] font-black text-slate-400 uppercase">Pay Period Status</span>
             <span className="px-2.5 py-1 bg-blue-100 text-[#315C9F] border border-[#9EC8EF] text-[10px] font-mono font-bold rounded-lg uppercase tracking-wider block w-fit mt-1">
               Active Pay Period
             </span>
@@ -1378,7 +1489,7 @@ export const TimeClockPage: React.FC<TimeClockPageProps> = ({
             onClick={() => onNavigateToScreen ? onNavigateToScreen("roster") : onOpenPlaceholder("Corporate Roster Database", "📋")}
             className="px-3.5 py-1.5 bg-white hover:bg-amber-100/50 text-slate-700 border border-slate-200 rounded-lg text-[10.5px] font-extrabold uppercase tracking-wider cursor-pointer flex items-center gap-1 transition-all"
           >
-            Go to Corporate Roster
+            Open Employee Roster
             <ExternalLink className="w-3 h-3" />
           </button>
         </div>
@@ -1678,7 +1789,7 @@ export const TimeClockPage: React.FC<TimeClockPageProps> = ({
       {/* FRAMEWORK CONNECTIONS (As required by the guideline exactly) */}
       <div className="bg-[#E3F3FF] border border-[#A9CDEE] rounded-2xl p-4 text-left">
         <h4 className="text-[10px] font-black uppercase tracking-wider text-[#342D7E] mb-2">
-          Time Clock Connections
+          Connected Tools
         </h4>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-[11px] font-sans">
           <div>
@@ -1696,7 +1807,7 @@ export const TimeClockPage: React.FC<TimeClockPageProps> = ({
             </div>
           </div>
           <div>
-            <p className="font-extrabold text-[#315C9F] uppercase text-[9px] mb-1">READY TO CONNECT</p>
+            <p className="font-extrabold text-[#315C9F] uppercase text-[9px] mb-1">NOT CONNECTED</p>
             <div className="grid grid-cols-2 gap-1 font-semibold text-slate-400">
               <span className="flex items-center gap-1 text-slate-600 font-bold">✓ Roster (Active)</span>
               <span className="flex items-center gap-1">□ AI Assistant</span>

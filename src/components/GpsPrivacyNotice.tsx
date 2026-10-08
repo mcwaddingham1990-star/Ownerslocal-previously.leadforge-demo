@@ -9,7 +9,7 @@ import { ShieldCheck } from "lucide-react";
  * Settings, Time Clock, and the Interactive Map.
  */
 export const GPS_PRIVACY_DISCLOSURE =
-  "Location is only ever visible to this business while the employee is clocked in. The instant they clock out, tracking stops completely -- their employer cannot see where they are, or where they've been, while off the clock.";
+  "Location tracking only works while an employee is clocked in. Tracking stops when they clock out. Their off-duty location is never shown.";
 
 export const GpsPrivacyNotice: React.FC<{ className?: string; dark?: boolean }> = ({ className, dark }) => (
   <div className={`flex items-start gap-2 rounded-xl border p-3 text-[10px] font-semibold ${

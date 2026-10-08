@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useMemo } from "react";
 import { createPortal } from "react-dom";
 import { useVisualViewportBottomRight } from "./hooks/useVisualViewportBottomRight";
 import { db, auth } from "./firebase";
-import { doc, setDoc, getDoc, getDocFromServer, writeBatch } from "firebase/firestore";
+import { doc, setDoc, getDoc, getDocFromServer, writeBatch, waitForPendingWrites } from "firebase/firestore";
 import { fullAccessGranular, defaultGranularFromModuleList, hasPermission, GranularPermissions } from "./types/permissions";
 import { RevenueEvent, EmployeeRecord, TimeClockLog, Transaction, WorkOrder } from "./types/domain";
 import { PriceBookFolder, PriceBookModel } from "./types/priceBook";
@@ -14,7 +14,7 @@ import { CustomerLoginPanel } from "./components/CustomerLoginPanel";
 import { CustomerAppShell } from "./components/CustomerAppShell";
 import { useStripeConnectStatus } from "./hooks/useStripeConnectStatus";
 import { Account, JournalEntry, Invoice, Bill, Vendor, BankAccount, RecurringTransaction, MileageLog, Budget, SalesTaxRate, DEFAULT_CHART_OF_ACCOUNTS } from "./types/accounting";
-import type { GeneratedPdfDraft, EstimatePrefill } from "./types/generatedPdf";
+import type { GeneratedPdfDraft, EstimatePrefill, BuildJobPrefill } from "./types/generatedPdf";
 import { buildStyleGuidance } from "./lib/aiStyle";
 import { authedFetch } from "./lib/apiClient";
 import { postTransactionEntry, invoiceTotal, accountMovementInRange, computeAccountBalances, computeLedgerTotals, expenseBreakdownByAccount, ledgerItemsForAccount } from "./lib/accountingEngine";
@@ -30,21 +30,23 @@ import { computeJobCosting } from "./lib/jobCostingEngine";
 import { PriceBookModal } from "./components/PriceBookModal";
 import RemoteSigningPage from "./components/RemoteSigningPage";
 import CustomerPortalPage from "./components/CustomerPortalPage";
-import { MarketingAttributionView } from "./components/MarketingAttributionView";
 import { TimeClockApprovalModal } from "./components/TimeClockApprovalModal";
 import { RolePermissionEditorModal, MODULE_CATALOG } from "./components/RolePermissionEditorModal";
 import { LogTransactionModal } from "./components/LogTransactionModal";
 import {
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
-  sendPasswordResetEmail,
   sendEmailVerification,
   signOut,
   onAuthStateChanged,
   GoogleAuthProvider,
   signInWithPopup,
-  signInWithRedirect
+  signInWithRedirect,
+  setPersistence,
+  browserLocalPersistence,
+  browserSessionPersistence
 } from "firebase/auth";
+import type { User as FirebaseUser } from "firebase/auth";
 import { Capacitor } from "@capacitor/core";
 import { 
   Mail, 
@@ -90,6 +92,7 @@ import {
   FolderOpen,
   MessageSquare,
   GraduationCap,
+  BookOpen,
   Link,
   ChevronLeft,
   Moon,
@@ -121,7 +124,7 @@ import {
   Legend
 } from "recharts";
 import { LineChart, Line, BarChart, Bar, PieChart, Pie, Cell, ComposedChart } from "recharts";
-import { DollarSign, TrendingUp, TrendingDown, Search, Filter, Landmark, Box, CreditCard, Camera, Star, Receipt } from "lucide-react";
+import { DollarSign, TrendingUp, TrendingDown, Search, Filter, Landmark, Box, CreditCard, Camera, Star, Receipt, Zap } from "lucide-react";
 
 import { CustomersPage, Customer, INITIAL_CUSTOMERS } from "./components/CustomersPage";
 import { LeadsPage, INITIAL_LEADS, Lead } from "./components/LeadsPage";
@@ -139,6 +142,9 @@ import { DocumentsPage, DocumentItem } from "./components/DocumentsPage";
 import { AccountingPage } from "./components/AccountingPage";
 import { PaymentsPage } from "./components/PaymentsPage";
 import { BillingPage } from "./components/BillingPage";
+import { PaywallGate } from "./components/PaywallGate";
+import TutorialHost from "./components/TutorialHost";
+import { useSubscriptionStatus } from "./hooks/useSubscriptionStatus";
 import { RosterPage } from "./components/RosterPage";
 import { MessagesPage } from "./components/MessagesPage";
 import { TrainingPage } from "./components/TrainingPage";
@@ -148,6 +154,9 @@ import { StructuredAddressFields } from "./components/StructuredAddressFields";
 import { IntegrationsPage } from "./components/IntegrationsPage";
 import { NotificationsPage } from "./components/NotificationsPage";
 import { MissedCallTextBackPage } from "./components/MissedCallTextBackPage";
+import { AutomationsPage } from "./components/AutomationsPage";
+import { OwnerProtectionPage } from "./components/OwnerProtectionPage";
+import { CompletionGuard } from "./components/CompletionGuard";
 import { OwnerConsolePage } from "./components/OwnerConsolePage";
 import {
   INITIAL_DASHBOARD_LEADS,
@@ -159,11 +168,13 @@ import {
 } from "./initialData";
 import { validateConnection } from "./lib/firestoreService";
 import { onSyncError } from "./lib/syncErrorBus";
+import { waitForPersistenceQueue } from "./lib/persistenceQueue";
 import { useFirestoreCollection } from "./hooks/useFirestoreCollection";
 import { AuthContext, AuthContextValue } from "./context/AuthContext";
 import { DomainDataContext, DomainDataContextValue } from "./context/DomainDataContext";
 import { NavTelemetryContext, NavTelemetryContextValue } from "./context/NavTelemetryContext";
 import { useEventEngineSubscribers } from "./hooks/useEventEngineSubscribers";
+import { useAutomationEngine } from "./hooks/useAutomationEngine";
 import darkLoginBackground from "../Src/Assets/Login/Darkloginbg.png";
 import darkLoginCard from "../Src/Assets/Login/Darkmodecard.png";
 import lightLoginCard from "../Src/Assets/Login/Lightmodecard.png";
@@ -573,6 +584,71 @@ const validPersonName = (value: unknown): string => {
   return name && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(name) ? name : "";
 };
 
+const normalizeBusinessEmail = (value: unknown): string =>
+  typeof value === "string" ? value.trim().toLowerCase() : "";
+
+const profileLooksLikeEmployee = (profileData: any): boolean => {
+  const role = String(profileData?.role || "").trim();
+  return profileData?.isEmployee === true
+    || (!!role && role !== "Owner")
+    || (typeof profileData?.inviteCode === "string" && !!profileData.inviteCode.trim());
+};
+
+/**
+ * Resolves the one canonical workspace/tenant for a Firebase account.
+ *
+ * Owner'sLOCAL stores business data under the owner's email. Employee
+ * accounts must therefore use the owner's businessEmail, never their own
+ * login email. Older/malformed employee profiles can have isEmployee missing
+ * or a stale businessEmail; when the original invite is still recorded we
+ * safely recover the business from that invite and repair the profile.
+ */
+const resolveBusinessIdentity = async (user: any, profileData: any) => {
+  const authEmail = normalizeBusinessEmail(user?.email);
+  let businessEmail = normalizeBusinessEmail(profileData?.businessEmail);
+  const inviteCode = typeof profileData?.inviteCode === "string"
+    ? profileData.inviteCode.trim().toUpperCase()
+    : "";
+  const employeeLike = profileLooksLikeEmployee(profileData)
+    || (!!businessEmail && !!authEmail && businessEmail !== authEmail);
+
+  if (inviteCode && employeeLike) {
+    try {
+      const inviteSnap = await getDoc(doc(db, "employee_invites", inviteCode));
+      if (inviteSnap.exists()) {
+        const inviteData = inviteSnap.data();
+        const inviteBusinessEmail = normalizeBusinessEmail(inviteData.businessEmail);
+        const roleMatches = typeof profileData?.role === "string"
+          && typeof inviteData.role === "string"
+          && inviteData.role === profileData.role;
+        if (inviteBusinessEmail && roleMatches) {
+          if (businessEmail !== inviteBusinessEmail) {
+            // firestore.rules only permits this protected-field repair when
+            // the profile's existing inviteCode resolves to this exact
+            // business + role. A forged tenant switch is still rejected.
+            await setDoc(doc(db, "user_profiles", user.uid), {
+              businessEmail: inviteBusinessEmail
+            }, { merge: true });
+          }
+          businessEmail = inviteBusinessEmail;
+        }
+      }
+    } catch (error) {
+      console.warn("Couldn't repair employee business linkage from invite; using the saved profile linkage.", error);
+    }
+  }
+
+  if (!businessEmail) businessEmail = authEmail;
+
+  return {
+    authEmail,
+    businessEmail,
+    isEmployee: profileData?.isEmployee === true
+      || (!!businessEmail && !!authEmail && businessEmail !== authEmail)
+      || (employeeLike && String(profileData?.role || "") !== "Owner")
+  };
+};
+
 export type WorkspaceTheme = "light-basic" | "light-extreme" | "dark-basic" | "dark-dynamic";
 
 export const workspaceThemeFromSetting = (value?: string): WorkspaceTheme => {
@@ -660,22 +736,22 @@ export const DEFAULT_ROLES_DATA: Record<string, { name: string; description: str
   owner: {
     name: "Owner",
     description: "Everything",
-    permissions: ["dashboard", "leads", "jobs", "customers", "messages", "scheduling", "dispatch", "timeclock", "routes", "employee_locations", "estimates", "documents", "ai_assistant", "inventory", "settings", "training"]
+    permissions: ["dashboard", "leads", "jobs", "customers", "messages", "scheduling", "dispatch", "timeclock", "timeclock_team_punches", "routes", "employee_locations", "estimates", "documents", "ai_assistant", "inventory", "settings", "training"]
   },
   general_manager: {
     name: "General Manager",
     description: "Everything except ownership and account deletion",
-    permissions: ["dashboard", "leads", "jobs", "customers", "messages", "scheduling", "dispatch", "timeclock", "routes", "employee_locations", "estimates", "documents", "ai_assistant", "inventory", "settings", "training"]
+    permissions: ["dashboard", "leads", "jobs", "customers", "messages", "scheduling", "dispatch", "timeclock", "timeclock_team_punches", "routes", "employee_locations", "estimates", "documents", "ai_assistant", "inventory", "settings", "training"]
   },
   office_manager: {
     name: "Office Manager",
     description: "Day-to-day office and field operations",
-    permissions: ["dashboard", "revenue", "accounting", "customers", "leads", "estimates", "scheduling", "dispatch", "routes", "employee_locations", "jobs", "timeclock", "inventory", "documents", "messages", "roster", "training", "settings"]
+    permissions: ["dashboard", "revenue", "accounting", "customers", "leads", "estimates", "scheduling", "dispatch", "routes", "employee_locations", "jobs", "timeclock", "timeclock_team_punches", "inventory", "documents", "messages", "roster", "training", "settings"]
   },
   operations_manager: {
     name: "Operations Manager",
     description: "Dashboard, Scheduling, Dispatch, Routes, Jobs, Inventory, etc.",
-    permissions: ["dashboard", "scheduling", "dispatch", "routes", "employee_locations", "jobs", "inventory", "documents", "messages", "training", "settings"]
+    permissions: ["dashboard", "scheduling", "dispatch", "routes", "employee_locations", "jobs", "timeclock", "timeclock_team_punches", "inventory", "documents", "messages", "training", "settings"]
   },
   dispatcher: {
     name: "Dispatcher",
@@ -878,8 +954,27 @@ const OS_SCREENS = [
   { id: "snapshots", label: "Snapshots Folder", url: "", icon: "📸", top: "82%", bottom: "87%" },
   { id: "notifications", label: "Notifications", url: "", icon: "🔔", top: "82%", bottom: "87%" },
   { id: "missed_call_textback", label: "Missed Call Text-Back", url: "", icon: "📵", top: "82%", bottom: "87%" },
+  { id: "automations", label: "Automations", url: "", icon: "⚡", top: "77%", bottom: "82%" },
+  { id: "owner_protection", label: "Money at Risk", url: "", icon: "🛡️", top: "12%", bottom: "17%" },
   { id: "owner_console", label: "Owner Console", url: "", icon: "🛠️", top: "82%", bottom: "87%" }
 ];
+
+const SIDEBAR_MENU = [
+  { type: "screen", id: "dashboard" },
+  { type: "screen", id: "owner_protection" },
+  { type: "screen", id: "ai_assistant" },
+  { type: "screen", id: "integrations" },
+  { type: "screen", id: "automations" },
+  { type: "screen", id: "missed_call_textback" },
+  { type: "group", id: "finances", label: "Finances", iconScreenId: "revenue", items: ["revenue", "accounting", "payments", "billing"] },
+  { type: "group", id: "clientele", label: "Clientele", iconScreenId: "customers", items: ["customers", "leads", "estimates"] },
+  { type: "group", id: "jobs_group", label: "Jobs", iconScreenId: "jobs", items: ["scheduling", "dispatch", "routes", "employee_locations", "jobs"] },
+  { type: "group", id: "roster_group", label: "Roster", iconScreenId: "roster", items: ["timeclock", "payroll", "training", "roster"] },
+  { type: "group", id: "collectibles", label: "Collectibles", iconScreenId: "documents", items: ["inventory", "documents", "snapshots"] },
+  { type: "group", id: "communications", label: "Communications", iconScreenId: "messages", items: ["messages", "bulletins", "notifications"] },
+  { type: "screen", id: "settings" }
+] as const;
+
 
 
 /**
@@ -1261,6 +1356,8 @@ const getScreenIcon = (screenId: string, className: string = "w-4 h-4") => {
   switch (screenId) {
     case "owner_console":
       return <ShieldAlert className={className} />;
+    case "owner_protection":
+      return <Shield className={className} />;
     case "dashboard":
       return <LayoutDashboard className={className} />;
     case "revenue":
@@ -1315,6 +1412,8 @@ const getScreenIcon = (screenId: string, className: string = "w-4 h-4") => {
       return <Bell className={className} />;
     case "missed_call_textback":
       return <PhoneMissed className={className} />;
+    case "automations":
+      return <Zap className={className} />;
     default:
       return <BrandIcon className={className} />;
   }
@@ -1543,6 +1642,13 @@ const EventEngineEffects: React.FC = () => {
   return null;
 };
 
+// Mounts the optional WHEN -> IF -> DO Automation Engine (see src/hooks/useAutomationEngine.ts).
+// Does nothing unless the business has turned an automation on.
+const AutomationEngineEffects: React.FC = () => {
+  useAutomationEngine();
+  return null;
+};
+
 export default function App() {
   // A remote-signing link (texted/emailed from the PDF Editor's "Send
   // remotely" option) has no OwnersLocal login of its own -- render the
@@ -1551,13 +1657,13 @@ export default function App() {
   // life of this mounted instance, so which branch runs never changes
   // between re-renders of the same instance.
   const remoteSignToken = getRemoteSigningTokenFromUrl();
-  if (remoteSignToken) return <RemoteSigningPage token={remoteSignToken} />;
+  if (remoteSignToken) return <><RemoteSigningPage token={remoteSignToken} /><TutorialHost tutorialId="remote_signing" /></>;
 
   // Same reasoning, for a customer's own Customer Portal link -- no
   // OwnersLocal login of theirs is involved, so this renders instead of
   // the normal logged-in app shell entirely.
   const customerPortalToken = getCustomerPortalTokenFromUrl();
-  if (customerPortalToken) return <CustomerPortalPage token={customerPortalToken} />;
+  if (customerPortalToken) return <><CustomerPortalPage token={customerPortalToken} /><TutorialHost tutorialId="customer_portal" /></>;
 
   // Logged in user profile (null if guest/default owner, or set when authenticated)
   // Standalone demo build: no Firebase Auth, no login screen -- opens
@@ -1598,12 +1704,10 @@ export default function App() {
     }
     return "";
   });
-  const [password, setPassword] = useState(() => {
-    if (localStorage.getItem("rememberMe") === "true") {
-      return localStorage.getItem("rememberedPassword") || "";
-    }
-    return "";
-  });
+  // Never preload a password from localStorage. Firebase owns credentials;
+  // keeping a plaintext password in browser storage makes account switching
+  // error-prone and exposes the credential unnecessarily.
+  const [password, setPassword] = useState("");
   const [inviteCode, setInviteCode] = useState("");
   const [loginError, setLoginError] = useState<string | null>(null);
   const [onboardingErrors, setOnboardingErrors] = useState<Record<string, string>>({});
@@ -1662,16 +1766,24 @@ export default function App() {
   // visitor -- static at mount time, same reasoning as the pre-existing
   // remoteSignToken/customerPortalToken checks that read window.location
   // once rather than reactively.
-  const [loginMode, setLoginMode] = useState<"business" | "customer">(() => (
-    new URLSearchParams(window.location.search).has("joinCode") ? "customer" : "business"
-  ));
+  const [loginMode, setLoginMode] = useState<"business" | "customer">(() => {
+    const params = new URLSearchParams(window.location.search);
+    return params.has("joinCode") || params.has("customer") ? "customer" : "business";
+  });
   const [customerSession, setCustomerSession] = useState<CustomerSession | null>(null);
+  // Reuse the existing onboarding-shaped business-profile form for edits
+  // without treating an authenticated manager as a brand-new Owner. This
+  // flag changes the form's save/back behavior only; Firebase Auth remains
+  // signed in and the user's real role/tenant identity stays untouched.
+  const [isEditingBusinessProfile, setIsEditingBusinessProfile] = useState(false);
   // One shared, live Stripe Connect status (same check PaymentsPage itself
   // uses) so Dashboard/Revenue's "Integrate Stripe" prompt actually reflects
   // reality instead of showing unconditionally even for an already-connected
   // business -- see src/hooks/useStripeConnectStatus.ts.
   const stripeConnectStatus = useStripeConnectStatus();
   const [currentView, setCurrentView] = useState<string>("login");
+  // Bumped by the sidebar's "Revisit Tutorial" button to reopen the current page's tutorial.
+  const [tutorialOpenRequest, setTutorialOpenRequest] = useState(0);
   const [activeScreen, setActiveScreen] = useState(() => {
     const savedId = screenIdFromPath() || sessionStorage.getItem("ownerslocal_active_screen");
     return OS_SCREENS.find(screen => screen.id === savedId) || OS_SCREENS[0];
@@ -1687,6 +1799,7 @@ export default function App() {
 
   // New Sidebar & Workspace Simulation states
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
+  const [expandedSidebarGroups, setExpandedSidebarGroups] = useState<Record<string, boolean>>({});
   const [simulatedRole, setSimulatedRole] = useState<string | null>(null);
   const [liveTime, setLiveTime] = useState(new Date());
 
@@ -1747,7 +1860,16 @@ export default function App() {
   // employee's own email is a different tenant and would resolve every
   // collection to empty. (TrainingPage.tsx already used this exact
   // ternary, anticipating businessEmail would be populated here.)
-  const businessId = loggedInUser?.isEmployee ? loggedInUser?.businessEmail : loggedInUser?.email;
+  const businessId = normalizeBusinessEmail(loggedInUser?.businessEmail || loggedInUser?.email) || undefined;
+
+  // OwnersLOCAL's own SaaS paywall (see server/subscriptionRoutes.ts and
+  // server/paywallBypass.ts). Called unconditionally here, alongside every
+  // other top-level hook in this component, so its value is available for
+  // the gate check right before the final return below (same reasoning as
+  // the customerSession early-return: this can't be checked any earlier
+  // than the point where auth state has actually resolved, but every hook
+  // above it still has to run on every render regardless).
+  const subscription = useSubscriptionStatus();
 
   // Applies a theme choice immediately -- local state, localStorage, AND a
   // direct partial Firestore write (merge: true only touches
@@ -1834,6 +1956,7 @@ export default function App() {
   const [invoices, setInvoices] = useFirestoreCollection<Invoice>("invoices", businessId);
   const [generatedPdfDraft, setGeneratedPdfDraft] = useState<GeneratedPdfDraft | null>(null);
   const [estimatePrefill, setEstimatePrefill] = useState<EstimatePrefill | null>(null);
+  const [buildJobPrefill, setBuildJobPrefill] = useState<BuildJobPrefill | null>(null);
   const [pendingSignatureCapture, setPendingSignatureCapture] = useState<{ customerName?: string; customerPhone?: string; customerEmail?: string } | null>(null);
   const [bills, setBills] = useFirestoreCollection<Bill>("bills", businessId);
   const [vendors, setVendors] = useFirestoreCollection<Vendor>("vendors", businessId);
@@ -2161,6 +2284,7 @@ export default function App() {
     // Allow revenue & accounting for specific management/accounting roles
     const highPrivilegeRoles = ["Owner", "General Manager", "Office Manager", "Accountant", "Accountant / Bookkeeper"];
     if (highPrivilegeRoles.includes(activeRole)) {
+      if (!perms.includes("owner_protection")) perms.push("owner_protection");
       if (!perms.includes("revenue")) perms.push("revenue");
       if (!perms.includes("accounting")) perms.push("accounting");
       if (!perms.includes("payments")) perms.push("payments");
@@ -2633,6 +2757,50 @@ export default function App() {
     triggerNotification(`Snapshot captured: ${filenameStr} saved to Snapshots Folder`);
   };
 
+  const repairOwnerProfileForAuthUser = async (user: any, existingProfileData?: any) => {
+    const ownerEmail = user.email?.trim().toLowerCase();
+    if (!ownerEmail) {
+      throw new Error("Authenticated user is missing an email address.");
+    }
+
+    const ownerPerms = DEFAULT_ROLES_DATA.owner.permissions;
+    const repairedProfile = {
+      uid: user.uid,
+      email: ownerEmail,
+      role: "Owner",
+      permissions: existingProfileData?.permissions || ownerPerms,
+      granularPermissions: existingProfileData?.granularPermissions || fullAccessGranular(ownerPerms),
+      name: validPersonName(existingProfileData?.name) || validPersonName(user.displayName) || "Owner",
+      businessName: existingProfileData?.businessName || "",
+      goals: existingProfileData?.goals || "",
+      isEmployee: false,
+      businessEmail: ownerEmail,
+      isOnboarded: existingProfileData?.isOnboarded ?? false,
+      createdAt: existingProfileData?.createdAt || new Date().toISOString(),
+      repairedAt: new Date().toISOString()
+    };
+
+    await setDoc(doc(db, "user_profiles", user.uid), repairedProfile, { merge: true });
+
+    const businessProfileRef = doc(db, "business_profiles", ownerEmail);
+    const businessProfileSnap = await getDoc(businessProfileRef);
+    if (businessProfileSnap.exists()) {
+      await setDoc(businessProfileRef, { updatedAt: new Date().toISOString() }, { merge: true });
+    } else {
+      await setDoc(businessProfileRef, {
+        businessNames: existingProfileData?.businessName ? [existingProfileData.businessName] : ["Your Business"],
+        ownerNames: [repairedProfile.name],
+        businessPhones: [""],
+        businessAddresses: [""],
+        businessLogos: [""],
+        companyLocations: [""],
+        updatedAt: new Date().toISOString()
+      }, { merge: true });
+    }
+
+    return repairedProfile;
+  };
+
   // Standalone demo build: no real Firebase Auth session to listen for --
   // loggedInUser/isLoggedIn are already set to the fake demo Owner as their
   // initial state above. Skip the listener entirely (it would otherwise
@@ -3095,7 +3263,7 @@ Access to full financial telemetry is restricted.`;
       id: "owner",
       name: "Owner",
       count: 1,
-      description: "Full access to every module",
+      description: "Can use every part of Owner’sLOCAL",
       permissions: MODULE_CATALOG.map(m => m.id),
       modulePermissions: fullAccessGranular(MODULE_CATALOG.map(m => m.id))
     }
@@ -3228,7 +3396,7 @@ Access to full financial telemetry is restricted.`;
     const cleanEmail = signUpInstructionsEmail.trim().toLowerCase();
     const cleanUser = signUpInstructionsBusinessName.trim();
     const cleanOwner = signUpInstructionsOwnerName.trim();
-    const cleanPass = signUpInstructionsPassword.trim();
+    const cleanPass = signUpInstructionsPassword;
 
     if (!cleanUser || !cleanOwner || !cleanEmail || !cleanPass) {
       setSignUpInstructionsError("All fields are required.");
@@ -3274,7 +3442,7 @@ Access to full financial telemetry is restricted.`;
       const user = userCredential.user;
 
       // 2. Create owner user profile document
-      const ownerPermissions = ["dashboard", "customers", "leads", "estimates", "scheduling", "dispatch", "routes", "employee_locations", "jobs", "timeclock", "inventory", "documents", "messages", "training", "ai_assistant", "settings", "integrations", "roster"];
+      const ownerPermissions = ["dashboard", "customers", "leads", "estimates", "scheduling", "dispatch", "routes", "employee_locations", "jobs", "timeclock", "timeclock_team_punches", "inventory", "documents", "messages", "training", "ai_assistant", "settings", "integrations", "roster"];
       const userProfile = {
         uid: user.uid,
         email: cleanEmail,
@@ -3299,6 +3467,11 @@ Access to full financial telemetry is restricted.`;
         companyLocations: [""],
         updatedAt: new Date().toISOString()
       });
+      // Firebase authenticates the new owner before these profile writes
+      // finish. The first subscription check can therefore arrive too early
+      // to resolve the business. Re-check now that the business exists so the
+      // paywall opens immediately instead of waiting for another login.
+      subscription.refresh();
       // Brand-new account -- there are no existing AI settings to clobber,
       // so it's safe to start persisting real changes right away.
       aiSettingsLoadedRef.current = true;
@@ -3314,7 +3487,7 @@ Access to full financial telemetry is restricted.`;
 
       // Update relevant states for consistency
       setEmail(cleanEmail);
-      setPassword(cleanPass);
+      setPassword("");
       setBusinessNames([cleanUser]);
       setOwnerNames([cleanOwner]);
 
@@ -3325,7 +3498,8 @@ Access to full financial telemetry is restricted.`;
         granularPermissions: userProfile.granularPermissions,
         isEmployee: false,
         name: cleanOwner,
-        goals: ""
+        goals: "",
+        businessEmail: cleanEmail
       });
 
       // Directly show Step 1 of Onboarding!
@@ -3350,17 +3524,7 @@ Access to full financial telemetry is restricted.`;
   const handlePasswordSignIn = async (e: React.FormEvent) => {
     e.preventDefault();
     const cleanEmail = email.trim().toLowerCase();
-    const cleanPass = password.trim();
-
-    if (rememberMe) {
-      localStorage.setItem("rememberMe", "true");
-      localStorage.setItem("rememberedEmail", email);
-      localStorage.setItem("rememberedPassword", password);
-    } else {
-      localStorage.removeItem("rememberMe");
-      localStorage.removeItem("rememberedEmail");
-      localStorage.removeItem("rememberedPassword");
-    }
+    const cleanPass = password;
 
     // 1. Business Email must be a valid email format
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -3382,29 +3546,48 @@ Access to full financial telemetry is restricted.`;
     setLoginMethod("password");
     
     try {
+      // Keep only the Firebase session persistent when "Remember Me" is on.
+      // Do not store the plaintext password in localStorage.
+      await setPersistence(auth, rememberMe ? browserLocalPersistence : browserSessionPersistence);
+
       // Authenticate with real Firebase Auth
       const userCredential = await signInWithEmailAndPassword(auth, cleanEmail, cleanPass);
       const user = userCredential.user;
 
+      if (rememberMe) {
+        localStorage.setItem("rememberMe", "true");
+        localStorage.setItem("rememberedEmail", cleanEmail);
+      } else {
+        localStorage.removeItem("rememberMe");
+        localStorage.removeItem("rememberedEmail");
+      }
+      // Clean up credentials saved by older builds.
+      localStorage.removeItem("rememberedPassword");
+
       // Fetch user profile from user_profiles to load their role and permissions
       const profileSnap = await getDoc(doc(db, "user_profiles", user.uid));
       if (profileSnap.exists()) {
-        const profileData = profileSnap.data();
-        const isEmployeeAcct = profileData.isEmployee ?? false;
+        const rawProfileData = profileSnap.data();
+        const needsOwnerProfileRepair = !profileLooksLikeEmployee(rawProfileData) && (!rawProfileData.businessEmail || !rawProfileData.role);
+        const profileData = needsOwnerProfileRepair
+          ? await repairOwnerProfileForAuthUser(user, rawProfileData)
+          : rawProfileData;
+        const identity = await resolveBusinessIdentity(user, profileData);
+        const isEmployeeAcct = identity.isEmployee;
         const resolvedPerms = profileData.permissions || ["dashboard", "customers", "leads", "estimates", "scheduling", "inventory", "documents", "messages", "settings"];
         setLoggedInUser({
-          email: user.email || "",
+          email: identity.authEmail || user.email || "",
           role: profileData.role || "Owner",
           permissions: resolvedPerms,
           granularPermissions: profileData.granularPermissions || (isEmployeeAcct ? defaultGranularFromModuleList(resolvedPerms, "edit") : fullAccessGranular(resolvedPerms)),
           isEmployee: isEmployeeAcct,
           name: validPersonName(profileData.name) || validPersonName(user.displayName) || "Owner",
           goals: profileData.goals || "",
-          businessEmail: isEmployeeAcct ? profileData.businessEmail : (user.email || "")
+          businessEmail: identity.businessEmail
         });
         setIsLoggedIn(true);
 
-        const isEmployee = profileData.isEmployee ?? false;
+        const isEmployee = identity.isEmployee;
         if (isEmployee) {
           const firstPermitted = OS_SCREENS.find(s => (profileData.permissions || []).includes(s.id)) || OS_SCREENS[0];
           setActiveScreen(firstPermitted);
@@ -3414,36 +3597,27 @@ Access to full financial telemetry is restricted.`;
           triggerNotification(`Signed in as Owner`);
         }
       } else {
-        const ownerPerms = DEFAULT_ROLES_DATA.owner.permissions;
         const pendingRaw = localStorage.getItem("ownerslocalPendingOwnerSignup");
         let pending: { email?: string; businessName?: string; ownerName?: string } | null = null;
         try { pending = pendingRaw ? JSON.parse(pendingRaw) : null; } catch { pending = null; }
         const recoverable = pending?.email?.toLowerCase() === cleanEmail;
-        const ownerName = validPersonName(recoverable ? pending?.ownerName : user.displayName) || "Owner";
+        const recoveredProfile = await repairOwnerProfileForAuthUser(user, recoverable ? {
+          businessName: pending?.businessName,
+          name: pending?.ownerName
+        } : undefined);
 
         if (recoverable) {
-          await setDoc(doc(db, "user_profiles", user.uid), {
-            uid: user.uid, email: cleanEmail, role: "Owner", permissions: ownerPerms,
-            granularPermissions: fullAccessGranular(ownerPerms), name: ownerName,
-            isEmployee: false, businessEmail: cleanEmail, isOnboarded: false,
-            createdAt: new Date().toISOString()
-          });
-          await setDoc(doc(db, "business_profiles", cleanEmail), {
-            businessNames: [pending?.businessName || "Your Business"], ownerNames: [ownerName],
-            businessPhones: [""], businessAddresses: [""], businessLogos: [""],
-            companyLocations: [""],
-            updatedAt: new Date().toISOString()
-          });
           localStorage.removeItem("ownerslocalPendingOwnerSignup");
         }
         setLoggedInUser({
           email: user.email || "",
-          role: "Owner",
-          permissions: ownerPerms,
-          granularPermissions: fullAccessGranular(ownerPerms),
+          role: recoveredProfile.role,
+          permissions: recoveredProfile.permissions,
+          granularPermissions: recoveredProfile.granularPermissions,
           isEmployee: false,
-          name: ownerName,
-          goals: ""
+          name: recoveredProfile.name,
+          goals: recoveredProfile.goals,
+          businessEmail: recoveredProfile.businessEmail
         });
         setIsLoggedIn(true);
         setActiveScreen(OS_SCREENS[0]);
@@ -3467,17 +3641,38 @@ Access to full financial telemetry is restricted.`;
   };
 
   const handleForgotPasswordSubmit = async () => {
-    if (!forgotEmail) {
+    const targetEmail = forgotEmail.trim().toLowerCase();
+    if (!targetEmail) {
       triggerNotification("Please provide an email.");
       return;
     }
+
     try {
-      await sendPasswordResetEmail(auth, forgotEmail.trim());
+      const response = await fetch("/api/auth/password-reset", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ email: targetEmail })
+      });
+      const payload = await response.json().catch(() => ({}));
+
+      if (!response.ok || payload?.ok === false) {
+        throw new Error(payload?.error || "Password reset failed.");
+      }
+
+      // Keep the login form tied to the exact mailbox whose password is
+      // being reset. This prevents account-switching state / Remember Me
+      // from leaving a different email in the login field after the user
+      // returns from Firebase's reset page.
+      setEmail(targetEmail);
+      setPassword("");
+      setForgotEmail(targetEmail);
       setForgotSubmitted(true);
-      triggerNotification("Password recovery email transmitted successfully!");
+      triggerNotification(`Password reset request sent to ${targetEmail}.`);
     } catch (err: any) {
       console.error("Password reset failed:", err);
-      triggerNotification("Reset failed: " + (err.message || "Unknown error"));
+      const message = err instanceof Error ? err.message : "Password reset failed.";
+      triggerNotification(message);
+      setLoginError(message);
     }
   };
 
@@ -3558,35 +3753,63 @@ Access to full financial telemetry is restricted.`;
     }
   };
 
-  // Back to Login routine
+  // Back to Login routine. When the onboarding-shaped form is being reused
+  // as an in-app business-profile editor, "Back" returns to the existing app
+  // session instead of throwing the employee/manager at the login screen.
   const handleBackToLogin = () => {
+    if (isEditingBusinessProfile) {
+      setIsEditingBusinessProfile(false);
+      setIsLoggedIn(true);
+      setCurrentView("login");
+      return;
+    }
     setCurrentView("login");
   };
 
   const openBusinessProfileEditor = () => {
     setOnboardingErrors({});
     setShowOptionalProfileWarning(false);
+    setIsEditingBusinessProfile(true);
     setCurrentView("placeholder_password");
+    // The editor currently lives in the logged-out/onboarding card layout.
+    // Flip only the local shell state so that layout renders; do NOT change
+    // Firebase Auth, loggedInUser, role, or businessEmail.
     setIsLoggedIn(false);
-    triggerNotification("Business Setup opened. Update Steps 1–2 and save when finished.");
+    triggerNotification("Business Profile opened. Update the business details and save when finished.");
   };
 
   // Logout routine
   const handleLogout = async () => {
-    try {
-      await signOut(auth);
+    const clearSessionUi = () => {
       setIsLoggedIn(false);
+      setLoggedInUser(null);
+      setCustomerSession(null);
+      setIsEditingBusinessProfile(false);
       setCurrentView("login");
       setLoginMethod(null);
-      setPassword("••••••••••••••••");
+      setLoginError(null);
+      // IMPORTANT: an old build put literal bullet characters here. Those
+      // bullets became the real password field value and could be submitted
+      // (and even stored by Remember Me) when switching accounts.
+      setPassword("");
+      setForgotSubmitted(false);
+      setForgotEmail("");
+      setShowForgotPassword(false);
+    };
+
+    try {
+      // Collection setters are optimistic. First wait for app-level queued
+      // sync work (including serialized saves and retry delays), then wait for
+      // the Firebase SDK's own pending network writes before revoking auth.
+      // This makes Save -> Logout -> Login persistence deterministic.
+      await waitForPersistenceQueue();
+      await waitForPendingWrites(db);
+      await signOut(auth);
+      clearSessionUi();
       triggerNotification("Logged out of OwnersLOCAL.");
     } catch (err) {
       console.error("Logout error:", err);
-      // Fallback
-      setIsLoggedIn(false);
-      setCurrentView("login");
-      setLoginMethod(null);
-      setPassword("••••••••••••••••");
+      clearSessionUi();
     }
   };
 
@@ -3620,9 +3843,12 @@ Access to full financial telemetry is restricted.`;
     }
   }, [currentView, email, businessId]);
 
-  const saveProfileToFirestore = async () => {
+  const saveProfileToFirestore = async (): Promise<boolean> => {
     const profileEmail = businessId || email;
-    if (!profileEmail) return;
+    if (!profileEmail) {
+      triggerNotification("Business profile could not be saved because the business email is missing.");
+      return false;
+    }
     try {
       const docRef = doc(db, "business_profiles", profileEmail);
       await setDoc(docRef, {
@@ -3635,11 +3861,13 @@ Access to full financial telemetry is restricted.`;
         companyLocations,
         selectedRoles: normalizeSelectedRoles(selectedRoles),
         updatedAt: new Date().toISOString()
-      });
+      }, { merge: true });
       triggerNotification("Saved to cloud Firestore successfully!");
+      return true;
     } catch (err) {
       console.error("Error saving profile to Firestore:", err);
       triggerNotification("Cloud save failed. Please check connection.");
+      return false;
     }
   };
 
@@ -3647,8 +3875,22 @@ Access to full financial telemetry is restricted.`;
     setShowOptionalProfileWarning(false);
     setOnboardingErrors({});
     setIsSubmitting(true);
-    await saveProfileToFirestore();
+    const saved = await saveProfileToFirestore();
     setIsSubmitting(false);
+
+    // Editing an existing business profile is not onboarding. In particular,
+    // an Office Manager must never continue into Step 2, whose final action
+    // writes role:"Owner"/businessEmail to user_profiles and is correctly
+    // rejected by Firestore's privilege-escalation protections.
+    if (!saved) return;
+    if (isEditingBusinessProfile) {
+      setIsEditingBusinessProfile(false);
+      setIsLoggedIn(true);
+      setCurrentView("login");
+      triggerNotification("Business profile updated.");
+      return;
+    }
+
     setCurrentView("placeholder_team_setup");
   };
 
@@ -3657,7 +3899,7 @@ Access to full financial telemetry is restricted.`;
     const firstValue = (values: string[]) => String(values?.[0] || "").trim();
     const businessEmail = String(businessId || email || "").trim();
 
-    if (!firstValue(ownerNames)) errors["account administrator name"] = "Account Administrator Name is required.";
+    if (!firstValue(ownerNames)) errors["your name"] = "Account Administrator Name is required.";
     if (!firstValue(businessNames)) errors["business name"] = "Business Name is required.";
     if (!businessEmail) errors["business email"] = "Business Email is required.";
 
@@ -3987,7 +4229,50 @@ Access to full financial telemetry is restricted.`;
     logOperationalEvent("Payroll Export", `Printed payroll summary for ${period.start} through ${period.end}`, "👥");
   };
 
-  // Launch Local OS: generates invites, saves to db, triggers invites modal
+  const completeOwnerOnboardingAndOpenDashboard = async () => {
+    if (!auth.currentUser) {
+      triggerNotification("Your session expired -- please sign in again.");
+      return false;
+    }
+
+    const ownerEmail = auth.currentUser.email?.trim().toLowerCase();
+    if (!ownerEmail) {
+      triggerNotification("Your account email is missing -- please sign in again.");
+      return false;
+    }
+
+    try {
+      await setDoc(doc(db, "user_profiles", auth.currentUser.uid), {
+        businessEmail: ownerEmail,
+        role: "Owner",
+        isEmployee: false,
+        isOnboarded: true
+      }, { merge: true });
+    } catch (err) {
+      console.error("Error setting onboarded flag:", err);
+      triggerNotification("Couldn't finish setup -- check your connection and try again.");
+      return false;
+    }
+
+    const ownerDashboardPerms = DEFAULT_ROLES_DATA.owner.permissions;
+    setLoggedInUser({
+      email: ownerEmail,
+      role: "Owner",
+      permissions: ownerDashboardPerms,
+      granularPermissions: fullAccessGranular(ownerDashboardPerms),
+      isEmployee: false,
+      businessEmail: ownerEmail
+    });
+    setCurrentView("login");
+    setIsLoggedIn(true);
+    setActiveScreen(OS_SCREENS[0]);
+    setShowInvitesModal(false);
+    return true;
+  };
+
+  // Launch Local OS: save setup + team invites, then open the dashboard
+  // immediately. Staff invite codes are setup data, not a second onboarding
+  // gate, so they must never require another "Proceed" click.
   const handleLaunchOS = async () => {
     if (!email) {
       triggerNotification("Missing your business email — please sign in again.");
@@ -3995,28 +4280,27 @@ Access to full financial telemetry is restricted.`;
     }
     setIsSubmitting(true);
     try {
-      // 1. Save owner business profile
-      await saveProfileToFirestore();
-      
-      // 2. Generate invite codes for all staff
+      // 1. Save owner business profile. The dashboard should never open on a
+      // half-finished owner profile, so this write remains the critical gate.
+      const profileSaved = await saveProfileToFirestore();
+      if (!profileSaved) return;
+
+      // 2. Prepare invite codes for configured staff seats. These are useful
+      // setup artifacts, but they are not an onboarding step the owner must
+      // acknowledge before entering the product.
       const generated: Array<{ code: string; role: string; permissions: string[]; granularPermissions: GranularPermissions }> = [];
       for (const r of normalizeSelectedRoles(selectedRoles)) {
-        // Skip main owner seat (count = 1) since owner is already logged in
         const startIndex = r.id === "owner" ? 1 : 0;
         const granularPermissions = r.id === "owner"
           ? fullAccessGranular(r.permissions)
-          // Only keep entries for currently-authorized modules — a module
-          // toggled off after being configured shouldn't leave a stale
-          // permission entry behind.
           : Object.fromEntries(
               Object.entries(r.modulePermissions).filter(([moduleId]) => r.permissions.includes(moduleId))
             ) as GranularPermissions;
         for (let i = startIndex; i < r.count; i++) {
           const randomStr = Math.random().toString(36).substring(2, 8).toUpperCase();
           const cleanRolePrefix = r.name.replace(/[^a-zA-Z0-9]/g, "").toUpperCase().slice(0, 8);
-          const code = `${cleanRolePrefix}-${randomStr}`;
           generated.push({
-            code,
+            code: `${cleanRolePrefix}-${randomStr}`,
             role: r.name,
             permissions: r.permissions,
             granularPermissions
@@ -4024,25 +4308,43 @@ Access to full financial telemetry is restricted.`;
         }
       }
 
-      // 3. Save codes to Firestore
+      // 3. Persist invite codes best-effort. An invite service/network failure
+      // should not trap the owner in onboarding after their business profile
+      // has already been successfully created.
+      const savedInvites: typeof generated = [];
       for (const inv of generated) {
-        await setDoc(doc(db, "employee_invites", inv.code), {
-          code: inv.code,
-          role: inv.role,
-          businessEmail: email,
-          permissions: inv.permissions,
-          granularPermissions: inv.granularPermissions,
-          status: "pending",
-          createdAt: new Date().toISOString()
-        });
+        try {
+          await setDoc(doc(db, "employee_invites", inv.code), {
+            code: inv.code,
+            role: inv.role,
+            businessEmail: email,
+            permissions: inv.permissions,
+            granularPermissions: inv.granularPermissions,
+            status: "pending",
+            createdAt: new Date().toISOString()
+          });
+          savedInvites.push(inv);
+        } catch (inviteErr) {
+          console.error(`Couldn't save onboarding invite ${inv.code}:`, inviteErr);
+        }
       }
-      
-      setGeneratedInvites(generated);
-      setShowInvitesModal(true);
-      triggerNotification("Generated secure team invite codes!");
+      setGeneratedInvites(savedInvites);
+
+      // 4. The button says "Open Owner'sLOCAL", so this action now finishes
+      // onboarding and opens the dashboard in this same click.
+      const opened = await completeOwnerOnboardingAndOpenDashboard();
+      if (!opened) return;
+
+      if (generated.length && savedInvites.length !== generated.length) {
+        triggerNotification(`Welcome to OwnersLOCAL Dashboard. ${savedInvites.length} of ${generated.length} staff invite codes were saved; create any missing invites later from Roster.`);
+      } else if (savedInvites.length) {
+        triggerNotification(`Welcome to OwnersLOCAL Dashboard! ${savedInvites.length} staff invite code${savedInvites.length === 1 ? "" : "s"} saved.`);
+      } else {
+        triggerNotification("Welcome to OwnersLOCAL Dashboard!");
+      }
     } catch (err) {
       console.error("Error launching OS:", err);
-      triggerNotification("Couldn't generate invite codes — check your connection and try again.");
+      triggerNotification("Couldn't finish setup -- check your connection and try again.");
     } finally {
       setIsSubmitting(false);
     }
@@ -4051,7 +4353,7 @@ Access to full financial telemetry is restricted.`;
   // Complete Employee Onboarding Flow
   const handleCompleteEmployeeOnboarding = async (e: React.FormEvent) => {
     e.preventDefault();
-    const cleanEmail = empEmail.trim();
+    const cleanEmail = empEmail.trim().toLowerCase();
     if (!cleanEmail || !empPassword || !empFirstName || !empLastName || !empPhone || !empAddress) {
       triggerNotification("Please fill in all required employee fields.");
       return;
@@ -4083,6 +4385,11 @@ Access to full financial telemetry is restricted.`;
         return;
       }
       const inviteData = inviteSnap.data();
+      if (inviteData.status !== "pending") {
+        triggerNotification("This invite code has already been used or cancelled. Please ask your owner for a new invite.");
+        setIsSubmitting(false);
+        return;
+      }
       inviteRole = inviteData.role || inviteRole;
       invitePermissions = inviteData.permissions || invitePermissions;
       inviteGranularPermissions = inviteData.granularPermissions || inviteGranularPermissions;
@@ -4102,30 +4409,57 @@ Access to full financial telemetry is restricted.`;
     }
 
     try {
-      // 1. Create real Auth User
-      const authResult = await createUserWithEmailAndPassword(auth, cleanEmail, empPassword);
-      const user = authResult.user;
+      // Creating/signing into a Firebase Auth user switches auth.currentUser
+      // immediately. Drain both app-level queued saves and Firebase writes
+      // before changing identities.
+      await waitForPersistenceQueue();
+      await waitForPendingWrites(db);
 
-      // 2. Initialize user_profile
-      await setDoc(doc(db, "user_profiles", user.uid), {
-        role: inviteRole,
-        permissions: invitePermissions,
-        granularPermissions: inviteGranularPermissions,
-        isEmployee: true,
-        businessEmail,
-        // Lets firestore.rules' user_profiles create rule verify this
-        // businessEmail/role actually came from a real, still-open invite
-        // this business issued, instead of trusting whatever this new
-        // account itself claims.
-        inviteCode: empInviteCode,
-        requireTimeClockVerification: inviteRequiresClockVerification,
-        isOnboarded: true,
-        name: `${empFirstName} ${empLastName}`,
-        goals: empGoals,
-        createdAt: new Date().toISOString()
-      });
+      // 1. Create the Auth user. If a prior registration attempt created Auth
+      // but its Firestore commit failed, allow the employee to submit the same
+      // invite/email/password again and repair that orphaned attempt.
+      let user: FirebaseUser;
+      try {
+        user = (await createUserWithEmailAndPassword(auth, cleanEmail, empPassword)).user;
+      } catch (authErr: any) {
+        if (authErr?.code !== "auth/email-already-in-use") throw authErr;
+        user = (await signInWithEmailAndPassword(auth, cleanEmail, empPassword)).user;
+      }
 
-      // 3. Save detailed employees entry
+      const profileRef = doc(db, "user_profiles", user.uid);
+      const employeeRef = doc(db, "employees", cleanEmail);
+      const inviteRef = doc(db, "employee_invites", empInviteCode);
+
+      const existingProfileSnap = await getDoc(profileRef);
+      let employeeAlreadyExists = false;
+
+      if (existingProfileSnap.exists()) {
+        const existingProfile = existingProfileSnap.data();
+        const matchesThisInvite =
+          existingProfile.isEmployee === true &&
+          existingProfile.businessEmail === businessEmail &&
+          existingProfile.inviteCode === empInviteCode &&
+          existingProfile.role === inviteRole;
+
+        if (!matchesThisInvite) {
+          throw new Error("This email is already registered to a different Owner'sLOCAL account.");
+        }
+
+        // A previous build could save profile + employee and then fail before
+        // completing the invite. In that repair case, don't rewrite the
+        // employee record as a self-update with payroll/role fields; just
+        // finish the still-pending invite atomically.
+        const existingEmployeeSnap = await getDoc(employeeRef);
+        if (existingEmployeeSnap.exists()) {
+          const existingEmployee = existingEmployeeSnap.data();
+          if (existingEmployee.userUid !== user.uid || existingEmployee.businessEmail !== businessEmail) {
+            throw new Error("This email is already linked to a different employee record.");
+          }
+          employeeAlreadyExists = true;
+        }
+      }
+
+      const now = new Date().toISOString();
       const newEmployee = {
         id: cleanEmail,
         userUid: user.uid,
@@ -4143,18 +4477,45 @@ Access to full financial telemetry is restricted.`;
         requireTimeClockVerification: inviteRequiresClockVerification,
         gpsTrackingEnabled: inviteGpsTrackingEnabled,
         businessEmail,
-        // Also tagged as businessId (same value) so this collection is
-        // queryable through the same convention every other Firestore
-        // collection uses (see subscribeToCollection).
         businessId: businessEmail,
-        createdAt: new Date().toISOString()
+        createdAt: now
       };
-      await setDoc(doc(db, "employees", cleanEmail), newEmployee);
 
-      // 4. Update invite status
-      if (empInviteCode && empInviteCode !== "DRIVER-X4F91") {
-        await setDoc(doc(db, "employee_invites", empInviteCode), { status: "completed", usedBy: cleanEmail }, { merge: true });
+      // 2. Commit the login profile, roster record, and invite redemption as
+      // one Firestore batch. Either all three persist or none of them do.
+      const batch = writeBatch(db);
+
+      if (existingProfileSnap.exists()) {
+        batch.set(profileRef, {
+          isOnboarded: true,
+          goals: empGoals
+        }, { merge: true });
+      } else {
+        batch.set(profileRef, {
+          role: inviteRole,
+          permissions: invitePermissions,
+          granularPermissions: inviteGranularPermissions,
+          isEmployee: true,
+          businessEmail,
+          inviteCode: empInviteCode,
+          requireTimeClockVerification: inviteRequiresClockVerification,
+          isOnboarded: true,
+          name: `${empFirstName} ${empLastName}`,
+          goals: empGoals,
+          createdAt: now
+        });
       }
+
+      if (!employeeAlreadyExists) {
+        batch.set(employeeRef, newEmployee);
+      }
+
+      batch.update(inviteRef, {
+        status: "completed",
+        usedBy: cleanEmail
+      });
+
+      await batch.commit();
 
       let verificationEmailSent = false;
       try {
@@ -4301,6 +4662,8 @@ Access to full financial telemetry is restricted.`;
     setGeneratedPdfDraft,
     estimatePrefill,
     setEstimatePrefill,
+    buildJobPrefill,
+    setBuildJobPrefill,
     pendingSignatureCapture,
     setPendingSignatureCapture,
     globalAiSetting,
@@ -4339,11 +4702,63 @@ Access to full financial telemetry is restricted.`;
     return <CustomerAppShell session={customerSession} onSignOut={() => { setCustomerSession(null); auth.signOut(); }} />;
   }
 
+  // The real paywall enforcement point -- everything above just computes
+  // subscription state; this is the only place that actually blocks usage.
+  // Once an owner/employee is authenticated, access remains closed until the
+  // server positively verifies an active subscription, valid bypass, or the
+  // platform-admin business. A timeout, missing configuration, or temporary
+  // verification error must never become free access.
+  // A newly-created owner is already authenticated but deliberately remains
+  // `isLoggedIn === false` while completing business setup. That onboarding
+  // state used to fall through the paywall because the gate only checked
+  // isLoggedIn. Treat any authenticated, recognized owner as gated too; after
+  // payment the same onboarding screen resumes exactly where they left it.
+  const subscriptionGateApplies = !!loggedInUser && !!auth.currentUser &&
+    (isLoggedIn || (!loggedInUser.isEmployee && currentView === "placeholder_password"));
+
+  if (subscriptionGateApplies && subscription.loading) {
+    return (
+      <div className="min-h-screen bg-[#F5FAFF] flex items-center justify-center p-4">
+        <div className="bg-white rounded-3xl border-2 border-[#9EC8EF] shadow-xl px-8 py-7 text-center">
+          <div className="text-[#315C9F] text-xs font-black uppercase tracking-wider animate-pulse">
+            Verifying subscription…
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (
+    subscriptionGateApplies && loggedInUser && !subscription.isAdminBusiness &&
+    (!subscription.configured || (!subscription.subscriptionActive && !subscription.bypassActive))
+  ) {
+    return (
+      <AuthContext.Provider value={authContextValue}>
+        <NavTelemetryContext.Provider value={navTelemetryContextValue}>
+          <PaywallGate isEmployee={!!loggedInUser.isEmployee} onLogout={handleLogout} />
+          <TutorialHost tutorialId="subscription_required" accountUid={auth.currentUser?.uid} />
+        </NavTelemetryContext.Provider>
+      </AuthContext.Provider>
+    );
+  }
+
   return (
     <AuthContext.Provider value={authContextValue}>
     <DomainDataContext.Provider value={domainDataContextValue}>
     <NavTelemetryContext.Provider value={navTelemetryContextValue}>
     <EventEngineEffects />
+    <AutomationEngineEffects />
+    {isLoggedIn && <CompletionGuard />}
+    <TutorialHost
+      tutorialId={
+        !authReady ? null
+          : isLoggedIn ? activeScreen.id
+          : currentView === "login" ? "sign_in"
+          : "onboarding"
+      }
+      accountUid={auth.currentUser?.uid}
+      openRequest={tutorialOpenRequest}
+    />
     {isLoggedIn && canUseSnapshot && (
       <UniversalAIIntake snapshotFolder={loggedInUser?.isEmployee ? "Employee Snapshot" : undefined} />
     )}
@@ -4376,12 +4791,7 @@ Access to full financial telemetry is restricted.`;
         <header className="hidden sm:flex w-full max-w-7xl mx-auto px-4 py-3 sm:py-4 flex-col sm:flex-row items-center justify-between gap-3 border-b border-blue-200/50 bg-white/45 backdrop-blur-md z-10">
           <div className="flex items-center gap-2">
             <span className="flex h-2.5 w-2.5 rounded-full bg-emerald-500 animate-pulse" />
-            <span className="font-mono text-xs tracking-wider text-[#342D7E]/60">OWNER'S LOCAL OS CLOUD GATEWAY v2.8.4</span>
-          </div>
-          <div className="flex items-center gap-2">
-            <div className="text-xs text-[#342D7E]/75 font-mono bg-blue-100/60 px-2 py-1 rounded">
-              PORT: 3000 (SECURE)
-            </div>
+            <span className="font-mono text-xs tracking-wider text-[#342D7E]/60">OWNER’SLOCAL</span>
           </div>
         </header>
       )}
@@ -4473,7 +4883,7 @@ Access to full financial telemetry is restricted.`;
                       }}
                       className="font-bold text-blue-900/60 font-sans"
                     >
-                      OR SIGN IN WITH PASSWORD
+                      OR USE YOUR EMAIL
                     </span>
                     <div className="h-[1px] flex-1 bg-blue-900/30 shadow-[0_0_1px_rgba(0,240,255,0.4)]" />
                   </div>
@@ -4542,7 +4952,11 @@ Access to full financial telemetry is restricted.`;
                         </label>
                         <button
                           type="button"
-                          onClick={() => setShowForgotPassword(true)}
+                          onClick={() => {
+                            setForgotSubmitted(false);
+                            setForgotEmail(email.trim().toLowerCase());
+                            setShowForgotPassword(true);
+                          }}
                           style={getFontSize(11.5)}
                           className="font-bold text-blue-600 hover:text-blue-800 transition-colors cursor-pointer"
                         >
@@ -4622,7 +5036,7 @@ Access to full financial telemetry is restricted.`;
                         }}
                         className="w-full h-full border-0 font-sans font-bold uppercase tracking-[0.08em] text-white cursor-pointer select-none relative overflow-hidden transition-all duration-300 bg-gradient-to-r from-[#00b0ff] to-[#0055ff] hover:brightness-110 hover:shadow-[0_0_24px_rgba(0,176,255,0.5)] active:shadow-[0_0_35px_rgba(0,176,255,0.7)] active:scale-[0.98] flex items-center justify-center gap-2"
                       >
-                        <span>Sign In ➔</span>
+                        <span>Sign In</span>
                       </button>
                     </div>
 
@@ -4679,7 +5093,7 @@ Access to full financial telemetry is restricted.`;
                       }}
                       className="font-bold text-blue-900/60 font-sans"
                     >
-                      FIELD SERVICE LOG IN
+                      EMPLOYEE LOGIN
                     </span>
                     <div className="h-[1px] flex-1 bg-blue-900/30 shadow-[0_0_1px_rgba(0,240,255,0.4)]" />
                   </div>
@@ -4697,7 +5111,7 @@ Access to full financial telemetry is restricted.`;
                       }}
                       className="block font-bold text-blue-900/80"
                     >
-                      ENTER EMPLOYEE INVITE CODE
+                      Enter your employee code
                     </label>
                     <div
                       style={{ height: `${50 * scale}px` }}
@@ -4739,7 +5153,7 @@ Access to full financial telemetry is restricted.`;
                       }}
                       className="w-full h-full border-0 font-sans font-bold uppercase tracking-[0.05em] text-white cursor-pointer select-none relative overflow-hidden transition-all duration-300 bg-gradient-to-r from-[#00b0ff] to-[#0055ff] hover:brightness-110 hover:shadow-[0_0_24px_rgba(0,176,255,0.5)] active:shadow-[0_0_35px_rgba(0,176,255,0.7)] active:scale-[0.98] flex items-center justify-center"
                     >
-                      <span>Go ➔</span>
+                      <span>Continue</span>
                     </button>
                   </div>
 
@@ -4805,10 +5219,10 @@ Access to full financial telemetry is restricted.`;
                           </div>
                           <div>
                             <h2 style={getFontSize(14.5)} className="font-sans font-bold text-slate-900 tracking-tight leading-tight uppercase">
-                              Create Your Business
+                              {isEditingBusinessProfile ? "Edit Business Profile" : "Create Your Business"}
                             </h2>
                             <p style={getFontSize(10.5)} className="font-sans text-slate-500 font-medium">
-                              Step 1 of 2. Profile settings
+                              {isEditingBusinessProfile ? "Update your shared business information" : "Step 1 of 2: Tell us about your business"}
                             </p>
                           </div>
                         </div>
@@ -4821,15 +5235,15 @@ Access to full financial telemetry is restricted.`;
                           }}
                           className="font-sans font-bold text-blue-700 bg-blue-50 border border-blue-200 uppercase tracking-wider select-none shrink-0"
                         >
-                          Onboarding
+                          {isEditingBusinessProfile ? "Business Profile" : "Onboarding"}
                         </span>
                       </div>
 
                       {/* FORM FIELDS - SCROLLABLE GROUP */}
                       <div className="relative z-10 flex-1 space-y-3.5 overflow-y-auto pr-0.5 scrollbar-thin scrollbar-thumb-blue-200/50">
-                        {renderDynamicField("account administrator name", ownerNames, setOwnerNames, "e.g. John Doe")}
-                        {renderDynamicField("administrator phone (optional)", ownerPhones, setOwnerPhones, "e.g. (206) 555-0199")}
-                        {renderDynamicField("business name", businessNames, setBusinessNames, "e.g. Ironclad Plumbing & HVAC")}
+                        {renderDynamicField("Your name", ownerNames, setOwnerNames, "e.g. John Doe")}
+                        {renderDynamicField("Your phone number (optional)", ownerPhones, setOwnerPhones, "e.g. (206) 555-0199")}
+                        {renderDynamicField("Business name", businessNames, setBusinessNames, "e.g. Ironclad Plumbing & HVAC")}
                         <div className="space-y-1.5">
                           <label style={getFontSize(11)} className="font-sans font-bold text-[#342D7E] uppercase tracking-wider px-1">
                             Business Email
@@ -4844,21 +5258,21 @@ Access to full financial telemetry is restricted.`;
                           />
                           {onboardingErrors["business email"] && <p className="text-[10px] font-bold text-rose-600 px-1">{onboardingErrors["business email"]}</p>}
                         </div>
-                        {renderDynamicField("business phone (optional)", businessPhones, setBusinessPhones, "e.g. (206) 565-0144")}
+                        {renderDynamicField("Business phone (optional)", businessPhones, setBusinessPhones, "e.g. (206) 565-0144")}
                         <StructuredAddressFields
-                          label="Business Headquarters Address (Optional)"
+                          label="Main business address (optional)"
                           value={businessAddresses[0] || ""}
                           onChange={(value) => setBusinessAddresses(prev => [value, ...prev.slice(1)])}
                         />
-                        {renderDynamicField("business logo (optional)", businessLogos, setBusinessLogos, "e.g. https://logo-url.png")}
-                        {renderDynamicField("company locations (optional)", companyLocations, setCompanyLocations, "e.g. Main Office")}
+                        {renderDynamicField("Business logo (optional)", businessLogos, setBusinessLogos, "e.g. https://logo-url.png")}
+                        {renderDynamicField("Other business locations (optional)", companyLocations, setCompanyLocations, "e.g. Main Office")}
                         <div className="rounded-xl border border-blue-200 bg-blue-50/90 p-3 text-[10px] leading-relaxed text-blue-950">
                           <p className="flex items-center gap-1.5 font-black uppercase tracking-wide">
                             <Shield className="h-3.5 w-3.5 shrink-0 text-blue-600" />
-                            Your information and privacy
+                            How we protect your information
                           </p>
                           <p className="mt-1 font-semibold text-slate-600">
-                            Owners Local OS does not sell or disseminate user data. Information is handled through integrated databases and services using appropriate security and encryption. Authorized Stuffapp personnel or service providers may have limited access when needed to operate, secure, support, or comply with legal requirements.
+                            Owner’sLOCAL does not sell your information. We use secure services to store and protect it. Authorized support staff may access limited information when needed to operate the app, fix problems, prevent fraud, or follow the law.
                           </p>
                         </div>
                       </div>
@@ -4892,7 +5306,7 @@ Access to full financial telemetry is restricted.`;
                           }}
                           className="flex-1 font-sans font-bold text-white bg-gradient-to-r from-[#00b0ff] to-[#0055ff] hover:brightness-105 active:scale-[0.98] shadow-md hover:shadow-blue-500/20 transition-all cursor-pointer flex items-center justify-center gap-1.5"
                         >
-                          <span>Continue</span>
+                          <span>{isEditingBusinessProfile ? "Save Changes" : "Continue"}</span>
                           <ChevronRight className="w-4 h-4" />
                         </button>
                       </div>
@@ -4930,7 +5344,7 @@ Access to full financial telemetry is restricted.`;
                               Build Your Team
                             </h2>
                             <p style={getFontSize(9.5)} className="text-slate-400 font-sans font-medium">
-                              Step 2 of 2 • Assign initial roles & codes
+                              Step 2 of 2: Add your team
                             </p>
                           </div>
                         </div>
@@ -4943,7 +5357,7 @@ Access to full financial telemetry is restricted.`;
                           }}
                           className="font-sans font-bold text-blue-700 bg-blue-50 border border-blue-200 uppercase tracking-wider select-none shrink-0"
                         >
-                          Team Assignment
+                          YOUR TEAM
                         </span>
                       </div>
 
@@ -4959,10 +5373,10 @@ Access to full financial telemetry is restricted.`;
                         <ShieldAlert className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
                         <div className="space-y-0.5">
                           <p style={getFontSize(10)} className="font-sans font-bold text-emerald-950">
-                            Role-Based System Permissions Initiated
+                            Choose what each employee can access.
                           </p>
                           <p style={getFontSize(8.5)} className="text-emerald-800 leading-normal font-sans font-medium">
-                            Each staff member receives an individual invite code. Employees only see sidebar tabs corresponding directly to assigned permissions.
+                            Each employee gets their own invite code. They will only see the tools you allow them to use.
                           </p>
                         </div>
                       </div>
@@ -4971,7 +5385,7 @@ Access to full financial telemetry is restricted.`;
                       <div className="relative z-10 space-y-1.5 mb-2 shrink-0">
                         <div className="flex items-center justify-between px-1">
                           <label style={getFontSize(10)} className="font-sans font-bold text-[#342D7E] uppercase tracking-wider flex items-center gap-1">
-                            <span>Select Roles to Add</span>
+                            <span>Add an employee role</span>
                             {/* Floating panel explanation icon */}
                             <button
                               type="button"
@@ -4982,7 +5396,7 @@ Access to full financial telemetry is restricted.`;
                             </button>
                           </label>
                           <span style={getFontSize(9)} className="text-slate-400 font-mono">
-                            {normalizeSelectedRoles(selectedRoles).reduce((acc, role) => acc + role.count, 0)} Seats Configured
+                            {normalizeSelectedRoles(selectedRoles).reduce((acc, role) => acc + role.count, 0)} role added
                           </span>
                         </div>
                         
@@ -5005,7 +5419,7 @@ Access to full financial telemetry is restricted.`;
                           >
                             <option value="">+ Add a team role...</option>
                             <option value="__create_custom__" className="text-blue-600 font-bold">
-                              ★ + Create Custom Role from scratch...
+                              Create a custom role
                             </option>
                             {/* Custom Role stays first; Owner is already added. */}
                             {Object.entries(DEFAULT_ROLES_DATA)
@@ -5147,7 +5561,7 @@ Access to full financial telemetry is restricted.`;
                                   className="font-sans font-bold text-blue-600 hover:text-blue-800 flex items-center gap-1 cursor-pointer"
                                 >
                                   <Settings className="w-3 h-3 text-blue-500 animate-spin-slow" />
-                                  <span>Customize Permissions</span>
+                                  <span>Choose Access</span>
                                 </button>
 
                                 <div className="flex items-center gap-2.5">
@@ -5157,7 +5571,7 @@ Access to full financial telemetry is restricted.`;
                                     className="font-sans font-bold text-slate-500 hover:text-slate-800 flex items-center gap-1 cursor-pointer"
                                   >
                                     <Copy className="w-3 h-3 text-slate-400" />
-                                    <span>Duplicate</span>
+                                    <span>Copy This Role</span>
                                   </button>
 
                                   {role.id !== "owner" && (
@@ -5212,7 +5626,7 @@ Access to full financial telemetry is restricted.`;
                             <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
                           ) : (
                             <>
-                              <span>Launch OS</span>
+                              <span>Open Owner’sLOCAL</span>
                               <ChevronRight className="w-4 h-4" />
                             </>
                           )}
@@ -5552,9 +5966,9 @@ Access to full financial telemetry is restricted.`;
                   {showOptionalProfileWarning && (
                     <div className="absolute inset-0 bg-slate-950/55 backdrop-blur-sm flex items-center justify-center p-4 z-50 animate-fade-in">
                       <div className="w-[92%] max-w-[360px] rounded-3xl border border-blue-100 bg-white p-5 text-left shadow-2xl">
-                        <h3 className="text-sm font-black uppercase tracking-tight text-blue-950">Optional profile information is missing</h3>
+                        <h3 className="text-sm font-black uppercase tracking-tight text-blue-950">Some optional information is missing</h3>
                         <p className="mt-2 text-[11px] font-semibold leading-relaxed text-slate-600">
-                          These fields are not required, but leaving them blank may limit address-based tools, contact workflows, maps, branding, and other relevant features.
+                          You can continue without these details. Some features, such as maps, customer contact tools, and business branding, may not work until you add them.
                         </p>
                         <ul className="mt-3 space-y-1 rounded-xl border border-amber-200 bg-amber-50 p-3 text-[10.5px] font-bold text-amber-900">
                           {optionalProfileFields.map(field => <li key={field}>• {field}</li>)}
@@ -5565,14 +5979,14 @@ Access to full financial telemetry is restricted.`;
                             onClick={() => setShowOptionalProfileWarning(false)}
                             className="flex-1 rounded-xl border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-bold text-blue-800 hover:bg-blue-100"
                           >
-                            Complete Profile
+                            Add Missing Information
                           </button>
                           <button
                             type="button"
                             onClick={finishBusinessProfileStep}
                             className="flex-1 rounded-xl bg-blue-600 px-3 py-2 text-xs font-bold text-white shadow hover:bg-blue-700"
                           >
-                            Continue Anyway
+                            Skip for Now
                           </button>
                         </div>
                       </div>
@@ -5751,26 +6165,8 @@ Access to full financial telemetry is restricted.`;
                           <button
                             type="button"
                             onClick={async () => {
-                              try {
-                                if (auth.currentUser) {
-                                  await setDoc(doc(db, "user_profiles", auth.currentUser.uid), {
-                                    isOnboarded: true
-                                  }, { merge: true });
-                                }
-                              } catch (err) {
-                                console.error("Error setting onboarded flag:", err);
-                              }
-                              const ownerDashboardPerms = ["dashboard", "leads", "jobs", "customers", "messages", "scheduling", "dispatch", "timeclock", "routes", "employee_locations", "estimates", "documents", "ai_assistant", "inventory", "settings", "training"];
-                              setLoggedInUser({
-                                email,
-                                role: "Owner",
-                                permissions: ownerDashboardPerms,
-                                granularPermissions: fullAccessGranular(ownerDashboardPerms)
-                              });
-                              setIsLoggedIn(true);
-                              setActiveScreen(OS_SCREENS[0]); // Go to dashboard
-                              setShowInvitesModal(false);
-                              triggerNotification("Welcome to OwnersLOCAL Dashboard!");
+                              const opened = await completeOwnerOnboardingAndOpenDashboard();
+                              if (opened) triggerNotification("Welcome to OwnersLOCAL Dashboard!");
                             }}
                             className="w-full py-2.5 text-xs font-extrabold text-white bg-gradient-to-r from-blue-600 to-blue-700 hover:brightness-105 active:scale-[0.98] rounded-xl shadow-md transition-all cursor-pointer text-center block font-sans uppercase tracking-wider"
                           >
@@ -5847,7 +6243,7 @@ Access to full financial telemetry is restricted.`;
                         <CheckCircle className="w-10 h-10 text-emerald-500 mx-auto mb-3" />
                         <p className="text-xs font-bold text-slate-800 mb-1">Transmission Transmitted!</p>
                         <p className="text-[10px] text-slate-500 mb-4 leading-relaxed">
-                          If {forgotEmail} is in our system registry, you will receive a code shortly.
+                          If {forgotEmail} is registered, Firebase will send a password-reset link. Check Inbox and Spam.
                         </p>
                         <button
                           type="button"
@@ -6104,7 +6500,7 @@ Access to full financial telemetry is restricted.`;
                 style={{ marginTop: `${10 * scale}px`, ...getFontSize(11) }}
                 className="font-bold text-[#5E7393] hover:text-[#1F3557] hover:underline cursor-pointer"
               >
-                Customer? Log in to your free account here
+                Customer Login
               </button>
             )}
 
@@ -6190,71 +6586,154 @@ Access to full financial telemetry is restricted.`;
 
               {/* Dynamic Menu List (Role-Based Visibility) */}
               <div className="flex-1 overflow-y-auto py-3 px-2 space-y-1 scrollbar-none">
-                {getVisibleScreens().filter(screen => screen.id !== "owner_console").map((screen) => {
-                  const isCurrent = activeScreen.id === screen.id;
-                  // Calculate unread count for this screen
-                  const pendingCustomerCount = screen.id === "customers" ? customers.filter(customer => customer.pendingConfirmation).length : 0;
-                  const unreadCount = Math.max(notifications.filter(n => n.screenId === screen.id && !n.isRead).length, pendingCustomerCount);
+                {(() => {
+                  const visibleScreens = getVisibleScreens().filter(screen => screen.id !== "owner_console");
+                  const visibleById = new Map(visibleScreens.map(screen => [screen.id, screen]));
 
-                  return (
-                    <button
-                      key={screen.id}
-                      onClick={() => {
-                        setActiveScreen(screen);
-                        setNotifications(prev => prev.map(n => n.screenId === screen.id ? { ...n, isRead: true } : n));
-                        triggerNotification(`Navigated to: ${screen.label}`);
-                      }}
-                      className={`sidebar-nav-btn w-full rounded-xl transition-all duration-200 cursor-pointer flex items-center relative group ${
-                        isSidebarCollapsed ? "justify-center p-2" : "px-3 py-2"
-                      } ${
-                        isCurrent
-                          ? "sidebar-nav-btn-active bg-gradient-to-r from-[#2E7BEF] to-[#1485F4] text-white font-bold shadow-[0_0_10px_rgba(20,133,244,0.45)]"
-                          : "hover:bg-[#BDDDF8] text-[#5E7393] hover:text-[#1F3557] border border-transparent"
-                      }`}
-                      title={screen.label}
-                    >
-                      {isSidebarCollapsed ? (
-                        /* Only show menu icons when collapsed */
-                        <span className={`shrink-0 select-none ${isCurrent ? "text-white" : "text-[#5E7393] group-hover:text-[#1F3557]"}`}>
-                          {getScreenIcon(screen.id, "w-[18px] h-[18px] text-current")}
-                        </span>
-                      ) : (
-                        /* Show both icon and label when expanded */
-                        <div className="flex items-center gap-2.5 w-full min-w-0">
+                  const renderScreenButton = (screen: (typeof OS_SCREENS)[number], isNested = false) => {
+                    const isCurrent = activeScreen.id === screen.id;
+                    const pendingCustomerCount = screen.id === "customers" ? customers.filter(customer => customer.pendingConfirmation).length : 0;
+                    const unreadCount = Math.max(notifications.filter(n => n.screenId === screen.id && !n.isRead).length, pendingCustomerCount);
+
+                    return (
+                      <button
+                        key={screen.id}
+                        onClick={() => {
+                          setActiveScreen(screen);
+                          setNotifications(prev => prev.map(n => n.screenId === screen.id ? { ...n, isRead: true } : n));
+                          triggerNotification(`Navigated to: ${screen.label}`);
+                        }}
+                        className={`sidebar-nav-btn rounded-xl transition-all duration-200 cursor-pointer flex items-center relative group ${
+                          isNested && !isSidebarCollapsed ? "ml-5 w-[calc(100%-1.25rem)] px-3 py-1.5" : "w-full"
+                        } ${
+                          isSidebarCollapsed ? "justify-center p-2" : !isNested ? "px-3 py-2" : ""
+                        } ${
+                          isCurrent
+                            ? "sidebar-nav-btn-active bg-gradient-to-r from-[#2E7BEF] to-[#1485F4] text-white font-bold shadow-[0_0_10px_rgba(20,133,244,0.45)]"
+                            : "hover:bg-[#BDDDF8] text-[#5E7393] hover:text-[#1F3557] border border-transparent"
+                        }`}
+                        title={screen.label}
+                      >
+                        {isSidebarCollapsed ? (
                           <span className={`shrink-0 select-none ${isCurrent ? "text-white" : "text-[#5E7393] group-hover:text-[#1F3557]"}`}>
                             {getScreenIcon(screen.id, "w-[18px] h-[18px] text-current")}
                           </span>
-                          <span className={`font-sans font-bold tracking-wide text-xs flex-1 text-left truncate ${isCurrent ? "text-white" : "text-[#5E7393] group-hover:text-[#1F3557]"}`}>
-                            {screen.label}
-                          </span>
-                        </div>
-                      )}
-                      
-                      {/* Badge for AI Assistant */}
-                      {!isSidebarCollapsed && screen.badge && (
-                        <span className="text-[7.5px] bg-[#1F3557]/10 text-[#1F3557] px-1 py-0.5 rounded font-black tracking-wider uppercase select-none">
-                          {screen.badge}
-                        </span>
-                      )}
+                        ) : (
+                          <div className="flex items-center gap-2.5 w-full min-w-0">
+                            <span className={`shrink-0 select-none ${isCurrent ? "text-white" : "text-[#5E7393] group-hover:text-[#1F3557]"}`}>
+                              {getScreenIcon(screen.id, isNested ? "w-4 h-4 text-current" : "w-[18px] h-[18px] text-current")}
+                            </span>
+                            <span className={`font-sans font-bold tracking-wide flex-1 text-left truncate ${isNested ? "text-[11px]" : "text-xs"} ${isCurrent ? "text-white" : "text-[#5E7393] group-hover:text-[#1F3557]"}`}>
+                              {screen.label}
+                            </span>
+                          </div>
+                        )}
 
-                      {/* Subtle red notification dot next to menu item (no count, extremely refined!) */}
-                      {unreadCount > 0 && (
-                        <span className="absolute top-2 right-2 flex h-2 w-2 items-center justify-center rounded-full bg-red-500 ring-1 ring-white" />
-                      )}
-                    </button>
-                  );
-                })}
+                        {!isSidebarCollapsed && screen.badge && (
+                          <span className="text-[7.5px] bg-[#1F3557]/10 text-[#1F3557] px-1 py-0.5 rounded font-black tracking-wider uppercase select-none">
+                            {screen.badge}
+                          </span>
+                        )}
+
+                        {unreadCount > 0 && (
+                          <span className="absolute top-2 right-2 flex h-2 w-2 items-center justify-center rounded-full bg-red-500 ring-1 ring-white" />
+                        )}
+                      </button>
+                    );
+                  };
+
+                  return SIDEBAR_MENU.map((entry) => {
+                    if (entry.type === "screen") {
+                      const screen = visibleById.get(entry.id);
+                      return screen ? renderScreenButton(screen) : null;
+                    }
+
+                    const childScreens = entry.items
+                      .map(id => visibleById.get(id))
+                      .filter((screen): screen is (typeof OS_SCREENS)[number] => Boolean(screen));
+
+                    if (childScreens.length === 0) return null;
+
+                    const isExpanded = Boolean(expandedSidebarGroups[entry.id]);
+                    const containsCurrentScreen = childScreens.some(screen => screen.id === activeScreen.id);
+                    const showGroupAsActive = containsCurrentScreen && !isExpanded;
+
+                    return (
+                      <div key={entry.id} className="space-y-1">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (isSidebarCollapsed) {
+                              setIsSidebarCollapsed(false);
+                              setExpandedSidebarGroups(prev => ({ ...prev, [entry.id]: true }));
+                              return;
+                            }
+                            setExpandedSidebarGroups(prev => ({ ...prev, [entry.id]: !prev[entry.id] }));
+                          }}
+                          className={`sidebar-nav-btn w-full rounded-xl transition-all duration-200 cursor-pointer flex items-center relative group ${
+                            isSidebarCollapsed ? "justify-center p-2" : "px-3 py-2"
+                          } ${
+                            showGroupAsActive
+                              ? "sidebar-nav-btn-active bg-gradient-to-r from-[#2E7BEF] to-[#1485F4] text-white font-bold shadow-[0_0_10px_rgba(20,133,244,0.45)]"
+                              : "hover:bg-[#BDDDF8] text-[#5E7393] hover:text-[#1F3557] border border-transparent"
+                          }`}
+                          title={entry.label}
+                        >
+                          {isSidebarCollapsed ? (
+                            <span className={`shrink-0 select-none ${showGroupAsActive ? "text-white" : "text-[#5E7393] group-hover:text-[#1F3557]"}`}>
+                              {getScreenIcon(entry.iconScreenId, "w-[18px] h-[18px] text-current")}
+                            </span>
+                          ) : (
+                            <div className="flex items-center gap-2.5 w-full min-w-0">
+                              <span className={`shrink-0 select-none ${showGroupAsActive ? "text-white" : "text-[#5E7393] group-hover:text-[#1F3557]"}`}>
+                                {getScreenIcon(entry.iconScreenId, "w-[18px] h-[18px] text-current")}
+                              </span>
+                              <span className={`font-sans font-bold tracking-wide text-xs flex-1 text-left truncate ${showGroupAsActive ? "text-white" : "text-[#5E7393] group-hover:text-[#1F3557]"}`}>
+                                {entry.label}
+                              </span>
+                              {isExpanded ? (
+                                <ChevronDown className="w-3.5 h-3.5 shrink-0 text-current" />
+                              ) : (
+                                <ChevronRight className="w-3.5 h-3.5 shrink-0 text-current" />
+                              )}
+                            </div>
+                          )}
+                        </button>
+
+                        {!isSidebarCollapsed && isExpanded && (
+                          <div className="space-y-1">
+                            {childScreens.map(screen => renderScreenButton(screen, true))}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  });
+                })()}
+
+                {/* Always-available tutorial for whichever page is open */}
+                <button
+                  onClick={() => setTutorialOpenRequest(n => n + 1)}
+                  title={`Revisit the ${activeScreen.label} tutorial`}
+                  className={`sidebar-nav-btn mt-2 rounded-xl transition-all duration-200 cursor-pointer flex items-center gap-2.5 w-full border border-dashed border-[#9EC8EF] text-[#5E7393] hover:text-[#1F3557] hover:bg-[#B9DAF7] ${
+                    isSidebarCollapsed ? "justify-center p-2" : "px-3 py-2"
+                  }`}
+                >
+                  <BookOpen className="w-[18px] h-[18px] shrink-0" />
+                  {!isSidebarCollapsed && (
+                    <span className="font-sans font-bold tracking-wide text-xs text-left truncate">Revisit Tutorial</span>
+                  )}
+                </button>
 
                 {/* Role preview card */}
                 {!isSidebarCollapsed && !loggedInUser?.isEmployee && (
                   <div className="mx-1 my-3 p-4 bg-[#1F3557]/5 border border-[#1F3557]/10 rounded-2xl flex flex-col gap-1.5 text-left animate-fade-in">
-                    <p className="text-[8.5px] font-black text-[#1F3557]/80 uppercase tracking-wider">ROLE PREVIEW</p>
+                    <p className="text-[8.5px] font-black text-[#1F3557]/80 uppercase tracking-wider">VIEW AS EMPLOYEE</p>
                     <div className="flex items-center justify-between">
-                      <span className="text-xs font-black text-[#1F3557]">Preview employee access</span>
+                      <span className="text-xs font-black text-[#1F3557]">See what an employee can access</span>
                       <ChevronRight className="w-3.5 h-3.5 text-[#1F3557]" />
                     </div>
                     <p className="text-[10px] text-[#1F3557]/60 leading-relaxed font-sans font-medium">
-                      Instantly switch roles to preview permission-guarded tools.
+                      Choose a role to see which tools that employee can use.
                     </p>
                   </div>
                 )}
@@ -6292,6 +6771,14 @@ Access to full financial telemetry is restricted.`;
                             onClick={() => {
                               // Mark as read
                               setNotifications(prev => prev.map(n => n.id === notif.id ? { ...n, isRead: true } : n));
+                              if (notif.type === "signed_estimate_ready_for_job" && notif.jobPrefill) {
+                                setBuildJobPrefill(notif.jobPrefill);
+                                const jobsScreen = OS_SCREENS.find(s => s.id === "jobs");
+                                if (jobsScreen) setActiveScreen(jobsScreen);
+                                setShowNotificationPanel(false);
+                                triggerNotification("Signed estimate loaded into Create Job.");
+                                return;
+                              }
                               if (notif.screenId) {
                                 const matched = OS_SCREENS.find(s => s.id === notif.screenId);
                                 if (matched) setActiveScreen(matched);
@@ -6309,6 +6796,11 @@ Access to full financial telemetry is restricted.`;
                               <span className="text-[8px] text-[#5E7393] font-mono">{notif.time}</span>
                             </div>
                             <p className="text-[10px] mt-0.5 leading-normal truncate">{notif.description}</p>
+                            {notif.type === "signed_estimate_ready_for_job" && notif.jobPrefill && (
+                              <div className="mt-1.5">
+                                <span className="inline-flex rounded-lg bg-[#315C9F] px-2 py-1 text-[8px] font-black uppercase tracking-wide text-white">Create Job →</span>
+                              </div>
+                            )}
                             {notif.type === "time_clock_approval" && notif.actionable && !notif.actionedAt && (
                               <div className="mt-1.5" onClick={(e) => e.stopPropagation()}>
                                 <button
@@ -6448,7 +6940,7 @@ Access to full financial telemetry is restricted.`;
               {activeScreen.id !== "dashboard" && (
                 <div className="px-5 py-3 border-b border-[#9EC8EF] bg-[#C7E3FA] flex flex-col sm:flex-row sm:items-center justify-between gap-3 shrink-0">
                 <div className="flex items-center gap-2">
-                  <span className="text-[10px] font-bold text-[#5E7393] uppercase font-mono tracking-wider">Workspace:</span>
+                  <span className="text-[10px] font-bold text-[#5E7393] uppercase font-mono tracking-wider">CURRENT PAGE:</span>
                   <div className="flex items-center gap-1">
                     <span className="text-xs font-extrabold text-[#1F3557] bg-[#EAF5FF] border border-[#9EC8EF] px-2.5 py-1 rounded-xl">
                       {activeScreen.label}
@@ -6458,7 +6950,7 @@ Access to full financial telemetry is restricted.`;
                   {/* Simulated Role Dropdown (Only visible to Owners) */}
                   {loggedInUser?.role === "Owner" && (
                     <div className="relative flex items-center gap-1.5 ml-2 pl-2 border-l border-[#9EC8EF]">
-                      <span className="text-[9px] text-[#5E7393] font-mono">SIMULATION:</span>
+                      <span className="text-[9px] text-[#5E7393] font-mono">VIEWING AS:</span>
                       <select
                         value={simulatedRole || "Owner"}
                         onChange={(e) => {
@@ -6485,7 +6977,7 @@ Access to full financial telemetry is restricted.`;
               {(
 
                 /* LIVE RESPONSIVE OPERATIONAL WORKSPACE (Custom implementation of all views!) */
-                <div className="flex-1 overflow-y-auto p-4 md:p-6 space-y-6 scrollbar-thin">
+                <div className="flex-1 overflow-y-auto p-4 pb-28 md:p-6 md:pb-10 space-y-6 scrollbar-thin">
 
                   {simulatedRole && (
                     <div className="sticky top-0 z-40 bg-amber-500 text-amber-950 rounded-2xl px-4 py-2.5 shadow-lg flex items-center justify-between gap-3 font-bold text-xs">
@@ -6591,7 +7083,7 @@ Access to full financial telemetry is restricted.`;
                                       </span>
                                     )}
                                   </p>
-                                  <p className="text-[9px] text-[#5E7393] font-bold mt-0.5">Live Income vs Expenses & Taxes</p>
+                                  <p className="text-[9px] text-[#5E7393] font-bold mt-0.5">Income, expenses, and estimated taxes</p>
                                 </div>
 
                                 <div className="flex-1 w-full min-h-[100px] mt-2 relative">
@@ -6673,7 +7165,7 @@ Access to full financial telemetry is restricted.`;
                               <div className="my-1.5 text-left flex-1 flex flex-col justify-between">
                                 <div>
                                   <p className="text-xl font-sans font-black text-[#1F3557] tracking-tight leading-none">{leads.length} Leads</p>
-                                  <p className="text-[9px] text-[#5E7393] font-bold mt-1">Adjusted from connected sources</p>
+                                  <p className="text-[9px] text-[#5E7393] font-bold mt-1">Leads from all connected sources</p>
                                 </div>
 
                                 <div className="space-y-1 my-3 text-[10px] text-[#1F3557]/85 font-semibold">
@@ -6694,7 +7186,7 @@ Access to full financial telemetry is restricted.`;
 
                                 <span className="text-[8.5px] uppercase tracking-wider font-black text-[#315C9F] flex items-center gap-1 mt-1">
                                   <span className="w-1.5 h-1.5 bg-red-500 rounded-full animate-pulse" />
-                                  Active Live CRM Sync OK
+                                  Leads are up to date
                                 </span>
                               </div>
                             </div>
@@ -6720,7 +7212,7 @@ Access to full financial telemetry is restricted.`;
                               <div className="my-1.5 text-left flex-1 flex flex-col justify-between">
                                 <div>
                                   <p className="text-xl font-sans font-black text-[#1F3557] tracking-tight leading-none">{todayEvents.length} Jobs Scheduled</p>
-                                  <p className="text-[9px] text-[#5E7393] font-bold mt-1">Populated from monthly calendar</p>
+                                  <p className="text-[9px] text-[#5E7393] font-bold mt-1">Jobs from your schedule</p>
                                 </div>
 
                                 <div className="space-y-1.5 my-3 text-[9.5px] font-semibold text-[#1F3557]/85">
@@ -6910,14 +7402,14 @@ Access to full financial telemetry is restricted.`;
                           <div className="text-left space-y-1 bg-transparent border-none p-0 shadow-none">
                             <div className="flex items-center gap-1.5 text-[10px] font-black text-[#1F3557] uppercase tracking-wider">
                               <Laptop className="w-3.5 h-3.5 text-[#315C9F]" />
-                              <span>TEAM DASHBOARD</span>
+                              <span>BUSINESS DASHBOARD</span>
                             </div>
                             <h2 className="text-base md:text-lg font-sans font-black tracking-tight text-[#1F3557] flex items-center gap-2">
                               Welcome, {loggedInUser?.name || (loggedInUser?.email ? loggedInUser.email.split("@")[0] : "waterdrops2001")}!
                               <span className="w-2.5 h-2.5 bg-emerald-500 rounded-full animate-pulse border-2 border-white" />
                             </h2>
                             <p className="text-[11px] font-sans font-bold text-[#5E7393]">
-                              Role: <span className="text-[#1F3557] uppercase font-mono">{simulatedRole || loggedInUser?.role || "Owner"}</span> • Hours Clocked This Session: <strong className="text-[#1F3557]">{totalHours} hours</strong>
+                              Signed in as <span className="text-[#1F3557] uppercase font-mono">{simulatedRole || loggedInUser?.role || "Owner"}</span> • Today’s hours: <strong className="text-[#1F3557]">{totalHours}</strong>
                             </p>
                           </div>
 
@@ -6931,7 +7423,7 @@ Access to full financial telemetry is restricted.`;
                                 {liveTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })}
                               </span>
                               <span className="text-[8px] font-bold text-blue-200 font-mono mt-1 uppercase tracking-widest leading-none">
-                                Secure Workspace
+                                Your business dashboard
                               </span>
                             </div>
                             <div className="flex gap-2 w-full">
@@ -6945,15 +7437,15 @@ Access to full financial telemetry is restricted.`;
                                 title="Take Page Snapshot"
                               >
                                 <Camera className="w-3.5 h-3.5 text-[#315C9F]" />
-                                Snapshot
+                                Save This Page
                               </button>
                               <button
                                 onClick={() => openPageAIAnalysis("dashboard", "Dashboard")}
                                 className="flex-1 px-3 py-1.5 bg-[#EAF5FF] hover:bg-[#BDDDF8] border border-[#9EC8EF] text-[#1F3557] font-bold rounded-xl text-[10px] uppercase tracking-wider transition-colors cursor-pointer flex items-center justify-center gap-1 shadow-sm"
-                                title="AI Option"
+                                title="Ask AI About This Page"
                               >
                                 <Sparkles className="w-3.5 h-3.5 text-amber-500 animate-pulse" />
-                                AI Option
+                                Ask AI About This Page
                               </button>
                             </div>
                           </div>
@@ -6987,7 +7479,7 @@ Access to full financial telemetry is restricted.`;
                           {isAuthorizedToCustomize ? (
                             <>
                               <Sliders className="w-3.5 h-3.5" />
-                              <span>Configure Dashboard ➔</span>
+                              <span>Choose Dashboard Cards</span>
                             </>
                           ) : (
                             <span>Restricted To Management 🔒</span>
@@ -7034,7 +7526,7 @@ Access to full financial telemetry is restricted.`;
                               <div className="flex items-center justify-between border-b border-[#9EC8EF] pb-3.5 mb-4">
                                 <div className="flex items-center gap-2">
                                   <Sliders className="w-5 h-5 text-[#315C9F]" />
-                                  <h3 className="text-sm font-black text-[#1F3557] uppercase tracking-wider">Customize Daily View</h3>
+                                  <h3 className="text-sm font-black text-[#1F3557] uppercase tracking-wider">CHOOSE YOUR DASHBOARD</h3>
                                 </div>
                                 <button 
                                   onClick={(e) => {
@@ -7048,12 +7540,12 @@ Access to full financial telemetry is restricted.`;
                               </div>
 
                               <p className="text-xs text-[#5E7393] font-sans font-semibold mb-4 leading-relaxed">
-                                Select which metric cards populate your primary three dashboard panel slots. Save to update immediately.
+                                Choose the three cards you want to see on your dashboard.
                               </p>
 
                               <div className="space-y-4">
                                 <div className="space-y-1 flex flex-col">
-                                  <label className="text-[9.5px] uppercase tracking-wider text-[#5E7393] font-bold">Slot 1 Metric Card</label>
+                                  <label className="text-[9.5px] uppercase tracking-wider text-[#5E7393] font-bold">FIRST CARD</label>
                                   <CustomDropdown
                                     value={customCardTargets.card1}
                                     onChange={(val) => setCustomCardTargets(prev => ({ ...prev, card1: val }))}
@@ -7063,7 +7555,7 @@ Access to full financial telemetry is restricted.`;
                                 </div>
 
                                 <div className="space-y-1 flex flex-col">
-                                  <label className="text-[9.5px] uppercase tracking-wider text-[#5E7393] font-bold">Slot 2 Metric Card</label>
+                                  <label className="text-[9.5px] uppercase tracking-wider text-[#5E7393] font-bold">SECOND CARD</label>
                                   <CustomDropdown
                                     value={customCardTargets.card2}
                                     onChange={(val) => setCustomCardTargets(prev => ({ ...prev, card2: val }))}
@@ -7073,7 +7565,7 @@ Access to full financial telemetry is restricted.`;
                                 </div>
 
                                 <div className="space-y-1 flex flex-col">
-                                  <label className="text-[9.5px] uppercase tracking-wider text-[#5E7393] font-bold">Slot 3 Metric Card</label>
+                                  <label className="text-[9.5px] uppercase tracking-wider text-[#5E7393] font-bold">THIRD CARD</label>
                                   <CustomDropdown
                                     value={customCardTargets.card3}
                                     onChange={(val) => setCustomCardTargets(prev => ({ ...prev, card3: val }))}
@@ -7101,7 +7593,7 @@ Access to full financial telemetry is restricted.`;
                                   }}
                                   className="flex-1 py-2.5 bg-[#4A86F7] hover:bg-[#3977EE] text-white font-bold rounded-xl text-xs transition-colors cursor-pointer text-center shadow-sm uppercase tracking-wider"
                                 >
-                                  Save Layout
+                                  SAVE DASHBOARD
                                 </button>
                               </div>
                             </div>
@@ -7483,7 +7975,7 @@ Access to full financial telemetry is restricted.`;
                               <div className="flex items-center justify-between gap-3 flex-wrap border-b border-white/90 pb-3">
                                 <div className="flex items-center gap-2 flex-wrap">
                                   <span className="select-none text-xl" style={{ filter: 'drop-shadow(0 0 6px rgba(14,165,233,0.55))' }}>💰</span>
-                                  <h2 className="text-base font-mono font-black text-[#07599a] uppercase tracking-[0.2em]" style={{ textShadow: '0 0 10px rgba(255,255,255,0.95)' }}>Money Tracker</h2>
+                                  <h2 className="text-base font-mono font-black text-[#07599a] uppercase tracking-[0.2em]" style={{ textShadow: '0 0 10px rgba(255,255,255,0.95)' }}>Money</h2>
                                   <select
                                     aria-label="Graph interval"
                                     value={revenuePageFilter}
@@ -7504,7 +7996,7 @@ Access to full financial telemetry is restricted.`;
                                 </div>
                                 <span className="flex items-center gap-1.5 text-[10px] font-mono font-black text-[#078e64] uppercase tracking-wider bg-white/45 border border-white px-2.5 py-1 rounded-md shadow-[0_0_10px_rgba(56,189,248,0.28)]">
                                   <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" style={{ boxShadow: '0 0 6px rgba(52,211,153,0.9)' }} />
-                                  Live Data
+                                  Current totals
                                 </span>
                               </div>
 
@@ -7651,7 +8143,7 @@ Access to full financial telemetry is restricted.`;
                                   onClick={() => setIsFinancialSnapshotOpen(true)}
                                   className="min-h-10 px-3.5 py-2 text-[10.5px] font-mono font-extrabold uppercase tracking-wide rounded-md bg-gradient-to-r from-[#0EA5E9] to-[#1485F4] text-white cursor-pointer flex items-center justify-center gap-1.5 shadow-[0_0_18px_rgba(14,165,233,0.72),inset_0_0_7px_rgba(255,255,255,0.42)]"
                                 >
-                                  <Landmark className="w-3.5 h-3.5" /> View Financial Reports
+                                  <Landmark className="w-3.5 h-3.5" /> View Reports
                                 </button>
                                 <button
                                   onClick={() => setIsPriceBookOpen(true)}
@@ -7664,7 +8156,7 @@ Access to full financial telemetry is restricted.`;
                               {/* REVENUE BREAKDOWN / EXPENSE BREAKDOWN / CASH FLOW -- all real, this-period data */}
                               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                                 <div className="bg-[linear-gradient(145deg,rgba(225,243,255,0.96),rgba(194,227,251,0.96))] rounded-lg p-4 border border-white shadow-[0_0_15px_rgba(56,189,248,0.35),inset_0_0_18px_rgba(255,255,255,0.82)]">
-                                  <p className="text-[10px] font-mono font-black text-[#07599a] uppercase tracking-widest mb-2">Revenue Breakdown</p>
+                                  <p className="text-[10px] font-mono font-black text-[#07599a] uppercase tracking-widest mb-2">Where Your Income Came From</p>
                                   {revenueSlices.length === 0 ? (
                                     <p className="text-[10.5px] text-[#2473aa]/55 font-mono text-center py-8">No revenue this period yet.</p>
                                   ) : (
@@ -7693,7 +8185,7 @@ Access to full financial telemetry is restricted.`;
                                 </div>
 
                                 <div className="bg-[linear-gradient(145deg,rgba(225,243,255,0.96),rgba(194,227,251,0.96))] rounded-lg p-4 border border-white shadow-[0_0_15px_rgba(56,189,248,0.35),inset_0_0_18px_rgba(255,255,255,0.82)]">
-                                  <p className="text-[10px] font-mono font-black text-[#07599a] uppercase tracking-widest mb-2">Expense Breakdown</p>
+                                  <p className="text-[10px] font-mono font-black text-[#07599a] uppercase tracking-widest mb-2">Where Your Money Went</p>
                                   {expenseSlices.length === 0 ? (
                                     <p className="text-[10.5px] text-[#2473aa]/55 font-mono text-center py-8">No expenses this period yet.</p>
                                   ) : (
@@ -7768,19 +8260,19 @@ Access to full financial telemetry is restricted.`;
                                   card on this page. */}
                               {(() => {
                                 const jobCostingColumns: Array<{ key: string; header: string; bold: boolean; color: string; get: (r: typeof jobCostingRows[number]) => string }> = [
-                                  { key: "estPlus", header: "Estimated +", bold: false, color: "#00C853", get: r => fmt(r.estimatedRevenue) },
-                                  { key: "estMinus", header: "Estimated -", bold: false, color: "#FF1744", get: r => fmt(r.totalCost) },
-                                  { key: "labor", header: "Labor -", bold: false, color: "#FF1744", get: r => fmt(r.laborCost) },
-                                  { key: "material", header: "Material -", bold: false, color: "#FF1744", get: r => fmt(r.materialCost) },
-                                  { key: "other", header: "Other -", bold: false, color: "#FF1744", get: r => fmt(r.otherCost) },
+                                  { key: "estPlus", header: "Estimated income", bold: false, color: "#00C853", get: r => fmt(r.estimatedRevenue) },
+                                  { key: "estMinus", header: "Estimated costs", bold: false, color: "#FF1744", get: r => fmt(r.totalCost) },
+                                  { key: "labor", header: "Labor cost", bold: false, color: "#FF1744", get: r => fmt(r.laborCost) },
+                                  { key: "material", header: "Material cost", bold: false, color: "#FF1744", get: r => fmt(r.materialCost) },
+                                  { key: "other", header: "Other costs", bold: false, color: "#FF1744", get: r => fmt(r.otherCost) },
                                   { key: "totalMinus", header: "Total -", bold: true, color: "#FF1744", get: r => fmt(r.totalCost) },
-                                  { key: "totalPlus", header: "Total +", bold: true, color: "#00C853", get: r => fmt(r.estimatedRevenue) },
-                                  { key: "profit", header: "Profit +", bold: true, color: "#168BFF", get: r => fmt(r.grossProfit) },
+                                  { key: "totalPlus", header: "Total income", bold: true, color: "#00C853", get: r => fmt(r.estimatedRevenue) },
+                                  { key: "profit", header: "Profit", bold: true, color: "#168BFF", get: r => fmt(r.grossProfit) },
                                   { key: "margin", header: "Margin %", bold: true, color: "#168BFF", get: r => r.marginPercent == null ? "—" : `${r.marginPercent.toFixed(1)}%` },
                                 ];
                                 return (
                                   <div>
-                                    <p className="text-[10px] font-mono font-black text-[#07599a] uppercase tracking-widest mb-2">Job Costing</p>
+                                    <p className="text-[10px] font-mono font-black text-[#07599a] uppercase tracking-widest mb-2">Job Costs and Profit</p>
                                     <div className="overflow-x-auto">
                                       <div className="min-w-[760px]">
                                         <div className="grid grid-cols-9 gap-1 px-3 pb-1.5">
@@ -7824,17 +8316,6 @@ Access to full financial telemetry is restricted.`;
                                   </div>
                                 );
                               })()}
-
-                              {/* Marketing Attribution -- same real Lead -> Customer -> Estimate ->
-                                  Job -> Invoice -> Revenue -> Profit chain shown in Reports, dropped
-                                  in here too (point 5) so an owner sees it without leaving Revenue. */}
-                              <div className="rounded-2xl border border-[#9EC8EF] bg-white/70 p-4">
-                                <p className="text-[10px] font-mono font-black text-[#07599a] uppercase tracking-widest mb-3">Marketing Attribution</p>
-                                <MarketingAttributionView
-                                  leads={leads} customers={customers} estimates={estimates} jobs={schedulingEvents} invoices={invoices}
-                                  timeClockLogs={timeClockLogs} employees={employees} transactions={transactions} payrollWorkweekStart={payrollWorkweekStart}
-                                />
-                              </div>
 
                               {/* Upcoming Job Payments (left) and Upcoming Bills & Expenses (right) --
                                   two independent scrolling columns, bottom to top */}
@@ -7903,7 +8384,7 @@ Access to full financial telemetry is restricted.`;
                             <div className="space-y-3">
                               <div className="flex justify-between items-center px-1">
                                 <h3 className="text-xs font-extrabold text-[#1F3557] uppercase tracking-wider">Payments</h3>
-                                <span className="text-[10px] font-mono font-bold text-[#5E7393] uppercase">{paymentItems.length} line item{paymentItems.length === 1 ? "" : "s"}</span>
+                                <span className="text-[10px] font-mono font-bold text-[#5E7393] uppercase">{paymentItems.length === 0 ? "No payments yet" : `${paymentItems.length} line item${paymentItems.length === 1 ? "" : "s"}`}</span>
                               </div>
                               <div className="bg-[#C7E3FA] rounded-2xl p-4 border border-[#9EC8EF] shadow-sm space-y-3">
                                 <div className="flex flex-wrap items-center gap-2">
@@ -7956,7 +8437,7 @@ Access to full financial telemetry is restricted.`;
                             <div className="space-y-3">
                               <div className="flex justify-between items-center px-1">
                                 <h3 className="text-xs font-extrabold text-[#1F3557] uppercase tracking-wider">Expenses</h3>
-                                <span className="text-[10px] font-mono font-bold text-[#5E7393] uppercase">{expenseItems.length} line item{expenseItems.length === 1 ? "" : "s"}</span>
+                                <span className="text-[10px] font-mono font-bold text-[#5E7393] uppercase">{expenseItems.length === 0 ? "No expenses yet" : `${expenseItems.length} line item${expenseItems.length === 1 ? "" : "s"}`}</span>
                               </div>
                               <div className="bg-[#C7E3FA] rounded-2xl p-4 border border-[#9EC8EF] shadow-sm space-y-3">
                                 <div className="flex flex-wrap items-center gap-2">
@@ -8008,7 +8489,7 @@ Access to full financial telemetry is restricted.`;
                                     onClick={saveTotalStatement}
                                     className="px-3.5 py-2 text-[11px] font-bold rounded-xl bg-[#4A86F7] hover:bg-[#3977EE] text-white cursor-pointer flex items-center gap-1.5"
                                   >
-                                    <FileText className="w-3.5 h-3.5" /> Compile and Save Total Statement as CSV
+                                    <FileText className="w-3.5 h-3.5" /> Download All Transactions
                                   </button>
                                 </div>
                               </div>
@@ -8153,7 +8634,7 @@ Access to full financial telemetry is restricted.`;
                           <h2 className="text-lg font-sans font-extrabold text-[#1F3557] uppercase tracking-wider flex items-center gap-2">
                             <span className="select-none text-xl">💵</span> Payroll
                           </h2>
-                          <p className="text-xs text-[#5E7393] font-sans font-semibold">Run payroll, track hours, and manage pay periods for your crew</p>
+                          <p className="text-xs text-[#5E7393] font-sans font-semibold">Review employee hours and prepare payroll.</p>
                         </div>
                       </div>
 
@@ -8163,7 +8644,7 @@ Access to full financial telemetry is restricted.`;
                           <div>
                             <span className="text-[10px] uppercase font-bold tracking-wider text-[#5E7393]">Personnel Overview</span>
                             <h3 className="text-base font-sans font-black text-[#1F3557] tracking-tight">Payroll Overview</h3>
-                            <p className="text-xs text-[#5E7393] font-sans font-semibold">Active crew hours, overtime coefficients, and cumulative gross wages</p>
+                            <p className="text-xs text-[#5E7393] font-sans font-semibold">Employee hours, overtime, and estimated pay.</p>
                           </div>
                           
                           <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 w-full sm:w-auto">
@@ -8212,7 +8693,7 @@ Access to full financial telemetry is restricted.`;
                         <div className="grid gap-3 rounded-2xl border border-[#9EC8EF] bg-[#EAF5FF] p-4 lg:grid-cols-6">
                           <label className="text-[9px] font-black uppercase text-[#5E7393]">Work state
                             <select value={payrollState} onChange={e => setPayrollState(e.target.value)} className="mt-1 block w-full rounded-lg border border-[#9EC8EF] bg-white px-2 py-2 text-xs font-bold text-[#1F3557]">
-                              {US_PAYROLL_STATES.map(state => <option key={state} value={state}>{state}{state === "TX" ? " — configured" : " — setup required"}</option>)}
+                              {US_PAYROLL_STATES.map(state => <option key={state} value={state}>{state}{state === "TX" ? " — configured" : " — Not set up"}</option>)}
                             </select>
                           </label>
                           <label className="text-[9px] font-black uppercase text-[#5E7393] lg:col-span-2">Pay schedule
@@ -8244,7 +8725,7 @@ Access to full financial telemetry is restricted.`;
                             <button type="button" disabled={payrollSchedule === "custom"} onClick={()=>movePayrollPeriod(-1)} className="rounded-lg border border-[#9EC8EF] bg-white px-3 py-1.5 text-[10px] font-bold disabled:opacity-40">← Previous</button>
                             <button type="button" disabled={payrollSchedule === "custom"} onClick={useCurrentPayrollPeriod} className="rounded-lg border border-[#9EC8EF] bg-white px-3 py-1.5 text-[10px] font-bold disabled:opacity-40">Current period</button>
                             <button type="button" disabled={payrollSchedule === "custom"} onClick={()=>movePayrollPeriod(1)} className="rounded-lg border border-[#9EC8EF] bg-white px-3 py-1.5 text-[10px] font-bold disabled:opacity-40">Next →</button>
-                            <span className="self-center text-[10px] font-semibold text-[#5E7393]">Saved automatically for this business.</span>
+                            <span className="self-center text-[10px] font-semibold text-[#5E7393]">Changes save automatically.</span>
                           </div>
                         </div>
 
@@ -8291,7 +8772,7 @@ Access to full financial telemetry is restricted.`;
                                     {rows.length === 0 && (
                                       <tr>
                                         <td colSpan={6} className="px-4 py-6 text-center text-[#5E7393] font-sans font-medium">
-                                          No real employees onboarded yet.
+                                          No employees have been added yet.
                                         </td>
                                       </tr>
                                     )}
@@ -8337,10 +8818,10 @@ Access to full financial telemetry is restricted.`;
                         
                         <div className="text-center pt-2">
                           <button
-                            onClick={() => setRevenueConfirmAction({ label: "Complete Payroll & Wages", icon: "👥" })}
+                            onClick={() => navigateToScreen("roster")}
                             className="text-[#315C9F] hover:text-[#1F3557] font-bold text-xs hover:underline inline-flex items-center gap-1 cursor-pointer"
                           >
-                            View All Employees ➔
+                            View Employees
                           </button>
                         </div>
                       </div>
@@ -8373,8 +8854,8 @@ Access to full financial telemetry is restricted.`;
                     <div className="bg-[#C7E3FB] rounded-3xl p-6 border border-[#A9CDEE] shadow-sm space-y-6 animate-fade-in text-left">
                       <div className="flex items-center justify-between border-b border-[#A9CDEE] pb-4">
                         <div>
-                          <h2 className="text-base font-sans font-extrabold text-[#342D7E] uppercase tracking-wider">Company Bulletins Center</h2>
-                          <p className="text-xs text-slate-500">Read official notifications or post announcements for administrative approval</p>
+                          <h2 className="text-base font-sans font-extrabold text-[#342D7E] uppercase tracking-wider">Company Announcements</h2>
+                          <p className="text-xs text-slate-500">Post announcements for your team.</p>
                         </div>
                         <span className="px-3 py-1 bg-[#E3F3FF] text-[#4A9BFF] text-xs font-mono font-bold rounded-xl border border-[#A9CDEE]">
                           Active Notices
@@ -8385,9 +8866,9 @@ Access to full financial telemetry is restricted.`;
                         {/* Post bulletin form */}
                         <div className="bg-[#E3F3FF] p-5 rounded-2xl border border-[#A9CDEE] space-y-4 h-fit">
                           <div>
-                            <h3 className="text-xs font-extrabold text-[#342D7E] uppercase tracking-wider">Post New Notice</h3>
+                            <h3 className="text-xs font-extrabold text-[#342D7E] uppercase tracking-wider">New Announcement</h3>
                             <p className="text-[10.5px] text-slate-600 mt-1">
-                              Note: If you are not an owner, manager, or scheduler, your bulletin will require approval.
+                              Announcements from other employees must be approved by an owner, manager, or scheduler.
                             </p>
                           </div>
 
@@ -8493,11 +8974,11 @@ Access to full financial telemetry is restricted.`;
                             </div>
                           )}
 
-                          <h3 className="text-xs font-extrabold text-[#342D7E] uppercase tracking-wider">Active Bulletins Board</h3>
+                          <h3 className="text-xs font-extrabold text-[#342D7E] uppercase tracking-wider">Current Announcements</h3>
                           <div className="space-y-3.5">
                             {bulletins.filter(b => b.status === "approved").length === 0 ? (
                               <div className="text-center py-8 text-slate-400 text-xs">
-                                No announcements active currently.
+                                No active announcements.
                               </div>
                             ) : (
                               bulletins.filter(b => b.status === "approved").map((b) => (
@@ -8522,6 +9003,14 @@ Access to full financial telemetry is restricted.`;
                   ) : activeScreen.id === "missed_call_textback" ? (
 
                     <MissedCallTextBackPage />
+
+                  ) : activeScreen.id === "automations" ? (
+
+                    <AutomationsPage />
+
+                  ) : activeScreen.id === "owner_protection" ? (
+
+                    <OwnerProtectionPage />
 
                   ) : (
                     

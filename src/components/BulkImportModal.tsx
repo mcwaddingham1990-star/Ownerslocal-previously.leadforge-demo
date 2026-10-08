@@ -1,7 +1,7 @@
 import React, { useMemo, useState } from "react";
 import { Upload, X, AlertTriangle, CheckCircle, Download } from "lucide-react";
 import {
-  parseSheet, readRow, extractPdfTableText, downloadImportReport,
+  parseSheet, readRow, extractPdfTableText, extractExcelText, downloadImportReport,
   type ImportFieldSpec, type ParsedSheet, type DuplicateCheckResult, type ImportReportRow
 } from "../lib/spreadsheetImport";
 
@@ -37,6 +37,7 @@ export function BulkImportModal<K extends string>({ title, description, fields, 
   const [columnMap, setColumnMap] = useState<Array<K | null>>([]);
   const [error, setError] = useState<string | null>(null);
   const [isReadingPdf, setIsReadingPdf] = useState(false);
+  const [isReadingExcel, setIsReadingExcel] = useState(false);
   const [pasteText, setPasteText] = useState("");
   const [sourceFileName, setSourceFileName] = useState("import");
   const [includeDuplicates, setIncludeDuplicates] = useState(false);
@@ -56,7 +57,8 @@ export function BulkImportModal<K extends string>({ title, description, fields, 
 
   const handleFile = async (file: File) => {
     setError(null);
-    if (file.name.toLowerCase().endsWith(".pdf") || file.type === "application/pdf") {
+    const lowerName = file.name.toLowerCase();
+    if (lowerName.endsWith(".pdf") || file.type === "application/pdf") {
       setIsReadingPdf(true);
       try {
         const text = await extractPdfTableText(file);
@@ -69,6 +71,28 @@ export function BulkImportModal<K extends string>({ title, description, fields, 
         setError("Couldn't read that PDF. Try exporting it as a CSV instead if your source software offers that.");
       } finally {
         setIsReadingPdf(false);
+      }
+      return;
+    }
+    if (lowerName.endsWith(".xlsx") || lowerName.endsWith(".xls")) {
+      setIsReadingExcel(true);
+      try {
+        const text = await extractExcelText(file);
+        if (!text.trim()) {
+          setError("That workbook's first sheet looks empty.");
+        } else {
+          loadText(text, file.name);
+        }
+      } catch {
+        // Legacy .xls (pre-2007 binary format) isn't readable this way -- same
+        // limitation/message InventoryPage's own Excel importer already gives.
+        setError(
+          lowerName.endsWith(".xls")
+            ? "Old .xls files aren't supported -- open it in Excel/Sheets and save as .xlsx, then try again."
+            : "Couldn't read that Excel file. Try exporting it as a CSV instead."
+        );
+      } finally {
+        setIsReadingExcel(false);
       }
       return;
     }
@@ -140,14 +164,16 @@ export function BulkImportModal<K extends string>({ title, description, fields, 
           <div className="relative border-2 border-dashed border-[#9EC8EF] hover:border-[#315C9F] bg-[#EAF5FF]/30 hover:bg-[#EAF5FF]/50 rounded-2xl p-6 transition-colors text-center cursor-pointer">
             <input
               type="file"
-              accept=".csv,.tsv,.txt,.pdf"
+              accept=".csv,.tsv,.txt,.pdf,.xlsx,.xls"
               onChange={e => { const file = e.target.files?.[0]; if (file) void handleFile(file); }}
               className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
             />
             <div className="flex flex-col items-center gap-2">
               <Upload className="w-8 h-8 text-[#315C9F]" />
-              <p className="text-xs font-extrabold">{isReadingPdf ? "Reading PDF…" : "Click to select or drag & drop a file"}</p>
-              <p className="text-[10px] text-[#5E7393]">CSV, TSV, or PDF (from a spreadsheet/report export)</p>
+              <p className="text-xs font-extrabold">
+                {isReadingPdf ? "Reading PDF…" : isReadingExcel ? "Reading Excel file…" : "Click to select or drag & drop a file"}
+              </p>
+              <p className="text-[10px] text-[#5E7393]">CSV, TSV, Excel (.xlsx), or PDF (from a spreadsheet/report export)</p>
             </div>
           </div>
 

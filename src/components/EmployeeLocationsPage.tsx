@@ -9,11 +9,11 @@ import { GpsPrivacyNotice } from "./GpsPrivacyNotice";
 import { RecentRoutesSection } from "./RecentRoutesSection";
 
 const STATUS_STYLES: Record<string, string> = {
-  Available: "bg-emerald-500/10 text-emerald-400 border-emerald-500/20",
-  Traveling: "bg-orange-500/10 text-orange-400 border-orange-500/20",
-  Lunch: "bg-amber-500/10 text-amber-400 border-amber-500/20",
-  Offline: "bg-slate-800 text-slate-400 border-white/5",
-  "Clocked Out": "bg-slate-800 text-slate-400 border-white/5"
+  Available: "bg-emerald-50 text-emerald-700 border-emerald-200",
+  Traveling: "bg-orange-50 text-orange-700 border-orange-200",
+  Lunch: "bg-amber-50 text-amber-700 border-amber-200",
+  Offline: "bg-slate-100 text-slate-500 border-slate-200",
+  "Clocked Out": "bg-slate-100 text-slate-500 border-slate-200"
 };
 
 type StatusFilter = "All" | "Live" | "Tracking On" | "Tracking Off";
@@ -73,14 +73,14 @@ export const EmployeeLocationsPage: React.FC = () => {
   };
 
   return (
-    <div className="bg-slate-950 rounded-3xl p-6 border border-white/10 shadow-sm space-y-5 animate-fade-in text-left">
-      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 border-b border-white/10 pb-4">
+    <div className="bg-[#C7E3FA] rounded-3xl p-6 border border-[#9EC8EF] shadow-sm space-y-5 animate-fade-in text-left">
+      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 border-b border-[#9EC8EF]/60 pb-4">
         <div>
-          <h2 className="text-base font-sans font-extrabold text-white uppercase tracking-wider flex items-center gap-2">
-            <MapPin className="w-5 h-5 text-emerald-400" /> Employee Locations
+          <h2 className="text-base font-sans font-extrabold text-[#1F3557] uppercase tracking-wider flex items-center gap-2">
+            <MapPin className="w-5 h-5 text-emerald-600" /> Employee Locations
           </h2>
-          <p className="text-xs text-slate-400 mt-1 font-sans font-semibold">
-            Real-time status, GPS tracking permissions, and route history for every employee -- pins on a real map live on the Interactive Map page.
+          <p className="text-xs text-[#5E7393] mt-1 font-sans font-semibold">
+            See an employee’s location and route while they are clocked in.
           </p>
         </div>
         <button
@@ -91,31 +91,31 @@ export const EmployeeLocationsPage: React.FC = () => {
         </button>
       </div>
 
-      <GpsPrivacyNotice dark />
+      <GpsPrivacyNotice />
 
       <div className="grid grid-cols-3 gap-3">
-        <div className="bg-slate-900/80 border border-white/10 rounded-2xl p-3.5">
-          <p className="text-[9.5px] font-black uppercase tracking-wider text-slate-400">Live Now</p>
-          <p className="text-xl font-extrabold text-emerald-400 mt-1">{summary.liveNow}</p>
+        <div className="bg-[#EAF5FF] border border-[#9EC8EF] rounded-2xl p-3.5">
+          <p className="text-[9.5px] font-black uppercase tracking-wider text-[#5E7393]">Clocked In and Sharing Location</p>
+          <p className="text-xl font-extrabold text-emerald-600 mt-1">{summary.liveNow}</p>
         </div>
-        <div className="bg-slate-900/80 border border-white/10 rounded-2xl p-3.5">
-          <p className="text-[9.5px] font-black uppercase tracking-wider text-slate-400">Tracking Enabled</p>
-          <p className="text-xl font-extrabold text-white mt-1">{summary.trackingOn}</p>
+        <div className="bg-[#EAF5FF] border border-[#9EC8EF] rounded-2xl p-3.5">
+          <p className="text-[9.5px] font-black uppercase tracking-wider text-[#5E7393]">Location Allowed</p>
+          <p className="text-xl font-extrabold text-[#1F3557] mt-1">{summary.trackingOn}</p>
         </div>
-        <div className="bg-slate-900/80 border border-white/10 rounded-2xl p-3.5">
-          <p className="text-[9.5px] font-black uppercase tracking-wider text-slate-400">Total Employees</p>
-          <p className="text-xl font-extrabold text-white mt-1">{summary.total}</p>
+        <div className="bg-[#EAF5FF] border border-[#9EC8EF] rounded-2xl p-3.5">
+          <p className="text-[9.5px] font-black uppercase tracking-wider text-[#5E7393]">Total Employees</p>
+          <p className="text-xl font-extrabold text-[#1F3557] mt-1">{summary.total}</p>
         </div>
       </div>
 
       <div className="flex flex-col sm:flex-row items-start sm:items-center gap-2.5">
         <div className="relative flex-1 w-full sm:max-w-xs">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[#5E7393]" />
           <input
             value={searchQuery}
             onChange={e => setSearchQuery(e.target.value)}
             placeholder="Search name or role..."
-            className="w-full text-xs bg-slate-900 border border-white/10 rounded-xl pl-9 pr-3 py-2.5 text-white placeholder:text-slate-500 focus:outline-none focus:border-emerald-500"
+            className="w-full text-xs bg-white border border-[#9EC8EF] rounded-xl pl-9 pr-3 py-2.5 text-[#1F3557] placeholder:text-[#5E7393] focus:outline-none focus:border-emerald-500"
           />
         </div>
         <div className="flex flex-wrap gap-1.5">
@@ -124,7 +124,7 @@ export const EmployeeLocationsPage: React.FC = () => {
               key={f}
               onClick={() => setStatusFilter(f)}
               className={`px-3 py-2 rounded-xl text-[10px] font-black uppercase tracking-wider transition-colors ${
-                statusFilter === f ? "bg-emerald-500 text-slate-950" : "bg-slate-900 text-slate-300 border border-white/10 hover:bg-slate-800"
+                statusFilter === f ? "bg-emerald-500 text-white" : "bg-white text-[#1F3557] border border-[#9EC8EF] hover:bg-[#EAF5FF]"
               }`}
             >
               {f}
@@ -134,7 +134,7 @@ export const EmployeeLocationsPage: React.FC = () => {
       </div>
 
       {rows.length === 0 ? (
-        <div className="text-center py-10 text-slate-500 text-xs font-semibold">
+        <div className="text-center py-10 text-[#5E7393] text-xs font-semibold">
           {employees.length === 0 ? "No employees on the roster yet." : "No employees match this search/filter."}
         </div>
       ) : (
@@ -144,42 +144,42 @@ export const EmployeeLocationsPage: React.FC = () => {
             const isLive = fresh === "Live";
             const isExpanded = expandedEmail === employee.email;
             return (
-              <div key={employee.email} className="bg-slate-900/80 border border-white/10 rounded-2xl overflow-hidden">
+              <div key={employee.email} className="bg-[#EAF5FF] border border-[#9EC8EF] rounded-2xl overflow-hidden">
                 <div className="p-3.5 flex flex-wrap items-center gap-3">
-                  <div className="w-9 h-9 rounded-full bg-blue-500/10 text-blue-400 border border-blue-500/20 text-xs font-black flex items-center justify-center shrink-0">
+                  <div className="w-9 h-9 rounded-full bg-white text-[#315C9F] border border-[#9EC8EF] text-xs font-black flex items-center justify-center shrink-0">
                     {(employee.firstName?.[0] || "").toUpperCase()}{(employee.lastName?.[0] || "").toUpperCase()}
                   </div>
                   <div className="min-w-[140px]">
-                    <p className="text-xs font-extrabold text-white">{name}</p>
-                    <p className="text-[10px] text-slate-400 font-semibold">{employee.role}</p>
+                    <p className="text-xs font-extrabold text-[#1F3557]">{name}</p>
+                    <p className="text-[10px] text-[#5E7393] font-semibold">{employee.role}</p>
                   </div>
 
                   <span className={`px-2 py-1 rounded-lg text-[9.5px] font-black uppercase tracking-wider border ${STATUS_STYLES[tech?.status || "Offline"] || STATUS_STYLES.Offline}`}>
                     {tech?.status || "Offline"}
                   </span>
 
-                  <span className={`text-[10px] font-bold flex items-center gap-1 ${isLive ? "text-emerald-400" : "text-slate-400"}`}>
-                    <span className={`w-1.5 h-1.5 rounded-full ${isLive ? "bg-emerald-400 animate-pulse" : "bg-slate-500"}`} />
+                  <span className={`text-[10px] font-bold flex items-center gap-1 ${isLive ? "text-emerald-600" : "text-[#5E7393]"}`}>
+                    <span className={`w-1.5 h-1.5 rounded-full ${isLive ? "bg-emerald-500 animate-pulse" : "bg-slate-400"}`} />
                     {fresh || "No GPS fix yet"}
                   </span>
 
                   {tech?.speedMph != null && (
-                    <span className="text-[10px] font-bold text-slate-300 flex items-center gap-1">
-                      <Gauge className="w-3 h-3 text-cyan-400" /> {Math.round(tech.speedMph)} mph
+                    <span className="text-[10px] font-bold text-[#1F3557] flex items-center gap-1">
+                      <Gauge className="w-3 h-3 text-cyan-600" /> {Math.round(tech.speedMph)} mph
                     </span>
                   )}
 
                   <div className="ml-auto flex items-center gap-2">
                     {employee.gpsTrackingEnabled ? (
-                      <span className="text-[9.5px] font-black uppercase text-emerald-400 flex items-center gap-1"><ShieldCheck className="w-3.5 h-3.5" /> Tracking On</span>
+                      <span className="text-[9.5px] font-black uppercase text-emerald-600 flex items-center gap-1"><ShieldCheck className="w-3.5 h-3.5" /> Tracking On</span>
                     ) : (
-                      <span className="text-[9.5px] font-black uppercase text-slate-500 flex items-center gap-1"><ShieldOff className="w-3.5 h-3.5" /> Tracking Off</span>
+                      <span className="text-[9.5px] font-black uppercase text-[#5E7393] flex items-center gap-1"><ShieldOff className="w-3.5 h-3.5" /> Tracking Off</span>
                     )}
                     {canManage && (
                       <button
                         onClick={() => toggleTracking(employee.email, !employee.gpsTrackingEnabled)}
                         className={`px-2.5 py-1.5 rounded-lg text-[9.5px] font-black uppercase tracking-wider ${
-                          employee.gpsTrackingEnabled ? "bg-rose-500/10 text-rose-400 border border-rose-500/20 hover:bg-rose-500/20" : "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 hover:bg-emerald-500/20"
+                          employee.gpsTrackingEnabled ? "bg-rose-50 text-rose-700 border border-rose-200 hover:bg-rose-100" : "bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100"
                         }`}
                       >
                         {employee.gpsTrackingEnabled ? "Turn Off" : "Turn On"}
@@ -187,13 +187,13 @@ export const EmployeeLocationsPage: React.FC = () => {
                     )}
                     <button
                       onClick={() => navigateToScreen?.("routes", { technicianId: employee.email })}
-                      className="px-2.5 py-1.5 rounded-lg text-[9.5px] font-black uppercase tracking-wider bg-blue-500/10 text-blue-400 border border-blue-500/20 hover:bg-blue-500/20"
+                      className="px-2.5 py-1.5 rounded-lg text-[9.5px] font-black uppercase tracking-wider bg-white text-[#315C9F] border border-[#9EC8EF] hover:bg-[#BDDDF8]"
                     >
                       View on Map
                     </button>
                     <button
                       onClick={() => setExpandedEmail(isExpanded ? null : employee.email)}
-                      className="px-2.5 py-1.5 rounded-lg text-[9.5px] font-black uppercase tracking-wider bg-slate-800 text-slate-300 border border-white/10 hover:bg-slate-700"
+                      className="px-2.5 py-1.5 rounded-lg text-[9.5px] font-black uppercase tracking-wider bg-white text-[#1F3557] border border-[#9EC8EF] hover:bg-[#BDDDF8]"
                     >
                       {isExpanded ? "Hide Routes" : "Routes"}
                     </button>
@@ -201,7 +201,7 @@ export const EmployeeLocationsPage: React.FC = () => {
                 </div>
 
                 {isExpanded && (
-                  <div className="border-t border-white/10 p-3.5 bg-slate-950/60">
+                  <div className="border-t border-[#9EC8EF] p-3.5 bg-[#C7E3FA]/60">
                     {/* RecentRoutesSection is themed for the app's light pages (Roster/Time Clock) -- wrapped in its own light card here so it stays legible on this page's dark background. */}
                     <div className="bg-white rounded-xl p-2">
                       <RecentRoutesSection businessId={loggedInUser?.isEmployee ? loggedInUser.businessEmail : loggedInUser?.email} employeeEmail={employee.email} />

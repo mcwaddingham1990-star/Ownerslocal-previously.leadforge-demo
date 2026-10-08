@@ -1,4 +1,5 @@
 import React, { useState, useMemo, useEffect, useRef } from "react";
+import { confirmJobCompletion } from "../lib/completionGuard";
 import { useAuth } from "../context/AuthContext";
 import { useDomainData } from "../context/DomainDataContext";
 import { useDomainActions } from "../hooks/useDomainActions";
@@ -138,7 +139,8 @@ export const InteractiveMapPage: React.FC<InteractiveMapPageProps> = ({
     setDocuments,
     completedJobsRevenue,
     employees,
-    timeClockLogs
+    timeClockLogs,
+    setBuildJobPrefill
   } = useDomainData();
   const { convertLeadToCustomer } = useDomainActions();
   const { navigateToScreen: onNavigateToScreen, logOperationalEvent, triggerNotification } = useNavTelemetry();
@@ -867,13 +869,17 @@ export const InteractiveMapPage: React.FC<InteractiveMapPageProps> = ({
   // (see the activeShifts/activeTechnicians/vehicles derivations above),
   // which already re-render this component whenever a new real fix lands.
 
-  // Handle estimate approvals & conversion directly from the map
+  // Handle estimate approvals from the map -- same universal Build Job
+  // popup every other "turn this into a job" entry point opens (Jobs page,
+  // Leads, Customers, Estimates), reached via the shared buildJobPrefill
+  // handoff instead of the map hand-rolling its own SchedulingEvent. That
+  // old inline version never set sourceEstimateId, which broke createJob's
+  // idempotency check and let the same accepted estimate be converted into
+  // duplicate jobs -- routing through the real popup removes that path
+  // entirely instead of just patching around it.
   const handleApproveEstimate = (estId: string) => {
     const est = estimates.find(e => e.id === estId);
     if (!est) return;
-
-    // 1. Update Estimate Status
-    setEstimates(prev => prev.map(e => e.id === estId ? { ...e, status: "Accepted" } : e));
 
     // Cross-reference the real customer record for real contact info --
     // an estimate itself only stores a customer name/company, not phone/
@@ -883,54 +889,19 @@ export const InteractiveMapPage: React.FC<InteractiveMapPageProps> = ({
       c => c.contact === est.customerName || c.company === est.company
     );
 
-    // 2. Automatically dispatch schedule event
-    const newJobId = `job_gen_${Date.now()}`;
-    const newJob = {
-      id: newJobId,
-      eventType: "Job" as const,
-      date: new Date().toISOString().split("T")[0],
-      startTime: "10:30",
-      endTime: "13:00",
-      customer: est.customerName,
-      customerPhone: matchedCustomer?.phone || "",
-      customerEmail: matchedCustomer?.email || "",
-      customerAddress: matchedCustomer?.address || est.address || est.company || "",
-      // No real rule exists for which employee should get an
-      // auto-created job -- unassigned for a real dispatcher to pick is
-      // honest; a hardcoded name never matching a real employee is not.
-      assignedEmployee: "",
-      location: matchedCustomer?.address || est.address || est.company || "",
-      priority: "Medium" as const,
-      notes: `Generated automatically via approved estimate ${est.number}. Amount: $${est.amount}`,
-      status: "Scheduled" as const,
-      // Same real expected-payout field every other job-creation path
-      // populates (manual scheduling, Jobs page, accepted-estimate
-      // conversion) -- the amount was already known here, just never
-      // carried into the structured field anything reading job value reads.
-      budget: est.amount
-    };
-
-    setSchedulingEvents(prev => [...prev, newJob]);
-
-    // Update selection
-    setSelectedPin({
-      id: newJobId,
-      type: "Job",
-      title: `Job: ${newJob.customer}`,
-      subtitle: `Assigned: Unassigned | Priority: Medium | Status: Scheduled`,
-      address: newJob.location,
-      lat: geocodeAddress(newJob.location, newJobId).lat,
-      lng: geocodeAddress(newJob.location, newJobId).lng,
-      raw: newJob
+    setBuildJobPrefill({
+      customerId: matchedCustomer?.id,
+      customerName: est.customerName,
+      customerPhone: matchedCustomer?.phone || est.phone,
+      customerEmail: matchedCustomer?.email,
+      customerAddress: matchedCustomer?.address || est.address || est.company,
+      description: est.projectSpecifics || undefined,
+      notes: `Approved from the Map. Amount: $${est.amount}`,
+      budget: est.amount,
+      sourceEstimateId: est.id,
+      source: matchedCustomer?.source || est.source
     });
-
-    if (logOperationalEvent) {
-      logOperationalEvent(
-        "Estimate Accepted",
-        `Estimate ${est.number} converted into live Scheduled Job ${newJobId}.`,
-        "📈"
-      );
-    }
+    onNavigateToScreen("jobs");
   };
 
   // Convert Lead -> Active Customer profile instantly. Uses the same
@@ -1012,7 +983,8 @@ export const InteractiveMapPage: React.FC<InteractiveMapPageProps> = ({
   };
 
   // Complete a Job directly from the Map UI
-  const handleCompleteJob = (jobId: string) => {
+  const handleCompleteJob = async (jobId: string) => {
+    if (!(await confirmJobCompletion(jobId))) return;
     setSchedulingEvents(prev => prev.map(evt => {
       if (evt.id === jobId) {
         return {
@@ -1350,10 +1322,10 @@ export const InteractiveMapPage: React.FC<InteractiveMapPageProps> = ({
         <button
           id="btn_toggle_heatmap"
           onClick={() => setShowRevenueHeatmap(!showRevenueHeatmap)}
-          className={`px-4 py-2.5 font-extrabold rounded-xl text-[11px] uppercase tracking-wider transition-all duration-200 cursor-pointer flex items-center gap-1.5 border ${
+          className={`px-4 py-2.5 font-extrabold rounded-xl text-xs uppercase tracking-wide transition-all duration-200 cursor-pointer flex items-center gap-1.5 border ${
             showRevenueHeatmap 
               ? "bg-pink-600 border-pink-400 text-white shadow-[0_4px_12px_rgba(219,39,119,0.3)]" 
-              : "bg-slate-800/80 border-white/10 text-slate-300 hover:bg-slate-800"
+              : "bg-slate-950 border-slate-600 text-white hover:bg-slate-800 hover:border-slate-400"
           }`}
         >
           <Activity className="w-4 h-4" /> Revenue Heatmap Overlay
@@ -1453,13 +1425,13 @@ export const InteractiveMapPage: React.FC<InteractiveMapPageProps> = ({
           {/* EDITABLE SERVICE TERRITORIES CONTROLLER */}
           <div className="bg-slate-900/80 backdrop-blur-xl border border-white/10 rounded-[28px] p-5 shadow-lg space-y-4">
             <h3 className="text-xs font-extrabold text-slate-200 uppercase tracking-wider border-b border-white/10 pb-2">
-              Territories &amp; Sectors
+              Service Areas
             </h3>
 
             <button
               type="button"
               onClick={() => setIsCreatingTerritory(value => !value)}
-              className="w-full rounded-xl bg-blue-600 px-3 py-2 text-[10px] font-extrabold uppercase tracking-wider text-white transition-colors hover:bg-blue-500"
+              className="w-full rounded-xl bg-blue-600 px-3 py-2.5 text-xs font-extrabold uppercase tracking-wide text-white transition-colors hover:bg-blue-500"
             >
               <Plus className="mr-1 inline h-3 w-3" /> Create Territory
             </button>
@@ -1486,8 +1458,8 @@ export const InteractiveMapPage: React.FC<InteractiveMapPageProps> = ({
                   />
                 </label>
                 <div className="flex gap-2">
-                  <button type="button" onClick={() => setIsCreatingTerritory(false)} className="flex-1 rounded-lg bg-slate-700 py-1.5 text-[10px] font-bold text-slate-200">Cancel</button>
-                  <button type="button" onClick={createTerritory} disabled={!newTerritoryName.trim()} className="flex-1 rounded-lg bg-emerald-600 py-1.5 text-[10px] font-bold text-white disabled:opacity-40">Save</button>
+                  <button type="button" onClick={() => setIsCreatingTerritory(false)} className="flex-1 rounded-lg border border-slate-500 bg-slate-800 py-2 text-[11px] font-extrabold text-white">Cancel</button>
+                  <button type="button" onClick={createTerritory} disabled={!newTerritoryName.trim()} className="flex-1 rounded-lg bg-emerald-600 py-2 text-[11px] font-extrabold text-white disabled:opacity-40">Save</button>
                 </div>
               </div>
             )}
@@ -1496,8 +1468,8 @@ export const InteractiveMapPage: React.FC<InteractiveMapPageProps> = ({
               {serviceTerritories.length === 0 && (
                 <div className="rounded-2xl border border-dashed border-white/10 bg-slate-800/30 px-4 py-5 text-center">
                   <MapPin className="mx-auto mb-2 h-5 w-5 text-slate-500" />
-                  <p className="text-xs font-bold text-slate-300">No service territories created</p>
-                  <p className="mt-1 text-[10px] leading-relaxed text-slate-500">Territories you create will appear here. OwnersLOCAL will never fill this area with demo data.</p>
+                  <p className="text-xs font-bold text-slate-300">No service areas yet.</p>
+                  <p className="mt-1 text-[10px] leading-relaxed text-slate-500">Create a service area to show where your business accepts jobs.</p>
                 </div>
               )}
               {serviceTerritories.map(t => (
@@ -1589,10 +1561,10 @@ export const InteractiveMapPage: React.FC<InteractiveMapPageProps> = ({
                     setFilterType(type);
                     setSelectedPin(null);
                   }}
-                  className={`px-3 py-1.5 rounded-lg text-[10px] font-extrabold uppercase tracking-wider border cursor-pointer transition-colors ${
+                  className={`px-3 py-2 rounded-lg text-[11px] font-extrabold uppercase tracking-wide border cursor-pointer transition-colors ${
                     filterType === type
                       ? "bg-blue-600 border-blue-400 text-white shadow-md shadow-blue-500/20"
-                      : "bg-slate-800/70 border-white/5 text-slate-300 hover:bg-slate-800 hover:text-white"
+                      : "bg-slate-950 border-slate-600 text-white hover:bg-slate-800 hover:border-slate-400"
                   }`}
                 >
                   {type === "All" ? "🌍 All Layers" : `${type}s`}
@@ -1609,7 +1581,7 @@ export const InteractiveMapPage: React.FC<InteractiveMapPageProps> = ({
               <select
                 value={filterJobStatus}
                 onChange={(e) => setFilterJobStatus(e.target.value)}
-                className="bg-slate-800 border border-white/10 rounded px-2.5 py-1 text-xs text-white"
+                className="map-filter-select bg-slate-800 border border-white/10 rounded px-2.5 py-1 text-xs text-white"
               >
                 <option value="All">All Jobs</option>
                 <option value="Scheduled">Scheduled</option>
@@ -1626,7 +1598,7 @@ export const InteractiveMapPage: React.FC<InteractiveMapPageProps> = ({
               <select
                 value={filterPriority}
                 onChange={(e) => setFilterPriority(e.target.value)}
-                className="bg-slate-800 border border-white/10 rounded px-2.5 py-1 text-xs text-white"
+                className="map-filter-select bg-slate-800 border border-white/10 rounded px-2.5 py-1 text-xs text-white"
               >
                 <option value="All">All Priorities</option>
                 <option value="High">Emergency / High</option>
@@ -1640,7 +1612,7 @@ export const InteractiveMapPage: React.FC<InteractiveMapPageProps> = ({
               <select
                 value={filterLeadStatus}
                 onChange={(e) => setFilterLeadStatus(e.target.value)}
-                className="bg-slate-800 border border-white/10 rounded px-2.5 py-1 text-xs text-white"
+                className="map-filter-select bg-slate-800 border border-white/10 rounded px-2.5 py-1 text-xs text-white"
               >
                 <option value="All">All Leads</option>
                 <option value="New">New</option>
@@ -1657,7 +1629,7 @@ export const InteractiveMapPage: React.FC<InteractiveMapPageProps> = ({
               <select
                 value={filterCategory}
                 onChange={(e) => setFilterCategory(e.target.value)}
-                className="bg-slate-800 border border-white/10 rounded px-2.5 py-1 text-xs text-white"
+                className="map-filter-select bg-slate-800 border border-white/10 rounded px-2.5 py-1 text-xs text-white"
               >
                 <option value="All">All Sectors</option>
                 <option value="Residential">Residential</option>
@@ -1681,7 +1653,7 @@ export const InteractiveMapPage: React.FC<InteractiveMapPageProps> = ({
                     setFilterType("Technician");
                   }
                 }}
-                className="bg-slate-800 border border-white/10 rounded px-2.5 py-1 text-xs text-white"
+                className="map-filter-select bg-slate-800 border border-white/10 rounded px-2.5 py-1 text-xs text-white"
               >
                 <option value="All">All Technicians</option>
                 {activeTechnicians.map(tech => (
@@ -1692,7 +1664,7 @@ export const InteractiveMapPage: React.FC<InteractiveMapPageProps> = ({
 
             <button
               onClick={() => onNavigateToScreen?.("employee_locations")}
-              className="px-3 py-2 rounded-xl text-[10px] font-black border border-emerald-500/40 text-emerald-400 hover:bg-emerald-500/10 flex items-center gap-1.5"
+              className="px-3 py-2 rounded-xl text-[11px] font-black border border-emerald-400 bg-emerald-950/80 text-emerald-200 hover:bg-emerald-900 flex items-center gap-1.5"
               title="Full GPS employee locations interface -- roster status, GPS permissions, and route history"
             >
               <Navigation className="w-3.5 h-3.5" /> Open Employee Locations
@@ -1709,7 +1681,7 @@ export const InteractiveMapPage: React.FC<InteractiveMapPageProps> = ({
                   <select
                     value={selectedRouteId || ""}
                     onChange={(e) => setSelectedRouteId(e.target.value || null)}
-                    className="bg-slate-800 border border-white/10 rounded px-2.5 py-1 text-xs text-white"
+                    className="map-filter-select bg-slate-800 border border-white/10 rounded px-2.5 py-1 text-xs text-white"
                   >
                     {technicianRoutes.map(r => (
                       <option key={r.id} value={r.id}>
@@ -1728,13 +1700,13 @@ export const InteractiveMapPage: React.FC<InteractiveMapPageProps> = ({
                   setIsMultiSelectMode(!isMultiSelectMode);
                   setSelectedBasketIds([]);
                 }}
-                className={`px-3 py-1 rounded-lg text-[10px] font-extrabold uppercase tracking-wider transition-all cursor-pointer ${
+                className={`px-3 py-2 rounded-lg text-[11px] font-extrabold uppercase tracking-wide border transition-all cursor-pointer ${
                   isMultiSelectMode 
-                    ? "bg-amber-500 text-slate-900 shadow-md" 
-                    : "bg-slate-800 hover:bg-slate-700 text-slate-200"
+                    ? "bg-amber-400 border-amber-300 text-slate-950 shadow-md" 
+                    : "bg-slate-950 border-slate-600 hover:bg-slate-800 text-white"
                 }`}
               >
-                {isMultiSelectMode ? "🔒 Exit Lasso Mode" : "🎯 Lasso / Multi-Select Mode"}
+                {isMultiSelectMode ? "🔒 Exit Lasso Mode" : "🎯 Select Several Map Pins"}
               </button>
             </div>
 
@@ -2107,7 +2079,7 @@ export const InteractiveMapPage: React.FC<InteractiveMapPageProps> = ({
                 <div>
                   <h4 className="text-[11px] font-extrabold text-white uppercase tracking-wider">Map Results</h4>
                   <p className="text-[10px] text-slate-400 font-bold">
-                    Showing {filteredPins.length} mapped records.
+                    {filteredPins.length === 0 ? "No customers, leads, jobs, or employees are ready to show on the map." : `Showing ${filteredPins.length} mapped records.`}
                   </p>
                 </div>
               </div>
@@ -2156,7 +2128,7 @@ export const InteractiveMapPage: React.FC<InteractiveMapPageProps> = ({
                   </div>
                   <button
                     onClick={() => setSelectedBasketIds([])}
-                    className="text-xs text-slate-400 hover:text-white underline cursor-pointer"
+                    className="text-xs font-bold text-white hover:text-slate-200 underline cursor-pointer"
                   >
                     Clear Selection
                   </button>
@@ -2200,7 +2172,7 @@ export const InteractiveMapPage: React.FC<InteractiveMapPageProps> = ({
                       if (!recipients.length) { triggerNotification?.("No email addresses on file for the selected jobs."); return; }
                       composeEmail({ bcc: recipients, subject: "Job update" });
                     }}
-                    className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 font-extrabold text-[10px] uppercase rounded-lg border border-white/5 cursor-pointer"
+                    className="px-3 py-2 bg-slate-950 hover:bg-slate-800 text-white font-extrabold text-[11px] uppercase rounded-lg border border-slate-600 cursor-pointer"
                   >
                     📧 Mass Email
                   </button>
@@ -2210,14 +2182,14 @@ export const InteractiveMapPage: React.FC<InteractiveMapPageProps> = ({
                       if (!recipients.length) { triggerNotification?.("No phone numbers on file for the selected jobs."); return; }
                       composeSms({ to: recipients[0], body: recipients.length > 1 ? `(also selected: ${recipients.slice(1).join(", ")})` : undefined });
                     }}
-                    className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 font-extrabold text-[10px] uppercase rounded-lg border border-white/5 cursor-pointer"
+                    className="px-3 py-2 bg-slate-950 hover:bg-slate-800 text-white font-extrabold text-[11px] uppercase rounded-lg border border-slate-600 cursor-pointer"
                   >
                     💬 Mass SMS Text
                   </button>
                   {selectedBasketIds.length >= 2 && (
                     <button
                       onClick={handleDispatchOptimizedRoute}
-                      className="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white font-extrabold text-[10px] uppercase rounded-lg shadow-md cursor-pointer ml-auto flex items-center gap-1"
+                      className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-extrabold text-[11px] uppercase rounded-lg shadow-md cursor-pointer ml-auto flex items-center gap-1"
                     >
                       <Zap className="w-3.5 h-3.5 text-yellow-300" /> One-Click Dispatch Route
                     </button>
@@ -2284,7 +2256,7 @@ export const InteractiveMapPage: React.FC<InteractiveMapPageProps> = ({
               <div className="bg-slate-800/50 border border-white/5 p-3 rounded-2xl">
                 <div className="flex justify-between items-start">
                   <span className="p-1 bg-cyan-500/10 rounded-lg"><Truck className="w-4 h-4 text-cyan-400" /></span>
-                  <span className="text-xs text-slate-400 font-bold font-sans">Fleet Cars</span>
+                  <span className="text-xs text-slate-400 font-bold font-sans">Vehicles</span>
                 </div>
                 <p className="text-xl font-extrabold text-white mt-1.5">{counts.vehicles}</p>
               </div>
@@ -2293,11 +2265,11 @@ export const InteractiveMapPage: React.FC<InteractiveMapPageProps> = ({
 
             <div className="border-t border-white/10 pt-3 space-y-2">
               <div className="flex justify-between items-center text-xs text-slate-400 font-bold">
-                <span>Revenue Generated:</span>
+                <span>Revenue:</span>
                 <span className="text-emerald-400 font-extrabold">${counts.revenueToday.toLocaleString()}</span>
               </div>
               <div className="flex justify-between items-center text-xs text-slate-400 font-bold">
-                <span>Active Emergency Alerts:</span>
+                <span>Emergency Alerts:</span>
                 <span className={`px-2 py-0.5 rounded text-[10px] ${counts.emergency > 0 ? "bg-rose-500/20 text-rose-400 border border-rose-500/30 animate-pulse" : "bg-slate-800 text-slate-400"}`}>
                   {counts.emergency} Alert{counts.emergency !== 1 ? "s" : ""}
                 </span>
@@ -2452,7 +2424,7 @@ export const InteractiveMapPage: React.FC<InteractiveMapPageProps> = ({
                           if (!phone) { triggerNotification?.("No phone number on file."); return; }
                           callNumber(phone);
                         }}
-                        className="px-3 py-2 bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 border border-blue-500/20 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center justify-center gap-1"
+                        className="px-3 py-2 bg-blue-700 hover:bg-blue-600 text-white border border-blue-400 rounded-xl text-xs font-extrabold transition-all cursor-pointer flex items-center justify-center gap-1"
                       >
                         <Phone className="w-3.5 h-3.5" /> Call Client
                       </button>
@@ -2462,7 +2434,7 @@ export const InteractiveMapPage: React.FC<InteractiveMapPageProps> = ({
                           if (!phone) { triggerNotification?.("No phone number on file."); return; }
                           composeSms({ to: phone });
                         }}
-                        className="px-3 py-2 bg-purple-600/20 hover:bg-purple-600/30 text-purple-400 border border-purple-500/20 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center justify-center gap-1"
+                        className="px-3 py-2 bg-purple-700 hover:bg-purple-600 text-white border border-purple-400 rounded-xl text-xs font-extrabold transition-all cursor-pointer flex items-center justify-center gap-1"
                       >
                         <Send className="w-3.5 h-3.5" /> SMS Text
                       </button>
@@ -2472,7 +2444,7 @@ export const InteractiveMapPage: React.FC<InteractiveMapPageProps> = ({
                           if (!email) { triggerNotification?.("No email address on file."); return; }
                           composeEmail({ to: email });
                         }}
-                        className="px-3 py-2 bg-yellow-500/10 hover:bg-yellow-500/20 text-yellow-400 border border-yellow-500/20 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center justify-center gap-1"
+                        className="px-3 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 border border-amber-300 rounded-xl text-xs font-extrabold transition-all cursor-pointer flex items-center justify-center gap-1"
                       >
                         <Mail className="w-3.5 h-3.5" /> Send Email
                       </button>

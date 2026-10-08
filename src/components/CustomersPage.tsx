@@ -41,7 +41,7 @@ import {
 } from "lucide-react";
 
 export type { Customer } from "../types/domain";
-import type { Customer, DocumentItem, WorkOrder, MissedCallEvent } from "../types/domain";
+import type { Customer, DocumentItem, WorkOrder, MissedCallEvent, TextMessage } from "../types/domain";
 import type { ProjectCompletionPlan } from "../types/completion";
 import { useFirestoreCollection } from "../hooks/useFirestoreCollection";
 import { WorkOrderBuilder } from "./WorkOrderBuilder";
@@ -50,11 +50,13 @@ import { MembershipBuilder } from "./MembershipBuilder";
 import type { Membership } from "../types/membership";
 import { CustomerPortalControls } from "./CustomerPortalControls";
 import { ReviewRequestControls } from "./ReviewRequestControls";
-import { buildCustomerProfilePdf, buildEstimatePdf, buildInvoicePdf, buildTextDocumentPdf, buildCallTextHistoryPdf, mergePdfs, base64ToBytes, bytesToBase64 } from "../lib/pdfExport";
+import { buildCustomerProfilePdf, buildEstimatePdf, buildInvoicePdf, buildLeadPdf, buildTextDocumentPdf, buildCallTextHistoryPdf, mergePdfs, base64ToBytes, bytesToBase64 } from "../lib/pdfExport";
 import { MAX_INLINE_BASE64_LENGTH } from "../lib/firestoreDocumentLimits";
 import { composeEmail, composeSms, callNumber } from "../lib/deviceHandoff";
 import { BulkImportModal } from "./BulkImportModal";
+import { MarketingAttributionView } from "./MarketingAttributionView";
 import { normalizePhoneForMatch, normalizeEmailForMatch, type ImportFieldSpec, type DuplicateCheckResult } from "../lib/spreadsheetImport";
+import { normalizeContactPhone, normalizeEstimateCompany } from "../lib/contactNormalization";
 
 type CustomerImportKey = "company" | "contact" | "phone" | "email" | "address" | "type" | "status" | "vip";
 const CUSTOMER_IMPORT_FIELDS: ImportFieldSpec<CustomerImportKey>[] = [
@@ -83,7 +85,7 @@ export const INITIAL_CUSTOMERS: Customer[] = [];
 export const CustomersPage: React.FC<CustomersPageProps> = ({
   onOpenPlaceholder
 }) => {
-  const { customers: propCustomers, setCustomers: propSetCustomers, estimates, invoices, schedulingEvents, documents, setDocuments, setGeneratedPdfDraft, setPendingSignatureCapture, preSelectedCustomerId, setPreSelectedCustomerId, businessProfile, memberships, setMemberships } = useDomainData();
+  const { customers: propCustomers, setCustomers: propSetCustomers, estimates, invoices, schedulingEvents, documents, setDocuments, setGeneratedPdfDraft, setPendingSignatureCapture, preSelectedCustomerId, setPreSelectedCustomerId, businessProfile, memberships, setMemberships, leads, setEstimatePrefill, setBuildJobPrefill, timeClockLogs, employees, transactions, payrollWorkweekStart } = useDomainData();
   const [isWorkOrderBuilderOpen, setIsWorkOrderBuilderOpen] = useState(false);
   const [workOrderPrefill, setWorkOrderPrefill] = useState<Partial<WorkOrder> | undefined>(undefined);
   const [isMembershipPickerOpen, setIsMembershipPickerOpen] = useState(false);
@@ -119,27 +121,40 @@ export const CustomersPage: React.FC<CustomersPageProps> = ({
   const setCustomers = propSetCustomers || setLocalCustomers;
   const pendingCustomers = useMemo(() => customers.filter(customer => customer.pendingConfirmation), [customers]);
   // Real "Compile Documents": builds one actual merged PDF containing the
-  // customer's estimate(s), invoice(s), job planning/summary + the
-  // completing employee's notes and checklist, and any receipts/other
-  // documents on file -- not a text list of ID numbers.
+  // customer's originating lead, estimate(s), job planning/summary + the
+  // completing employee's notes and checklist, the real call/text
+  // conversation history, invoice(s), and any receipts/other documents on
+  // file -- not a text list of ID numbers. Section order matches how an
+  // owner would actually read the story of this customer: Lead -> Estimate
+  // -> Job Details -> Call & Text History -> Invoicing.
   const compileCustomerDocuments = async (customer: Customer) => {
     const names = [customer.id, customer.contact, customer.company].filter(Boolean);
     const customerEstimates = estimates.filter(item => names.includes(item.customerName) || names.includes(item.company));
     const customerInvoices = invoices.filter(item => names.includes(item.customer));
     const customerJobs = schedulingEvents.filter(item => names.includes(item.customer) || item.customerId === customer.id);
     const customerDocs = documents.filter(item => names.includes(item.customer));
+    const originatingLead = customer.sourceLeadId
+      ? leads.find(l => l.id === customer.sourceLeadId)
+      : leads.find(l => names.includes(l.name) || names.includes(l.company));
+    const targetPhoneDigits = normalizePhoneDigits(customer.phone || "");
+    const customerCalls = allCallEvents
+      .filter(event => event.customerId === customer.id || (targetPhoneDigits && normalizePhoneDigits(event.phoneNumber) === targetPhoneDigits))
+      .sort((a, b) => a.callTimestamp.localeCompare(b.callTimestamp));
+    const customerTexts = allTextMessages
+      .filter(msg => msg.customerId === customer.id || (targetPhoneDigits && normalizePhoneDigits(msg.phoneNumber) === targetPhoneDigits))
+      .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
     triggerNotification("Compiling documents into one PDF…");
 
     const parts: Uint8Array[] = [];
     parts.push(await buildCustomerProfilePdf(customer, { estimates: customerEstimates, invoices: customerInvoices }, businessProfile));
 
+    if (originatingLead) {
+      parts.push(await buildLeadPdf(originatingLead, businessProfile));
+    }
+
     for (const est of customerEstimates) {
       const savedDoc = customerDocs.find(d => d.estimateId === est.id && (d as any).pdfBase64);
       parts.push(savedDoc ? base64ToBytes((savedDoc as any).pdfBase64) : await buildEstimatePdf(est, customer, businessProfile));
-    }
-    for (const inv of customerInvoices) {
-      const savedDoc = customerDocs.find(d => d.invoiceId === inv.id && (d as any).pdfBase64);
-      parts.push(savedDoc ? base64ToBytes((savedDoc as any).pdfBase64) : await buildInvoicePdf(inv, customer, businessProfile));
     }
     for (const job of customerJobs) {
       const plan = completionPlans.find(p => p.jobId === job.id);
@@ -161,6 +176,15 @@ export const CustomersPage: React.FC<CustomersPageProps> = ({
         });
       }
       parts.push(await buildTextDocumentPdf(`Job Summary — ${job.title || job.jobNumber || job.id}`, sections, businessProfile));
+    }
+
+    if (customerCalls.length || customerTexts.length) {
+      parts.push(await buildCallTextHistoryPdf(customer, customerCalls, customerTexts, businessProfile));
+    }
+
+    for (const inv of customerInvoices) {
+      const savedDoc = customerDocs.find(d => d.invoiceId === inv.id && (d as any).pdfBase64);
+      parts.push(savedDoc ? base64ToBytes((savedDoc as any).pdfBase64) : await buildInvoicePdf(inv, customer, businessProfile));
     }
     // Receipts and any other real document already on file for this
     // customer/job that isn't one of the estimates/invoices already merged
@@ -193,7 +217,7 @@ export const CustomersPage: React.FC<CustomersPageProps> = ({
       status: "Draft",
       isFavorite: false,
       isArchived: false,
-      notes: `Compiled from ${customerEstimates.length} estimate(s), ${customerInvoices.length} invoice(s), ${customerJobs.length} job(s).`,
+      notes: `Compiled from ${originatingLead ? "1 lead, " : ""}${customerEstimates.length} estimate(s), ${customerJobs.length} job(s), ${customerCalls.length + customerTexts.length} call/text record(s), ${customerInvoices.length} invoice(s).`,
       tags: ["Compiled", "Customer Package"],
       estimateId: "None",
       invoiceId: "None",
@@ -222,7 +246,7 @@ export const CustomersPage: React.FC<CustomersPageProps> = ({
       pdfBase64
     });
     onNavigateToScreen("documents");
-    if (logOperationalEvent) logOperationalEvent("Documents Compiled", `${filename} (${customerEstimates.length} estimates, ${customerInvoices.length} invoices, ${customerJobs.length} jobs)`, "📎");
+    if (logOperationalEvent) logOperationalEvent("Documents Compiled", `${filename} (${originatingLead ? "lead, " : ""}${customerEstimates.length} estimates, ${customerJobs.length} jobs, ${customerCalls.length + customerTexts.length} calls/texts, ${customerInvoices.length} invoices)`, "📎");
   };
 
   useEffect(() => {
@@ -250,6 +274,17 @@ export const CustomersPage: React.FC<CustomersPageProps> = ({
     if (match) setSelectedCustomer(match);
     setPreSelectedCustomerId(undefined);
   }, [preSelectedCustomerId, customers, setPreSelectedCustomerId]);
+
+  const openBuildEstimateForCustomer = (customer: Customer) => {
+    setEstimatePrefill({
+      customerName: customer.contact || customer.company,
+      company: customer.company,
+      phone: customer.phone,
+      address: customer.address,
+      sourceLeadId: customer.sourceLeadId
+    });
+    onNavigateToScreen("estimates");
+  };
 
   const openCollectSignatures = (customer: Customer) => {
     setPendingSignatureCapture({ customerName: customer.contact || customer.company, customerPhone: customer.phone, customerEmail: customer.email });
@@ -340,9 +375,9 @@ export const CustomersPage: React.FC<CustomersPageProps> = ({
         const vipStr = (row.vip || "").toLowerCase();
         const customer: Customer = {
           id: "cust_import_" + Math.random().toString(36).substring(2, 9),
-          company: company || contact,
+          company,
           contact: contact || company,
-          phone: row.phone?.trim() || "",
+          phone: normalizeContactPhone(row.phone?.trim() || ""),
           email: row.email?.trim() || "",
           address: row.address?.trim() || "No address supplied",
           openJobs: 0,
@@ -403,11 +438,11 @@ export const CustomersPage: React.FC<CustomersPageProps> = ({
 
   const openEditModal = (cust: Customer) => {
     setSelectedCustomer(cust);
-    setFormCompany(cust.company);
+    setFormCompany(normalizeEstimateCompany(cust.contact, cust.company));
     setFormContact(cust.contact);
     
-    // Parse phones
-    const phones = (cust.phone || "").split(",").map(p => p.trim()).filter(Boolean);
+    // Parse phones after removing duplicate/corrupted copies.
+    const phones = normalizeContactPhone(cust.phone || "").split(",").map(p => p.trim()).filter(Boolean);
     setFormPhones(phones.length > 0 ? phones : [""]);
     
     setFormEmail(cust.email);
@@ -441,9 +476,10 @@ export const CustomersPage: React.FC<CustomersPageProps> = ({
   };
 
   // Builds a real PDF of the customer profile (contact info, account
-  // summary, estimates/invoices on file) right now, saves it to the
-  // Documents Hub, then opens the PDF Editor for review/signing.
-  const generateCustomerPdf = async (cust: Customer) => {
+  // summary, estimates/invoices on file) right now and saves it to the
+  // Documents Hub. Shared by "Save (and Store as PDF)" (stops here) and
+  // "Save & Generate PDF" (goes on to open the PDF Editor) below.
+  const buildAndStoreCustomerPdf = async (cust: Customer) => {
     const customerEstimates = estimates.filter(item => [cust.id, cust.contact, cust.company].filter(Boolean).includes(item.customerName) || [cust.id, cust.contact, cust.company].filter(Boolean).includes(item.company));
     const customerInvoices = invoices.filter(item => [cust.id, cust.contact, cust.company].filter(Boolean).includes(item.customer));
     const bytes = await buildCustomerProfilePdf(cust, { estimates: customerEstimates, invoices: customerInvoices }, businessProfile);
@@ -481,6 +517,11 @@ export const CustomersPage: React.FC<CustomersPageProps> = ({
       triggerNotification("This PDF is too large to store inline -- the Documents record was saved, but regenerate it for a fresh copy since the file itself wasn't attached.");
     }
     setDocuments(prev => [...prev, newDoc]);
+    return { pdfBase64, filename };
+  };
+
+  const generateCustomerPdf = async (cust: Customer) => {
+    const { pdfBase64, filename } = await buildAndStoreCustomerPdf(cust);
     setGeneratedPdfDraft({
       filename,
       title: "Customer Record",
@@ -497,6 +538,13 @@ export const CustomersPage: React.FC<CustomersPageProps> = ({
     if (logOperationalEvent) logOperationalEvent("Customer PDF Generated", filename, "📄");
   };
 
+  // "Save (and Store as PDF)" -- builds + stores the PDF into Documents same
+  // as above, but stays on this page instead of opening the PDF Editor.
+  const storeCustomerPdf = async (cust: Customer) => {
+    const { filename } = await buildAndStoreCustomerPdf(cust);
+    if (logOperationalEvent) logOperationalEvent("Customer PDF Stored", `${filename} saved to Documents`, "📄");
+  };
+
   // Read-only: every call/text the Missed Call Text-Back Android app has
   // logged for this business (it writes directly to Firestore -- see
   // CrmLinker.kt -- the web app never writes to this collection). Matched
@@ -505,6 +553,10 @@ export const CustomersPage: React.FC<CustomersPageProps> = ({
   // predates this customer being added (or that matched nothing at the
   // time) still shows up once the number is on file.
   const [allCallEvents] = useFirestoreCollection<MissedCallEvent>("missed_call_events", businessId);
+  // Real two-way SMS -- SmsReceiver.kt (incoming) / OutgoingSmsObserver.kt
+  // (outgoing, including a manual reply typed into the phone's native
+  // Messages app after "Reply" opens it) in the Android companion app.
+  const [allTextMessages] = useFirestoreCollection<TextMessage>("text_messages", businessId);
   const normalizePhoneDigits = (raw: string) => {
     const digits = (raw || "").replace(/\D/g, "");
     return digits.length > 10 ? digits.slice(-10) : digits;
@@ -516,13 +568,28 @@ export const CustomersPage: React.FC<CustomersPageProps> = ({
       .filter(event => event.customerId === selectedCustomer.id || (targetDigits && normalizePhoneDigits(event.phoneNumber) === targetDigits))
       .sort((a, b) => b.callTimestamp.localeCompare(a.callTimestamp));
   }, [allCallEvents, selectedCustomer]);
+  const customerTextMessages = useMemo(() => {
+    if (!selectedCustomer) return [];
+    const targetDigits = normalizePhoneDigits(selectedCustomer.phone || "");
+    return allTextMessages
+      .filter(msg => msg.customerId === selectedCustomer.id || (targetDigits && normalizePhoneDigits(msg.phoneNumber) === targetDigits))
+      .sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+  }, [allTextMessages, selectedCustomer]);
+  // A single chronological feed mixing calls and real texts -- the actual
+  // "conversation" this customer's card is meant to show, newest first.
+  type TimelineEntry = { sortKey: string; kind: "call"; event: MissedCallEvent } | { sortKey: string; kind: "text"; event: TextMessage };
+  const customerTimeline = useMemo<TimelineEntry[]>(() => {
+    const calls: TimelineEntry[] = customerCallEvents.map(event => ({ sortKey: event.callTimestamp, kind: "call", event }));
+    const texts: TimelineEntry[] = customerTextMessages.map(event => ({ sortKey: event.timestamp, kind: "text", event }));
+    return [...calls, ...texts].sort((a, b) => b.sortKey.localeCompare(a.sortKey));
+  }, [customerCallEvents, customerTextMessages]);
 
   // "Convert to PDF" on the Call & Text History panel -- saves into
   // Documents tagged with this customer's name, same convention every other
   // customer PDF here uses, so it's automatically swept up by "Compile
   // Documents" above with no extra wiring needed there.
-  const generateCallTextHistoryPdf = async (cust: Customer, events: MissedCallEvent[]) => {
-    const bytes = await buildCallTextHistoryPdf(cust, events, businessProfile);
+  const generateCallTextHistoryPdf = async (cust: Customer, events: MissedCallEvent[], texts: TextMessage[]) => {
+    const bytes = await buildCallTextHistoryPdf(cust, events, texts, businessProfile);
     const pdfBase64 = bytesToBase64(bytes);
     const filename = `${(cust.company || cust.contact || "Customer").replace(/[\\/:*?"<>|]+/g, "-")}-call-text-history.pdf`;
     const docId = `doc_calltext_${cust.id}_${Date.now()}`;
@@ -541,7 +608,7 @@ export const CustomersPage: React.FC<CustomersPageProps> = ({
       status: "Draft",
       isFavorite: false,
       isArchived: false,
-      notes: `Call & Text History compiled from ${events.length} logged call(s).`,
+      notes: `Call & Text History compiled from ${events.length} call(s) and ${texts.length} text(s).`,
       tags: ["Customer", "Call History"],
       estimateId: "None",
       invoiceId: "None",
@@ -557,18 +624,18 @@ export const CustomersPage: React.FC<CustomersPageProps> = ({
     if (logOperationalEvent) logOperationalEvent("Call & Text History PDF Generated", filename, "📄");
   };
 
-  const handleAddCustomer = (openPdf = false) => {
+  const handleAddCustomer = (action: "save" | "pdf" | "pdf-store" = "save") => {
     if (!formContact.trim()) return;
     if (!canCreateCustomer) {
       triggerNotification("You don't have permission to add customers.");
       return;
     }
-    const phoneStr = formPhones.map(p => p.trim()).filter(Boolean).join(", ");
+    const phoneStr = normalizeContactPhone(formPhones.map(p => p.trim()).filter(Boolean).join(", "));
     const combinedAddress = [formAddress.trim(), formCityState.trim(), formZip.trim()].filter(Boolean).join(", ");
 
     const newCust: Customer = {
       id: "cust_" + Math.random().toString(36).substring(2, 9),
-      company: formCompany.trim() || formContact.trim() + " Inc",
+      company: formCompany.trim(),
       contact: formContact.trim(),
       phone: phoneStr,
       email: formEmail.trim(),
@@ -590,16 +657,17 @@ export const CustomersPage: React.FC<CustomersPageProps> = ({
     if (logOperationalEvent) {
       logOperationalEvent("Customer Added", `New Customer '${newCust.contact}' registered`, "👤", { screen: "customers", customerId: newCust.id });
     }
-    if (openPdf) void generateCustomerPdf(newCust);
+    if (action === "pdf") void generateCustomerPdf(newCust);
+    if (action === "pdf-store") void storeCustomerPdf(newCust);
   };
 
-  const handleEditCustomer = (openPdf = false) => {
+  const handleEditCustomer = (action: "save" | "pdf" | "pdf-store" = "save") => {
     if (!selectedCustomer) return;
-    const phoneStr = formPhones.map(p => p.trim()).filter(Boolean).join(", ");
+    const phoneStr = normalizeContactPhone(formPhones.map(p => p.trim()).filter(Boolean).join(", "));
     const combinedAddress = [formAddress.trim(), formCityState.trim(), formZip.trim()].filter(Boolean).join(", ");
     const updated: Customer = {
       ...selectedCustomer,
-      company: formCompany.trim() || formContact.trim() + " Inc",
+      company: formCompany.trim(),
       contact: formContact.trim(),
       phone: phoneStr,
       email: formEmail.trim(),
@@ -617,7 +685,8 @@ export const CustomersPage: React.FC<CustomersPageProps> = ({
     if (logOperationalEvent) {
       logOperationalEvent("Customer Updated", `Customer Profile for '${formContact}' updated`, "📝", { screen: "customers", customerId: updated.id });
     }
-    if (openPdf) void generateCustomerPdf(updated);
+    if (action === "pdf") void generateCustomerPdf(updated);
+    if (action === "pdf-store") void storeCustomerPdf(updated);
   };
 
   const handleDeleteCustomer = () => {
@@ -723,10 +792,10 @@ export const CustomersPage: React.FC<CustomersPageProps> = ({
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
           <div>
             <h2 className="text-xl font-display font-extrabold text-[#1F3557] tracking-tight uppercase">
-              Customer Database
+              Customers
             </h2>
             <p className="text-xs text-[#5E7393] font-sans font-semibold mt-1">
-              Complete operational log, filters, and client statistics hub
+              Find customers, view their history, and manage their jobs.
             </p>
           </div>
           <div className="flex flex-wrap gap-2.5">
@@ -771,10 +840,10 @@ export const CustomersPage: React.FC<CustomersPageProps> = ({
               <button
                 onClick={() => onOpenAIAnalysis("customers", "Customers")}
                 className="px-4 py-2 bg-[#EAF5FF] hover:bg-[#BDDDF8] border border-[#9EC8EF] text-[#1F3557] font-bold rounded-xl text-xs uppercase tracking-wider transition-colors cursor-pointer flex items-center gap-1.5"
-                title="AI Option"
+                title="Ask AI About Customers"
               >
                 <Sparkles className="w-3.5 h-3.5 text-amber-500 animate-pulse" />
-                AI Option
+                Ask AI About Customers
               </button>
             )}
           </div>
@@ -904,24 +973,41 @@ export const CustomersPage: React.FC<CustomersPageProps> = ({
             </h3>
             <div className="grid grid-cols-2 lg:grid-cols-1 gap-1.5">
               <button
-                onClick={() => onNavigateToScreen("estimates", { customerId: selectedCustomer?.id })}
+                onClick={() => {
+                  if (selectedCustomer) {
+                    openBuildEstimateForCustomer(selectedCustomer);
+                    return;
+                  }
+                  setEstimatePrefill({ customerName: "" });
+                  onNavigateToScreen("estimates");
+                }}
                 className="px-3 py-2 bg-[#EAF5FF] hover:bg-[#BDDDF8] border border-[#9EC8EF] rounded-xl text-[11px] font-bold text-[#1F3557] text-left transition-colors cursor-pointer flex items-center gap-2"
               >
                 <FileText className="w-3.5 h-3.5 text-[#1F3557]" />
                 Create Estimate
               </button>
               <button
+                disabled={!selectedCustomer}
+                title={selectedCustomer ? undefined : "Select a customer first"}
                 onClick={() => {
-                  if (onNavigateToScreen) {
-                    onNavigateToScreen("scheduling", { customerId: selectedCustomer?.id });
-                    if (logOperationalEvent) {
-                      logOperationalEvent("Navigate", `Opened scheduling calendar for ${selectedCustomer ? selectedCustomer.company : "new booking"}`, "📅");
-                    }
-                  } else {
-                    onOpenPlaceholder("scheduling", "📅");
+                  if (!selectedCustomer) return;
+                  // Same shared Build Job popup as Leads/Estimates -- pre-filled
+                  // from this customer, then hand off to Jobs so "Schedule Job"
+                  // is one canonical flow no matter where it's triggered from.
+                  setBuildJobPrefill({
+                    customerId: selectedCustomer.id,
+                    customerName: selectedCustomer.contact || selectedCustomer.company,
+                    customerPhone: selectedCustomer.phone,
+                    customerEmail: selectedCustomer.email,
+                    customerAddress: selectedCustomer.address,
+                    source: selectedCustomer.source
+                  });
+                  onNavigateToScreen("jobs");
+                  if (logOperationalEvent) {
+                    logOperationalEvent("Navigate", `Opened Build Job for ${selectedCustomer.company}`, "📅");
                   }
                 }}
-                className="px-3 py-2 bg-[#EAF5FF] hover:bg-[#BDDDF8] border border-[#9EC8EF] rounded-xl text-[11px] font-bold text-[#1F3557] text-left transition-colors cursor-pointer flex items-center gap-2"
+                className="px-3 py-2 bg-[#EAF5FF] hover:bg-[#BDDDF8] border border-[#9EC8EF] rounded-xl text-[11px] font-bold text-[#1F3557] text-left transition-colors cursor-pointer flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-[#EAF5FF]"
               >
                 <Calendar className="w-3.5 h-3.5 text-[#1F3557]" />
                 Schedule Job
@@ -999,7 +1085,7 @@ export const CustomersPage: React.FC<CustomersPageProps> = ({
                 onClick={() => selectedCustomer && void compileCustomerDocuments(selectedCustomer)}
                 className="px-3 py-2 bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 rounded-xl text-[11px] font-bold text-emerald-800 text-left transition-colors cursor-pointer flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-emerald-50"
               >
-                <FileText className="w-3.5 h-3.5" /> Compile Documents
+                <FileText className="w-3.5 h-3.5" /> Combine Customer Documents
               </button>
               <button
                 disabled={!selectedCustomer}
@@ -1073,7 +1159,7 @@ export const CustomersPage: React.FC<CustomersPageProps> = ({
                 {filteredCustomers.length === 0 ? (
                   <tr>
                     <td colSpan={9} className="py-12 text-center text-[#5E7393] text-xs font-semibold">
-                      No matching customers found. Try altering your filter or search criteria.
+                      No customers found. Clear your filters or add a customer.
                     </td>
                   </tr>
                 ) : (
@@ -1127,14 +1213,32 @@ export const CustomersPage: React.FC<CustomersPageProps> = ({
           {/* Footer of the table card showing counter */}
           <div className="mt-4 pt-3 border-t border-[#9EC8EF]/40 flex justify-between items-center text-[10.5px] font-sans font-bold text-[#5E7393]">
             <span>
-              Showing {filteredCustomers.length} of {customers.length} total customers
+              {filteredCustomers.length} customers
             </span>
             <span className="px-2 py-0.5 bg-[#EAF5FF] border border-[#9EC8EF]/60 rounded-lg text-[#1F3557]">
-              Database Active
+              Customer list is up to date
             </span>
           </div>
         </div>
         
+      </div>
+
+      {/* Customer source report stays standalone at the very bottom of the page. */}
+      <div className="space-y-3 pt-2">
+        <h3 className="text-xs font-display font-black text-[#1F3557] uppercase tracking-wider">
+          Where Your Customers Came From
+        </h3>
+        <MarketingAttributionView
+          leads={leads}
+          customers={customers}
+          estimates={estimates}
+          jobs={schedulingEvents}
+          invoices={invoices}
+          timeClockLogs={timeClockLogs}
+          employees={employees}
+          transactions={transactions}
+          payrollWorkweekStart={payrollWorkweekStart}
+        />
       </div>
 
       {/* Summary tile popup -- lists the customers behind whichever tile was clicked */}
@@ -1385,7 +1489,7 @@ export const CustomersPage: React.FC<CustomersPageProps> = ({
               <button
                 type="button"
                 disabled={!formContact.trim()}
-                onClick={() => handleAddCustomer(false)}
+                onClick={() => handleAddCustomer("save")}
                 className={`px-4 py-2 text-white font-bold rounded-xl text-xs uppercase tracking-wider transition-colors cursor-pointer ${
                   formContact.trim() ? "bg-[#315C9F] hover:bg-[#1F3557]" : "bg-slate-300 cursor-not-allowed"
                 }`}
@@ -1395,7 +1499,15 @@ export const CustomersPage: React.FC<CustomersPageProps> = ({
               <button
                 type="button"
                 disabled={!formContact.trim()}
-                onClick={() => handleAddCustomer(true)}
+                onClick={() => handleAddCustomer("pdf-store")}
+                className="px-4 py-2 bg-white hover:bg-slate-100 border border-emerald-600 text-emerald-700 font-bold rounded-xl text-xs uppercase tracking-wider disabled:border-slate-300 disabled:text-slate-300 transition-colors cursor-pointer"
+              >
+                Save (and Store as PDF)
+              </button>
+              <button
+                type="button"
+                disabled={!formContact.trim()}
+                onClick={() => handleAddCustomer("pdf")}
                 className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl text-xs uppercase tracking-wider disabled:bg-slate-300 transition-colors cursor-pointer"
               >
                 Generate PDF
@@ -1622,7 +1734,7 @@ export const CustomersPage: React.FC<CustomersPageProps> = ({
                   <button
                     type="button"
                     disabled={!formContact.trim()}
-                    onClick={() => handleEditCustomer(false)}
+                    onClick={() => handleEditCustomer("save")}
                     className={`px-4 py-2 text-white font-bold rounded-xl text-xs uppercase tracking-wider transition-colors cursor-pointer ${
                       formContact.trim() ? "bg-[#315C9F] hover:bg-[#1F3557]" : "bg-slate-300 cursor-not-allowed"
                     }`}
@@ -1632,7 +1744,15 @@ export const CustomersPage: React.FC<CustomersPageProps> = ({
                   <button
                     type="button"
                     disabled={!formContact.trim()}
-                    onClick={() => handleEditCustomer(true)}
+                    onClick={() => handleEditCustomer("pdf-store")}
+                    className="px-4 py-2 bg-white hover:bg-slate-100 border border-emerald-600 text-emerald-700 font-bold rounded-xl text-xs uppercase tracking-wider disabled:border-slate-300 disabled:text-slate-300 transition-colors cursor-pointer"
+                  >
+                    Save (and Store as PDF)
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!formContact.trim()}
+                    onClick={() => handleEditCustomer("pdf")}
                     className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl text-xs uppercase tracking-wider disabled:bg-slate-300 transition-colors cursor-pointer"
                   >
                     Generate PDF
@@ -1755,38 +1875,65 @@ export const CustomersPage: React.FC<CustomersPageProps> = ({
                       when the browser is closed. This is the same record
                       regardless of where the customer card is opened from. */}
                   <div className="space-y-2">
-                    <div className="flex items-center justify-between">
+                    <div className="flex items-center justify-between flex-wrap gap-1.5">
                       <span className="text-[9px] uppercase font-bold text-[#5E7393] flex items-center gap-1.5">
                         <MessageCircle className="w-3 h-3 text-[#315C9F]" />Call &amp; Text History
                       </span>
-                      {customerCallEvents.length > 0 && (
-                        <button
-                          onClick={() => void generateCallTextHistoryPdf(selectedCustomer, customerCallEvents)}
-                          className="px-2 py-1 bg-white hover:bg-[#EAF5FF] border border-[#9EC8EF] rounded-lg text-[9px] font-bold text-[#315C9F] uppercase cursor-pointer flex items-center gap-1"
-                        >
-                          <FileText className="w-3 h-3" />Convert to PDF
-                        </button>
-                      )}
+                      <div className="flex items-center gap-1.5">
+                        {selectedCustomer.phone && (
+                          <>
+                            <button
+                              onClick={() => callNumber(selectedCustomer.phone)}
+                              className="px-2 py-1 bg-white hover:bg-[#EAF5FF] border border-[#9EC8EF] rounded-lg text-[9px] font-bold text-[#315C9F] uppercase cursor-pointer flex items-center gap-1"
+                              title="Opens your phone's native calling app, number pre-dialed"
+                            >
+                              <Phone className="w-3 h-3" />Call
+                            </button>
+                            <button
+                              onClick={() => composeSms({ to: selectedCustomer.phone })}
+                              className="px-2 py-1 bg-white hover:bg-[#EAF5FF] border border-[#9EC8EF] rounded-lg text-[9px] font-bold text-[#315C9F] uppercase cursor-pointer flex items-center gap-1"
+                              title="Opens your phone's native texting app, number pre-filled"
+                            >
+                              <MessageCircle className="w-3 h-3" />Reply
+                            </button>
+                          </>
+                        )}
+                        {customerTimeline.length > 0 && (
+                          <button
+                            onClick={() => void generateCallTextHistoryPdf(selectedCustomer, customerCallEvents, customerTextMessages)}
+                            className="px-2 py-1 bg-white hover:bg-[#EAF5FF] border border-[#9EC8EF] rounded-lg text-[9px] font-bold text-[#315C9F] uppercase cursor-pointer flex items-center gap-1"
+                          >
+                            <FileText className="w-3 h-3" />Convert to PDF
+                          </button>
+                        )}
+                      </div>
                     </div>
                     <div className="bg-[#EAF5FF]/40 rounded-2xl border border-[#9EC8EF]/30 divide-y divide-[#9EC8EF]/30 max-h-64 overflow-y-auto">
-                      {customerCallEvents.length === 0 ? (
-                        <p className="text-[10px] text-[#5E7393] font-semibold p-3">No calls or texts on file yet. Missed calls this customer makes get auto-texted back and logged here automatically once Missed Call Text-Back is set up on the owner's phone.</p>
+                      {customerTimeline.length === 0 ? (
+                        <p className="text-[10px] text-[#5E7393] font-semibold p-3">No calls or texts on file yet. Missed calls get auto-texted back, and every real text either side sends gets logged here automatically once Missed Call Text-Back is set up on the owner's phone.</p>
                       ) : (
-                        customerCallEvents.map(event => (
-                          <div key={event.id} className="p-2.5 space-y-1">
+                        customerTimeline.map(entry => entry.kind === "call" ? (
+                          <div key={`call_${entry.event.id}`} className="p-2.5 space-y-1">
                             <div className="flex items-center gap-1.5 text-[10px] font-bold text-[#1F3557]">
-                              {event.direction === "missed" && <PhoneMissed className="w-3 h-3 text-rose-600 shrink-0" />}
-                              {event.direction === "incoming" && <PhoneIncoming className="w-3 h-3 text-emerald-600 shrink-0" />}
-                              {event.direction === "outgoing" && <PhoneOutgoing className="w-3 h-3 text-[#315C9F] shrink-0" />}
-                              <span className="capitalize">{event.direction} Call</span>
-                              <span className="text-[9px] font-semibold text-[#5E7393] ml-auto">{event.callTimestamp}</span>
+                              {entry.event.direction === "missed" && <PhoneMissed className="w-3 h-3 text-rose-600 shrink-0" />}
+                              {entry.event.direction === "incoming" && <PhoneIncoming className="w-3 h-3 text-emerald-600 shrink-0" />}
+                              {entry.event.direction === "outgoing" && <PhoneOutgoing className="w-3 h-3 text-[#315C9F] shrink-0" />}
+                              <span className="capitalize">{entry.event.direction} Call</span>
+                              <span className="text-[9px] font-semibold text-[#5E7393] ml-auto">{entry.event.callTimestamp}</span>
                             </div>
-                            {event.autoReplySent && event.autoReplyMessage && (
+                            {entry.event.autoReplySent && entry.event.autoReplyMessage && (
                               <div className="flex items-start gap-1.5 pl-4.5 text-[10px] text-[#5E7393]">
                                 <MessageCircle className="w-3 h-3 mt-0.5 shrink-0" />
-                                <span className="italic">"{event.autoReplyMessage}"</span>
+                                <span className="italic">"{entry.event.autoReplyMessage}"</span>
                               </div>
                             )}
+                          </div>
+                        ) : (
+                          <div key={`text_${entry.event.id}`} className={`p-2.5 flex ${entry.event.direction === "outgoing" ? "justify-end" : "justify-start"}`}>
+                            <div className={`max-w-[85%] rounded-xl px-2.5 py-1.5 space-y-0.5 ${entry.event.direction === "outgoing" ? "bg-[#315C9F] text-white" : "bg-white border border-[#9EC8EF]/50 text-[#1F3557]"}`}>
+                              <p className="text-[10px] leading-snug">{entry.event.body}</p>
+                              <p className={`text-[8.5px] font-semibold ${entry.event.direction === "outgoing" ? "text-white/70" : "text-[#5E7393]"}`}>{entry.event.timestamp}</p>
+                            </div>
                           </div>
                         ))
                       )}
@@ -1899,7 +2046,7 @@ export const CustomersPage: React.FC<CustomersPageProps> = ({
                       </button>
                       <button
                         onClick={() => {
-                          onNavigateToScreen("estimates", { customerId: selectedCustomer.id });
+                          openBuildEstimateForCustomer(selectedCustomer);
                           setSelectedCustomer(null);
                         }}
                         className="p-2.5 bg-[#EAF5FF] hover:bg-[#BDDDF8] border border-[#9EC8EF] text-left text-xs font-bold rounded-xl flex items-center gap-2 cursor-pointer transition-colors"

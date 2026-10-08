@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useEffect } from "react";
-import { doc, getDoc, setDoc, deleteDoc } from "firebase/firestore";
+import { doc, getDoc, setDoc, deleteDoc, writeBatch } from "firebase/firestore";
 import { db } from "../firebase";
 import { useDomainData } from "../context/DomainDataContext";
 import { useNavTelemetry } from "../context/NavTelemetryContext";
@@ -35,9 +35,9 @@ type InviteMode = "" | "select" | "custom";
 
 export const ONBOARDING_ROLE_TEMPLATES: Array<[string, string, string[]]> = [
   ["owner", "Owner", MODULE_CATALOG.map(m => m.id)],
-  ["general_manager", "General Manager", ["customers","leads","estimates","jobs","scheduling","dispatch","routes","employee_locations","inventory","documents","messages","timeclock","ai_assistant","settings"]],
-  ["office_manager", "Office Manager", ["dashboard","revenue","accounting","customers","leads","estimates","invoices","scheduling","dispatch","routes","employee_locations","jobs","timeclock","inventory","documents","pdf_editor","esign","messages","roster","training","reports","settings"]],
-  ["operations_manager", "Operations Manager", ["scheduling","dispatch","routes","employee_locations","jobs","inventory","documents","messages"]],
+  ["general_manager", "General Manager", ["customers","leads","estimates","jobs","scheduling","dispatch","routes","employee_locations","inventory","documents","messages","timeclock","timeclock_team_punches","ai_assistant","settings"]],
+  ["office_manager", "Office Manager", ["dashboard","revenue","accounting","customers","leads","estimates","invoices","scheduling","dispatch","routes","employee_locations","jobs","timeclock","timeclock_team_punches","inventory","documents","pdf_editor","esign","messages","roster","training","reports","settings"]],
+  ["operations_manager", "Operations Manager", ["scheduling","dispatch","routes","employee_locations","jobs","timeclock","timeclock_team_punches","inventory","documents","messages"]],
   ["dispatcher", "Dispatcher", ["dispatch","routes","employee_locations","scheduling","jobs","customers"]],
   ["scheduler", "Scheduler", ["scheduling","customers","jobs","messages"]],
   ["sales_manager", "Sales Manager", ["customers","leads","estimates","messages","ai_assistant"]],
@@ -66,7 +66,7 @@ const DEFAULT_INVITE_ROLES: InviteRole[] = ONBOARDING_ROLE_TEMPLATES.map(([id, n
 import { StructuredAddressFields } from "./StructuredAddressFields";
 
 export const RosterPage: React.FC = () => {
-  const { employees, setEmployees, timeClockLogs } = useDomainData();
+  const { employees, refreshEmployees, timeClockLogs } = useDomainData();
   const { triggerNotification, logOperationalEvent, navigateToScreen } = useNavTelemetry();
   const { loggedInUser, businessId } = useAuth();
 
@@ -110,7 +110,16 @@ export const RosterPage: React.FC = () => {
       if (!saved?.length) return;
       const merged = [...DEFAULT_INVITE_ROLES];
       for (const role of saved) {
-        const normalized = { ...role, modulePermissions: role.modulePermissions || defaultGranularFromModuleList(role.permissions || [], "edit") };
+        const defaults = DEFAULT_INVITE_ROLES.find(item => item.id === role.id);
+        const permissions = [...new Set([...(defaults?.permissions || []), ...(role.permissions || [])])];
+        const normalized = {
+          ...role,
+          permissions,
+          modulePermissions: {
+            ...(defaults?.modulePermissions || defaultGranularFromModuleList(permissions, "edit")),
+            ...(role.modulePermissions || {})
+          }
+        };
         const index = merged.findIndex(r => r.id === normalized.id);
         if (index >= 0) merged[index] = normalized; else merged.push(normalized);
       }
@@ -169,24 +178,45 @@ export const RosterPage: React.FC = () => {
   };
 
   const handleSaveEdit = async () => {
-    if (!editingEmployee) return;
+    if (!editingEmployee || !businessId) return;
     const permissions = MODULE_CATALOG.filter(mod => {
       const flags = getPermissionFlags(editingEmployee.granularPermissions, mod.id);
       return flags.view || flags.edit || flags.delete;
     }).map(mod => mod.id);
     const savedEmployee = { ...editingEmployee, permissions };
-    setEmployees(prev => prev.map(e => (e.email === savedEmployee.email ? savedEmployee : e)));
-    if (savedEmployee.userUid) {
-      await setDoc(doc(db, "user_profiles", savedEmployee.userUid), {
-        role: savedEmployee.role,
-        permissions,
-        granularPermissions: savedEmployee.granularPermissions,
-        requireTimeClockVerification: !!savedEmployee.requireTimeClockVerification
+
+    try {
+      // Role/permission edits must be one atomic server operation. The roster
+      // record is what the Owner sees; user_profiles is what the employee
+      // actually receives on their next login. Saving them separately can
+      // leave those two sources disagreeing after a network failure.
+      const batch = writeBatch(db);
+      batch.set(doc(db, "employees", savedEmployee.email), {
+        ...savedEmployee,
+        businessEmail: businessId,
+        businessId,
+        updatedAt: new Date().toISOString()
       }, { merge: true });
+
+      if (savedEmployee.userUid) {
+        batch.set(doc(db, "user_profiles", savedEmployee.userUid), {
+          role: savedEmployee.role,
+          permissions,
+          granularPermissions: savedEmployee.granularPermissions,
+          requireTimeClockVerification: !!savedEmployee.requireTimeClockVerification
+        }, { merge: true });
+      }
+
+      await batch.commit();
+      await refreshEmployees();
+
+      triggerNotification(`Updated ${editingEmployee.firstName} ${editingEmployee.lastName}.`);
+      if (logOperationalEvent) logOperationalEvent("Employee Updated", `${editingEmployee.firstName} ${editingEmployee.lastName}`, "👤");
+      setEditingEmployee(null);
+    } catch (err) {
+      console.error("Employee role/permission save failed:", err);
+      triggerNotification("Couldn't save that employee update. Nothing was partially changed.");
     }
-    triggerNotification(`Updated ${editingEmployee.firstName} ${editingEmployee.lastName}.`);
-    if (logOperationalEvent) logOperationalEvent("Employee Updated", `${editingEmployee.firstName} ${editingEmployee.lastName}`, "👤");
-    setEditingEmployee(null);
   };
 
   const chooseEmployeeRole = (roleId: string) => {
@@ -343,7 +373,7 @@ export const RosterPage: React.FC = () => {
         <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
           <div>
             <h2 className="text-lg font-sans font-extrabold text-[#1F3557] uppercase tracking-wider">Roster</h2>
-            <p className="text-xs text-[#5E7393] font-sans font-semibold mt-0.5">Real employee directory — {employees.length} team member{employees.length === 1 ? "" : "s"}</p>
+            <p className="text-xs text-[#5E7393] font-sans font-semibold mt-0.5">{employees.length} employees</p>
           </div>
           {canManageRoles && (
             <div className="flex flex-wrap gap-2">
@@ -382,7 +412,7 @@ export const RosterPage: React.FC = () => {
           </h3>
           <p className="text-xs text-[#5E7393] font-sans mt-1 max-w-sm mx-auto">
             {employees.length === 0
-              ? "Invite your first team member to start assigning jobs, tracking hours, and managing permissions."
+              ? "Invite an employee so you can assign jobs, track hours, and choose what they can access."
               : "Try a different search."}
           </p>
         </div>
@@ -435,7 +465,7 @@ export const RosterPage: React.FC = () => {
       <div className="bg-white/60 border border-dashed border-[#9EC8EF] rounded-2xl p-4 flex items-center justify-between gap-3">
         <div className="flex items-center gap-2 text-xs text-[#1F3557]">
           <Shield className="w-4 h-4 text-[#315C9F] shrink-0" />
-          <span>Permissions are managed by role, not per person — configure what each role can access.</span>
+          <span>Access is based on employee roles. Choose what each role can view, add, edit, or delete.</span>
         </div>
         <button
           onClick={() => {
@@ -444,7 +474,7 @@ export const RosterPage: React.FC = () => {
           }}
           className="px-3 py-1.5 bg-[#EAF5FF] hover:bg-white border border-[#9EC8EF] text-[#315C9F] text-[10.5px] font-bold rounded-xl uppercase whitespace-nowrap cursor-pointer"
         >
-          Manage Roles
+          Choose Role Access
         </button>
       </div>
 
@@ -483,12 +513,19 @@ export const RosterPage: React.FC = () => {
                   const flags = getPermissionFlags(editingEmployee.granularPermissions, mod.id);
                   return <div key={mod.id} className="rounded-lg border border-slate-100 p-2">
                     <div className="font-bold text-[10px] text-[#1F3557] mb-1.5">{mod.label}</div>
-                    <div className="flex flex-wrap gap-2">
-                      {(["view","edit","delete"] as PermissionAction[]).map(action => <label key={action} className="flex items-center gap-1 text-[9px] text-slate-600">
-                        <input type="checkbox" checked={flags[action]} onChange={() => toggleEmployeePermission(mod.id, action)} />
-                        {action === "edit" ? "Create & Edit" : action[0].toUpperCase() + action.slice(1)}
-                      </label>)}
-                    </div>
+                    {mod.singleAction ? (
+                      <label className="flex items-center gap-1 text-[9px] font-bold text-slate-600">
+                        <input type="checkbox" checked={flags[mod.singleAction]} onChange={() => toggleEmployeePermission(mod.id, mod.singleAction!)} />
+                        Allowed
+                      </label>
+                    ) : (
+                      <div className="flex flex-wrap gap-2">
+                        {(["view","edit","delete"] as PermissionAction[]).map(action => <label key={action} className="flex items-center gap-1 text-[9px] text-slate-600">
+                          <input type="checkbox" checked={flags[action]} onChange={() => toggleEmployeePermission(mod.id, action)} />
+                          {action === "edit" ? "Create & Edit" : action[0].toUpperCase() + action.slice(1)}
+                        </label>)}
+                      </div>
+                    )}
                   </div>;
                 })}
               </div>
@@ -564,12 +601,19 @@ export const RosterPage: React.FC = () => {
                       const flags = getPermissionFlags(invitePermissions, mod.id);
                       return <div key={mod.id} className="rounded-lg border border-slate-100 p-2">
                         <div className="font-bold text-[10px] text-[#1F3557] mb-1.5">{mod.label}</div>
-                        <div className="flex flex-wrap gap-2">
-                          {(["view","edit","delete"] as PermissionAction[]).map(action => <label key={action} className="flex items-center gap-1 text-[9px] text-slate-600">
-                            <input type="checkbox" checked={flags[action]} onChange={() => togglePermission(mod.id, action)} />
-                            {action === "edit" ? "Create & Edit" : action[0].toUpperCase() + action.slice(1)}
-                          </label>)}
-                        </div>
+                        {mod.singleAction ? (
+                          <label className="flex items-center gap-1 text-[9px] font-bold text-slate-600">
+                            <input type="checkbox" checked={flags[mod.singleAction]} onChange={() => togglePermission(mod.id, mod.singleAction!)} />
+                            Allowed
+                          </label>
+                        ) : (
+                          <div className="flex flex-wrap gap-2">
+                            {(["view","edit","delete"] as PermissionAction[]).map(action => <label key={action} className="flex items-center gap-1 text-[9px] text-slate-600">
+                              <input type="checkbox" checked={flags[action]} onChange={() => togglePermission(mod.id, action)} />
+                              {action === "edit" ? "Create & Edit" : action[0].toUpperCase() + action.slice(1)}
+                            </label>)}
+                          </div>
+                        )}
                       </div>;
                     })}
                   </div>

@@ -88,19 +88,20 @@ export interface Lead {
   /** Photos the customer attached when requesting service, same inline-
    * base64 convention as every other small attached image in this app. */
   photos?: string[];
+  /** Optional triage priority (set by hand or by a "Mark Priority" automation). Leads without one behave exactly as before. */
+  priority?: "Low" | "Medium" | "High" | "Urgent";
 }
 
 /**
- * One call or its follow-up text, written by the Missed Call Text-Back
- * Android app (see missed-call-text-back-app/.../data/CrmLinker.kt) straight
- * to Firestore over the REST API -- the web app only ever reads this
- * collection, never writes to it. `direction` covers every call the phone's
- * call log records, not just missed ones: "missed" is the one that actually
+ * One call, written by the Missed Call Text-Back Android app (see
+ * missed-call-text-back-app/.../data/CrmLinker.kt) straight to Firestore
+ * over the REST API -- the web app only ever reads this collection, never
+ * writes to it. `direction` covers every call the phone's call log
+ * records, not just missed ones: "missed" is the one that actually
  * triggers `autoReplyMessage`/`autoReplySent`; "incoming"/"outgoing" are
- * answered calls logged for the record with no auto-text. Two-way inbound
- * texting (a customer replying) isn't wired up yet -- that needs a real SMS
- * provider (e.g. Twilio) with its own phone number, which nothing here has
- * been given credentials for.
+ * answered calls logged for the record with no auto-text. The follow-up
+ * text conversation itself (both the auto-reply and any real back-and-forth)
+ * lives in TextMessage below, not here.
  */
 export interface MissedCallEvent {
   id: string;
@@ -116,6 +117,30 @@ export interface MissedCallEvent {
   createdAt: string;
 }
 
+/**
+ * One real SMS, either direction, written by the same Android app --
+ * SmsReceiver.kt for an incoming customer reply, OutgoingSmsObserver.kt for
+ * an outgoing text actually sent from the owner's phone (the automated
+ * missed-call auto-reply, or a manual reply typed into the phone's native
+ * Messages app after tapping "Reply" on the web app -- see composeSms in
+ * deviceHandoff.ts, which just opens that native app with the number
+ * pre-filled; there's no way to send FROM the web app directly). The web
+ * app only ever reads this collection. Sorted by `timestamp`, this is the
+ * real two-way conversation a business had with one phone number.
+ */
+export interface TextMessage {
+  id: string;
+  businessId: string;
+  phoneNumber: string;
+  direction: "incoming" | "outgoing";
+  body: string;
+  customerId: string | null;
+  leadId: string | null;
+  createdNewLead: boolean;
+  timestamp: string;
+  createdAt: string;
+}
+
 export interface Estimate {
   id: string;
   number: string;
@@ -127,7 +152,7 @@ export interface Estimate {
    * securely scope "this customer's own estimates" should prefer this over
    * name-matching when it's present. */
   customerId?: string;
-  status: "Draft" | "Pending" | "Sent" | "Viewed" | "Accepted" | "Declined" | "Expired" | "Completed";
+  status: "Draft" | "Pending" | "Sent" | "Viewed" | "Signed" | "Accepted" | "Declined" | "Expired" | "Completed";
   salesRep: string;
   amount: number;
   createdDate: string;
@@ -144,9 +169,15 @@ export interface Estimate {
    * separately-typed number -- every existing estimate with no lineItems
    * keeps working exactly as before, amount alone. */
   lineItems?: Array<{ id: string; description: string; quantity: number; unitPrice: number; priceBookModelId?: string }>;
+  /** Percentage discount applied to the itemized subtotal before tax. */
+  discountPercent?: number;
+  /** Percentage tax applied after discount. */
+  taxRate?: number;
   /** Marketing attribution, carried over from the Lead/Customer this estimate came from (see Customer.source). */
   source?: LeadSource;
   sourceLeadId?: string;
+  /** Set when this estimate is a change order: priced, signed added work on an existing Job (SchedulingEvent.id). Reuses every estimate flow (pricing, PDF, e-sign, portal approval); Owner Protection adds approved change orders to the job's approved value. */
+  changeOrderForJobId?: string;
 }
 
 export interface InventoryItem {
@@ -466,6 +497,13 @@ export interface SchedulingEvent {
    * not an opt-in. Only relevant when eventType is "Job"; other calendar
    * entry types are never customer-facing at all regardless of this flag. */
   customerVisible?: boolean;
+  /** Set when an Automation (WHEN -> IF -> DO) created this record; also keeps that creation from firing other "...Created" automations. */
+  createdByAutomationId?: string;
+  /** Set when this Job was created by Online Booking (server/onlineBooking.ts):
+   * which entry point it came through, and its online_bookings record
+   * (customer description + photos). */
+  bookingSource?: "Customer Portal" | "Website Booking";
+  onlineBookingId?: string;
 }
 
 /**

@@ -4,6 +4,7 @@ import { db } from "../firebase";
 import { useAuth } from "../context/AuthContext";
 import { useDomainData } from "../context/DomainDataContext";
 import { useNavTelemetry } from "../context/NavTelemetryContext";
+import { OnlineBookingSettingsPanel } from "./OnlineBookingSettingsPanel";
 import {
   Link2,
   Plus,
@@ -169,7 +170,7 @@ export const IntegrationsPage: React.FC<IntegrationsPageProps> = ({
       developer: "Stripe",
       apiType: "REST",
       logo: "💳",
-      description: "Accept card payments, send digital secure checkout links, and process job deposits.",
+      description: "Accept card payments, send payment links, and collect job deposits.",
       connected: false,
       lastSync: "Never",
       aiEnabled: false,
@@ -190,7 +191,7 @@ export const IntegrationsPage: React.FC<IntegrationsPageProps> = ({
       developer: "OwnersLOCAL",
       apiType: "REST",
       logo: "📝",
-      description: "Copy-paste embed code for your own business website. Every submission creates a real Lead here automatically.",
+      description: "Add this form to your website. Each submission will create a new lead in Owner'sLOCAL -- or, with Online Booking turned on, let visitors book a real open time on your schedule.",
       connected: true,
       lastSync: "N/A",
       aiEnabled: false,
@@ -548,7 +549,7 @@ export const IntegrationsPage: React.FC<IntegrationsPageProps> = ({
                 Connected Apps
               </h1>
               <p className="text-xs text-slate-500 font-sans font-medium">
-                Everything hooked up to your business, in one place
+                Connect Owner'sLOCAL to the other tools your business uses.
               </p>
             </div>
           </div>
@@ -569,11 +570,11 @@ export const IntegrationsPage: React.FC<IntegrationsPageProps> = ({
       {/* PLAIN-LANGUAGE STATUS ROW */}
       <div className="grid grid-cols-3 gap-3">
         {[
-          { key: "Connected" as const, label: "Working", count: summaryCounts.connected, color: "text-emerald-600 bg-emerald-50 border-emerald-200" },
+          { key: "Connected" as const, label: "Connected", count: summaryCounts.connected, color: "text-emerald-600 bg-emerald-50 border-emerald-200" },
           { key: "Available" as const, label: "Not Set Up", count: summaryCounts.available, color: "text-[#315C9F] bg-[#E3F3FF] border-[#A9CDEE]" },
-          { key: null, label: "Problems", count: summaryCounts.errors, color: summaryCounts.errors > 0 ? "text-rose-600 bg-rose-50 border-rose-200" : "text-emerald-600 bg-emerald-50 border-emerald-200" }
+          { key: null, label: "Needs Attention", count: summaryCounts.errors, color: summaryCounts.errors > 0 ? "text-rose-600 bg-rose-50 border-rose-200" : "text-emerald-600 bg-emerald-50 border-emerald-200" }
         ].map((card) => {
-          const isProblems = card.label === "Problems";
+          const isProblems = card.label === "Needs Attention";
           const isActive = !isProblems && activeSummaryFilter === card.key;
           return (
             <div
@@ -629,7 +630,7 @@ export const IntegrationsPage: React.FC<IntegrationsPageProps> = ({
                           {item.name}
                         </h4>
                         <p className="text-[10px] text-slate-400 font-bold mt-0.5">
-                          {isWebForm ? "Built in — ready now" : item.developer}
+                          {isWebForm ? "Ready to use" : item.developer}
                         </p>
                       </div>
                     </div>
@@ -643,7 +644,7 @@ export const IntegrationsPage: React.FC<IntegrationsPageProps> = ({
                             : "bg-[#F5FAFF] text-slate-400 border-[#A9CDEE]"
                       }`}
                     >
-                      {item.connected ? "Working" : item.comingSoon ? "Coming Soon" : "Not Set Up"}
+                      {item.connected ? "Connected" : item.comingSoon ? "Coming Soon" : "Not Set Up"}
                     </span>
                   </div>
 
@@ -751,7 +752,7 @@ export const IntegrationsPage: React.FC<IntegrationsPageProps> = ({
             >
               <span className="flex items-center gap-2 text-xs font-bold text-slate-700 font-sans">
                 <Database className="h-4 w-4 text-[#315C9F] shrink-0" />
-                Everything else is already working — nothing to set up
+                Built-in Owner'sLOCAL tools are ready to use.
               </span>
               <span className="text-[10px] font-bold text-[#315C9F] shrink-0">
                 {isFeaturesListOpen ? "Hide list ▾" : "See list ▸"}
@@ -793,7 +794,7 @@ export const IntegrationsPage: React.FC<IntegrationsPageProps> = ({
           className="w-full flex items-center justify-between gap-2 p-4 text-left cursor-pointer"
         >
           <span className="text-xs font-bold text-slate-700 font-sans">
-            More options — backup, activity log, developer tools
+            Advanced options
           </span>
           <span className="text-[10px] font-bold text-[#315C9F] shrink-0">
             {isAdvancedOpen ? "Hide ▾" : "Show ▸"}
@@ -1174,6 +1175,10 @@ export const IntegrationsPage: React.FC<IntegrationsPageProps> = ({
                       />
                     </div>
                   )}
+
+                  {businessId && !isLoadingWebFormToken && (
+                    <OnlineBookingSettingsPanel businessId={businessId} webFormToken={webFormToken} onNotify={triggerNotification} />
+                  )}
                 </div>
               ) : detailTab === "overview" ? (
                 <div className="space-y-3 bg-[#E3F3FF] p-4 rounded-xl border border-[#A9CDEE]/60">
@@ -1310,7 +1315,7 @@ export const IntegrationsPage: React.FC<IntegrationsPageProps> = ({
                   </div>
 
                   <div className="pt-2 border-t border-[#A9CDEE]/50">
-                    <p className="text-[10px] text-slate-500 font-sans font-medium">A real Stripe connection isn't wired up yet, so there's nothing to test or rotate keys against here.</p>
+                    <p className="text-[10px] text-slate-500 font-sans font-medium">Stripe connection setup is handled securely in Payments. No Stripe secret keys need to be pasted into this screen.</p>
                   </div>
                 </div>
               )}
@@ -1465,11 +1470,21 @@ export const IntegrationsPage: React.FC<IntegrationsPageProps> = ({
                 <div className="flex items-center justify-between pt-2 border-t border-[#A9CDEE] text-xs">
                   <button
                     type="button"
-                    disabled
-                    title="A real Stripe connection isn't wired up yet"
-                    className="px-3 py-1.5 bg-slate-100 text-slate-400 border border-slate-200 rounded-xl font-bold font-sans cursor-not-allowed"
+                    onClick={() => {
+                      if (selectedIntegration.id === "stripe") {
+                        setIsDetailPopupOpen(false);
+                        onNavigateToScreen("payments");
+                      }
+                    }}
+                    disabled={selectedIntegration.id !== "stripe"}
+                    title={selectedIntegration.id === "stripe" ? "Open Stripe setup in Payments" : "This integration is not available yet"}
+                    className={`px-3 py-1.5 rounded-xl font-bold font-sans ${
+                      selectedIntegration.id === "stripe"
+                        ? "bg-[#315C9F] hover:bg-[#254A84] text-white cursor-pointer shadow-sm"
+                        : "bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed"
+                    }`}
                   >
-                    Connect Integration
+                    {selectedIntegration.id === "stripe" ? "Connect Stripe" : "Connect Integration"}
                   </button>
 
                   <div className="flex items-center gap-2">

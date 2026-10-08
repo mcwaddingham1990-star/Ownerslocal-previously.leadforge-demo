@@ -12,6 +12,11 @@ import { CustomerPortalControls } from "./CustomerPortalControls";
 import { ReviewRequestControls } from "./ReviewRequestControls";
 import { resolveCustomerByIdOrName } from "../lib/resolveCustomer";
 import { useStripeConnectStatus } from "../hooks/useStripeConnectStatus";
+import {
+  findExistingInvoiceForJob,
+  parsePendingInvoicePrefill,
+  type PendingInvoicePrefill
+} from "../lib/jobInvoiceHandoff";
 import { MarketingAttributionView } from "./MarketingAttributionView";
 import {
   Account,
@@ -41,7 +46,10 @@ import {
 import { buildInvoicePdf, bytesToBase64 } from "../lib/pdfExport";
 import { MAX_INLINE_BASE64_LENGTH } from "../lib/firestoreDocumentLimits";
 import SendChoiceModal from "./SendChoiceModal";
-import type { DocumentItem, Estimate } from "../types/domain";
+import ESignChoiceModal from "./ESignChoiceModal";
+import { buildCustomerPortalLink } from "../lib/customerPortalClient";
+import { ensureCustomerPortalAccess } from "../lib/customerPortalAccess";
+import type { DocumentItem, Estimate, Customer } from "../types/domain";
 import {
   LayoutDashboard,
   FileText,
@@ -184,12 +192,17 @@ export const AccountingPage: React.FC = () => {
   // flag) since AccountingPage is mounted fresh by App.tsx's screen switch
   // with no props of its own to carry an "open the invoice form" intent.
   const [autoOpenInvoiceCreate, setAutoOpenInvoiceCreate] = useState(false);
+  const [invoiceCreatePrefill, setInvoiceCreatePrefill] = useState<PendingInvoicePrefill | null>(null);
   useEffect(() => {
-    if (sessionStorage.getItem("ownerslocal_pending_invoice_create") === "1") {
-      sessionStorage.removeItem("ownerslocal_pending_invoice_create");
-      setActiveTab("invoices");
-      setAutoOpenInvoiceCreate(true);
-    }
+    const shouldOpen = sessionStorage.getItem("ownerslocal_pending_invoice_create") === "1";
+    const prefill = parsePendingInvoicePrefill(sessionStorage.getItem("ownerslocal_pending_invoice_prefill"));
+    if (!shouldOpen && !prefill) return;
+
+    sessionStorage.removeItem("ownerslocal_pending_invoice_create");
+    sessionStorage.removeItem("ownerslocal_pending_invoice_prefill");
+    setActiveTab("invoices");
+    setInvoiceCreatePrefill(prefill);
+    setAutoOpenInvoiceCreate(true);
   }, []);
 
   // Inventory is a live subledger: its current asset value is the same
@@ -266,7 +279,7 @@ export const AccountingPage: React.FC = () => {
           <Landmark className="w-5 h-5 text-[#315C9F]" /> Accounting &amp; Bookkeeping
         </h2>
         <p className="text-xs text-[#5E7393] font-sans font-semibold mt-1">
-          Real double-entry books, synced automatically with every real event across the app.
+          Your income and expenses update automatically when you use Owner’sLOCAL.
         </p>
         <div className="flex flex-wrap gap-1.5 mt-3">
           {TABS.map(t => (
@@ -309,7 +322,11 @@ export const AccountingPage: React.FC = () => {
           logOperationalEvent={logOperationalEvent}
           loggedInUser={loggedInUser}
           autoOpenCreate={autoOpenInvoiceCreate}
-          onAutoOpenCreateHandled={() => setAutoOpenInvoiceCreate(false)}
+          createPrefill={invoiceCreatePrefill}
+          onAutoOpenCreateHandled={() => {
+            setAutoOpenInvoiceCreate(false);
+            setInvoiceCreatePrefill(null);
+          }}
         />
       )}
 
@@ -443,7 +460,7 @@ function DashboardTab({
     { label: "Payments Collected", val: invoicesPaid, icon: CreditCard, color: "text-emerald-600", bg: "bg-emerald-500/10" },
     { label: "Unpaid Invoices", val: arBalance, icon: FileText, color: "text-blue-600", bg: "bg-blue-500/10", sub: `${openInvoiceCount} open invoice${openInvoiceCount === 1 ? "" : "s"}` },
     { label: "Expenses Paid", val: expensesPaid, icon: Receipt, color: "text-rose-600", bg: "bg-rose-500/10" },
-    { label: "Outstanding Expenses", val: apBalance, icon: AlertTriangle, color: "text-amber-600", bg: "bg-amber-500/10", sub: `${openBillCount} open bill${openBillCount === 1 ? "" : "s"}` }
+    { label: "Unpaid Bills", val: apBalance, icon: AlertTriangle, color: "text-amber-600", bg: "bg-amber-500/10", sub: `${openBillCount} open bill${openBillCount === 1 ? "" : "s"}` }
   ];
   return (
     <div className="space-y-5">
@@ -538,29 +555,33 @@ function InvoicesTab({
   logOperationalEvent,
   loggedInUser,
   autoOpenCreate,
+  createPrefill,
   onAutoOpenCreateHandled
 }: any) {
-  const { setGeneratedPdfDraft, documents, setDocuments, businessProfile, estimates } = useDomainData();
+  const { setGeneratedPdfDraft, documents, setDocuments, businessProfile, estimates, setEstimates, setCustomers } = useDomainData();
   const { navigateToScreen } = useNavTelemetry();
   const [isCreating, setIsCreating] = useState(false);
-  useEffect(() => {
-    if (autoOpenCreate) {
-      setIsCreating(true);
-      onAutoOpenCreateHandled?.();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autoOpenCreate]);
   const [isPriceBookOpen, setIsPriceBookOpen] = useState(false);
   const [customer, setCustomer] = useState("");
   const [dueInDays, setDueInDays] = useState(30);
   const [taxRate, setTaxRate] = useState<number>(salesTaxRates.find((r: any) => r.isDefault)?.rate || 0);
   const [lineItems, setLineItems] = useState<InvoiceLineItem[]>([{ id: genId("li"), description: "", quantity: 1, unitPrice: 0 }]);
   const [linkedEstimateId, setLinkedEstimateId] = useState("");
+  const [linkedJobId, setLinkedJobId] = useState("");
   const [payingInvoice, setPayingInvoice] = useState<Invoice | null>(null);
   const [paymentAmount, setPaymentAmount] = useState("");
   const [viewingInvoice, setViewingInvoice] = useState<Invoice | null>(null);
   const [isSendOpen, setIsSendOpen] = useState(false);
-  const [sendMatch, setSendMatch] = useState<{ email?: string; phone?: string } | null>(null);
+  // Holds the full Customer record (not just contact info) so "Send for
+  // Payment" can turn on their Customer Portal access and embed a real,
+  // working "pay this invoice online" link -- the same Stripe Connect
+  // checkout the Customer Portal's own "Pay Invoice" button already uses.
+  const [sendMatch, setSendMatch] = useState<Customer | null>(null);
+  // The front-door eSign choice ("Send for eSign" / "Sign in Person" /
+  // "Send for Payment" / "Save as PDF") that now backs the invoice "Send"
+  // button -- "Send for Payment" reuses the existing plain isSendOpen/
+  // sendMatch/SendChoiceModal text-or-email handoff below.
+  const [esignSendTarget, setEsignSendTarget] = useState<Invoice | null>(null);
 
   // Accepted estimates not already linked to another invoice -- the pool
   // Accounting's "Pending Revenue" tile draws from. Without a real link
@@ -574,6 +595,7 @@ function InvoicesTab({
     setDueInDays(30);
     setLineItems([{ id: genId("li"), description: "", quantity: 1, unitPrice: 0 }]);
     setLinkedEstimateId("");
+    setLinkedJobId("");
   };
 
   const applyLinkedEstimate = (estimateId: string) => {
@@ -584,11 +606,57 @@ function InvoicesTab({
     setLineItems([{ id: genId("li"), description: `Estimate ${est.number}`, quantity: 1, unitPrice: est.amount || 0 }]);
   };
 
+  useEffect(() => {
+    if (!autoOpenCreate) return;
+
+    const prefill = createPrefill as PendingInvoicePrefill | null;
+    const existingJobInvoice = findExistingInvoiceForJob(invoices, prefill?.jobId);
+    if (existingJobInvoice) {
+      setIsCreating(false);
+      setViewingInvoice(existingJobInvoice);
+      triggerNotification(`Invoice ${existingJobInvoice.invoiceNumber} already exists for this job.`);
+      onAutoOpenCreateHandled?.();
+      return;
+    }
+
+    setLinkedJobId(prefill?.jobId || "");
+
+    if (prefill?.estimateId && estimates.some((estimate: Estimate) => estimate.id === prefill.estimateId)) {
+      applyLinkedEstimate(prefill.estimateId);
+    } else {
+      const matchedCustomer = customers.find((item: Customer) =>
+        item.id === prefill?.customerId ||
+        item.contact === prefill?.customerName ||
+        item.company === prefill?.customerName
+      );
+      setCustomer(
+        matchedCustomer?.company ||
+        matchedCustomer?.contact ||
+        prefill?.customerName ||
+        (customers.length === 1 ? (customers[0].company || customers[0].contact || "") : "")
+      );
+      if (prefill?.description || (prefill?.amount ?? 0) > 0) {
+        setLineItems([{
+          id: genId("li"),
+          description: prefill?.description || "Completed job",
+          quantity: 1,
+          unitPrice: Number(prefill?.amount) || 0
+        }]);
+      }
+    }
+
+    setIsCreating(true);
+    onAutoOpenCreateHandled?.();
+    // The handoff should run once for the explicit auto-open signal. Form
+    // edits after opening must not re-apply the prefill.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoOpenCreate]);
+
   // Builds a real PDF from the actual invoice data right now (no signing
   // required), saves it to the Documents Hub immediately, then opens the
   // PDF Editor for review/signing. This is the invoice's "Generate PDF"
   // action everywhere it appears (create form, table row, review screen).
-  const generateInvoicePdf = async (invoice: Invoice) => {
+  const generateInvoicePdf = async (invoice: Invoice, autoCaptureSignatures = false, autoOpenSignSetup = false) => {
     const matchedCustomer = customers.find((c: any) => c.contact === invoice.customer || c.company === invoice.customer);
     const bytes = await buildInvoicePdf(invoice, matchedCustomer, businessProfile);
     const pdfBase64 = bytesToBase64(bytes);
@@ -634,7 +702,9 @@ function InvoicesTab({
       customerEmail: matchedCustomer?.email,
       representativeName: loggedInUser?.name || loggedInUser?.email || "Company Representative",
       lines: [],
-      pdfBase64
+      pdfBase64,
+      autoCaptureSignatures,
+      autoOpenSignSetup
     });
     navigateToScreen("documents");
     if (logOperationalEvent) logOperationalEvent("Invoice PDF Generated", `${invoice.invoiceNumber} for ${invoice.customer}`, "📄");
@@ -645,11 +715,24 @@ function InvoicesTab({
       triggerNotification("Add a customer and at least one line item.");
       return;
     }
+    // Same one-active-invoice-per-job rule the job handoff applies when this
+    // form opens -- re-checked here because the job's invoice can appear while
+    // the form is open (e.g. a "Job Completed -> Create Invoice" automation).
+    const existingJobInvoice = findExistingInvoiceForJob(invoices, linkedJobId || undefined);
+    if (existingJobInvoice) {
+      triggerNotification(`Invoice ${existingJobInvoice.invoiceNumber} already exists for this job.`);
+      resetForm();
+      setIsCreating(false);
+      setViewingInvoice(existingJobInvoice);
+      return;
+    }
     // Marketing attribution -- prefer the linked estimate's source (most
     // specific to this actual sale), then the matched customer's source,
     // over leaving it blank.
     const linkedEstimate = linkedEstimateId ? estimates.find((e: Estimate) => e.id === linkedEstimateId) : undefined;
-    const matchedCustomerForSource = customers.find((c: any) => c.contact === customer.trim() || c.company === customer.trim());
+    const matchedCustomerForSource =
+      customers.find((c: any) => c.id === (createPrefill as PendingInvoicePrefill | null)?.customerId) ||
+      customers.find((c: any) => c.contact === customer.trim() || c.company === customer.trim());
     const source = linkedEstimate?.source || matchedCustomerForSource?.source || "Manual Entry";
     const sourceLeadId = linkedEstimate?.sourceLeadId || matchedCustomerForSource?.sourceLeadId;
     const invoice: Invoice = {
@@ -665,12 +748,18 @@ function InvoicesTab({
       amountPaid: 0,
       createdAt: new Date().toISOString(),
       createdBy: loggedInUser?.email,
+      jobId: linkedJobId || undefined,
       estimateId: linkedEstimateId || undefined,
       source,
       sourceLeadId
     };
     setInvoices((prev: Invoice[]) => [...prev, invoice]);
     setJournalEntries((prev: JournalEntry[]) => [...prev, postInvoiceCreatedEntry(invoice, loggedInUser?.email)]);
+    if (linkedEstimateId) {
+      setEstimates((prev: Estimate[]) => prev.map(estimate =>
+        estimate.id === linkedEstimateId ? { ...estimate, status: "Completed" } : estimate
+      ));
+    }
     if (logOperationalEvent) logOperationalEvent("Invoice Created", `${invoice.invoiceNumber} for ${invoice.customer}: ${fmt(invoiceTotal(invoice))}`, "🧾");
     triggerNotification(`Invoice ${invoice.invoiceNumber} created for ${fmt(invoiceTotal(invoice))}.`);
     if (openPdf) void generateInvoicePdf(invoice);
@@ -992,7 +1081,7 @@ function InvoicesTab({
                 return (
                   <div className="flex gap-2">
                     <button onClick={() => match ? navigateToScreen("customers", { customerId: match.id }) : triggerNotification("No matching customer record found.")} className="px-4 py-2 bg-white hover:bg-slate-100 border border-slate-300 text-[#1F3557] font-bold rounded-xl text-xs uppercase tracking-wider cursor-pointer">Open Customer</button>
-                    <button disabled={!match?.email && !match?.phone} onClick={() => { setSendMatch(match || null); setIsSendOpen(true); }} className="px-4 py-2 bg-white hover:bg-slate-100 border border-slate-300 text-[#1F3557] font-bold rounded-xl text-xs uppercase tracking-wider cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed">Send</button>
+                    <button onClick={() => { setSendMatch(match || null); setEsignSendTarget(viewingInvoice); }} className="px-4 py-2 bg-white hover:bg-slate-100 border border-slate-300 text-[#1F3557] font-bold rounded-xl text-xs uppercase tracking-wider cursor-pointer">Send</button>
                   </div>
                 );
               })()}
@@ -1005,7 +1094,35 @@ function InvoicesTab({
         </div>
       )}
 
-      <SendChoiceModal isOpen={isSendOpen} onClose={() => setIsSendOpen(false)} label={`Invoice ${viewingInvoice?.invoiceNumber || ""}`} phone={sendMatch?.phone} email={sendMatch?.email} />
+      <SendChoiceModal
+        isOpen={isSendOpen}
+        onClose={() => setIsSendOpen(false)}
+        label={`Invoice ${viewingInvoice?.invoiceNumber || ""}`}
+        phone={sendMatch?.phone}
+        email={sendMatch?.email}
+        body={viewingInvoice ? `Hi, here's Invoice ${viewingInvoice.invoiceNumber} -- balance due ${fmt(invoiceBalanceDue(viewingInvoice))} by ${viewingInvoice.dueDate}.${sendMatch?.portalToken ? ` Pay online: ${buildCustomerPortalLink(sendMatch.portalToken)}` : ""}` : undefined}
+      />
+      <ESignChoiceModal
+        isOpen={!!esignSendTarget}
+        onClose={() => setEsignSendTarget(null)}
+        label={`Invoice ${esignSendTarget?.invoiceNumber || ""}`}
+        onSendRemote={() => esignSendTarget && void generateInvoicePdf(esignSendTarget, true, true)}
+        onSignInPerson={() => esignSendTarget && void generateInvoicePdf(esignSendTarget, true, true)}
+        onSkip={() => esignSendTarget && void generateInvoicePdf(esignSendTarget)}
+        skipLabel="Save as PDF"
+        extraAction={{
+          label: "Send for Payment",
+          onClick: () => {
+            // Turns on the real Customer Portal payment link (the same
+            // Stripe Connect checkout the portal's own "Pay Invoice" button
+            // uses) before the text/email handoff, so this message actually
+            // gives the customer somewhere to pay -- not just a balance-due
+            // reminder with no way to act on it.
+            if (sendMatch) setSendMatch(ensureCustomerPortalAccess(sendMatch, setCustomers));
+            setIsSendOpen(true);
+          }
+        }}
+      />
 
       {payingInvoice && (
         <div className="fixed inset-0 bg-slate-950/50 backdrop-blur-sm flex items-center justify-center p-4 z-50">
@@ -1051,7 +1168,7 @@ function ExpensesTab({ bills, setBills, setJournalEntries, vendors, setVendors, 
     <div className="space-y-4">
       <div>
         <h3 className="text-sm font-black text-[#1F3557] uppercase">Expenses</h3>
-        <p className="text-[10px] text-[#5E7393]">Bills, fuel, materials, and every other operating cost. Scan a receipt, invoice, bill, or check with the Snapshot button in the bottom-right corner -- it works from any screen.</p>
+        <p className="text-[10px] text-[#5E7393]">Track bills, fuel, materials, and other business costs. Use Scan Receipt from any page to save a receipt, bill, invoice, or check.</p>
       </div>
       <div className="flex flex-wrap gap-1.5">
         {EXPENSES_SUB_TABS.map(t => (
@@ -1632,7 +1749,10 @@ function ChartOfAccountsTab({ accounts, setAccounts, accountBalances, canEdit, t
   return (
     <div className="space-y-4">
       <div className="flex justify-between items-center">
-        <h3 className="text-sm font-black text-[#1F3557] uppercase">Chart of Accounts</h3>
+        <div>
+          <h3 className="text-sm font-black text-[#1F3557] uppercase">Chart of Accounts</h3>
+          <p className="text-[10px] text-[#5E7393] mt-0.5">Categories used to organize income, expenses, assets, and debts.</p>
+        </div>
         {canEdit && (
           <button onClick={() => setIsAdding(true)} className="px-3 py-2 bg-[#315C9F] hover:bg-[#1F3557] text-white text-xs font-bold rounded-xl uppercase flex items-center gap-1.5 cursor-pointer">
             <Plus className="w-3.5 h-3.5" /> Add Account
@@ -1724,7 +1844,10 @@ function JournalTab({ journalEntries, setJournalEntries, accounts, canEdit, trig
   return (
     <div className="space-y-4">
       <div className="flex justify-between items-center">
-        <h3 className="text-sm font-black text-[#1F3557] uppercase">Journal Entries</h3>
+        <div>
+          <h3 className="text-sm font-black text-[#1F3557] uppercase">Journal Entries</h3>
+          <p className="text-[10px] text-[#5E7393] mt-0.5">Manual changes made to your accounting records.</p>
+        </div>
         {canEdit && (
           <button onClick={() => setIsAdding(true)} className="px-3 py-2 bg-[#315C9F] hover:bg-[#1F3557] text-white text-xs font-bold rounded-xl uppercase flex items-center gap-1.5 cursor-pointer">
             <Plus className="w-3.5 h-3.5" /> Manual Entry
@@ -1865,7 +1988,7 @@ function ReportsTab({ accounts, journalEntries, invoices, bills, transactions, r
     { id: "sales_tax", label: "Sales Tax" },
     { id: "payroll", label: "Payroll" },
     { id: "inventory_val", label: "Inventory Valuation" },
-    { id: "attribution", label: "Marketing Attribution" }
+    { id: "attribution", label: "Where Customers Came From" }
   ];
 
   const exportCsv = (rows: Array<[string, number]>, filename: string) => {

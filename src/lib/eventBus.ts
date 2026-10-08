@@ -31,3 +31,33 @@ export function onCollectionEvent(collection: string, handler: Handler): () => v
     handlers.delete(handler);
   };
 }
+
+/**
+ * Separate channel for changes that arrive from the server snapshot rather
+ * than from a write made in this browser (e.g. a website lead form, a
+ * Customer Portal booking or approval, a Stripe payment webhook, or another
+ * signed-in user). Kept apart from the channel above on purpose: the
+ * existing cascades there assume "this client made the write" and must not
+ * start firing for every other session's writes too. Only the Automation
+ * Engine listens here, and it de-duplicates through its run claims.
+ */
+const remoteListeners = new Map<string, Set<Handler>>();
+
+export function hasRemoteCollectionListeners(collection: string): boolean {
+  return (remoteListeners.get(collection)?.size || 0) > 0;
+}
+
+export function emitRemoteCollectionEvent(evt: CollectionEvent): void {
+  remoteListeners.get(evt.collection)?.forEach((handler) => handler(evt));
+}
+
+export function onRemoteCollectionEvent(collection: string, handler: Handler): () => void {
+  if (!remoteListeners.has(collection)) {
+    remoteListeners.set(collection, new Set());
+  }
+  const handlers = remoteListeners.get(collection)!;
+  handlers.add(handler);
+  return () => {
+    handlers.delete(handler);
+  };
+}

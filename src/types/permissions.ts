@@ -12,7 +12,7 @@ export const PERMISSION_LEVELS: PermissionLevel[] = ["none", "view", "edit", "de
 export const PERMISSION_LEVEL_LABELS: Record<PermissionLevel, string> = {
   none: "No Access",
   view: "View",
-  edit: "Create & Edit",
+  edit: "Add or Edit",
   delete: "Delete"
 };
 
@@ -44,6 +44,23 @@ export function hasPermission(
 ): boolean {
   if (!granular) return false;
   return normalizePermission(granular[moduleId])[action];
+}
+
+/**
+ * Matches the Firestore authorization migration behavior:
+ * - an explicit granular entry is authoritative;
+ * - older profiles may fall back to their flat module list for View/Edit;
+ * - legacy flat permissions never imply Delete.
+ */
+export function hasEffectivePermission(
+  granular: GranularPermissions | undefined,
+  legacyModules: string[] | undefined,
+  moduleId: string,
+  action: PermissionAction
+): boolean {
+  const hasExplicit = !!granular && Object.prototype.hasOwnProperty.call(granular, moduleId);
+  if (hasExplicit) return hasPermission(granular, moduleId, action);
+  return action !== "delete" && !!legacyModules?.includes(moduleId);
 }
 
 export function getPermissionFlags(

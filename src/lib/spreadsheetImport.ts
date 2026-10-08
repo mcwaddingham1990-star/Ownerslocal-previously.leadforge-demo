@@ -5,6 +5,7 @@
 // name instead of requiring an exact template -- the same job LeadsPage's
 // existing CSV importer already did by hand; this generalizes that pattern
 // so every page gets it instead of re-deriving it.
+import ExcelJS from "exceljs";
 import { parseCsv, downloadCsv } from "./csv";
 
 export interface ImportFieldSpec<K extends string = string> {
@@ -141,6 +142,49 @@ export function readRow<K extends string>(row: string[], columnMap: Array<K | nu
  * genuinely different (much bigger, AI-vision) problem this doesn't claim
  * to solve.
  */
+/** Quote a cell only when it needs it (contains a comma/quote/newline), doubling any embedded quotes -- a real round-trip-safe CSV cell, not the naive unquoted comma-join InventoryPage's own Excel importer uses (that one breaks the moment a cell itself contains a comma, e.g. "123 Main St, Suite 4"). */
+function csvEscape(value: string): string {
+  return /[",\n]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
+}
+
+/** Same cell-value extraction ExcelJS's own consumers in this app already use (see InventoryPage.tsx's excelFileToImportLines) -- formulas resolve to their last calculated result, not the formula text; rich text runs are flattened to plain text. */
+function excelCellToString(value: unknown): string {
+  if (value == null) return "";
+  if (value instanceof Date) return value.toISOString();
+  if (typeof value === "object") {
+    const rich = value as { text?: string; result?: unknown; richText?: Array<{ text: string }> };
+    if (typeof rich.text === "string") return rich.text;
+    if (Array.isArray(rich.richText)) return rich.richText.map(t => t.text).join("");
+    if (rich.result != null) return String(rich.result);
+    return "";
+  }
+  return String(value);
+}
+
+/**
+ * Real .xlsx parsing via ExcelJS (already a dependency, used the same way by
+ * InventoryPage's own Excel importer) -- reads the first sheet and converts
+ * it to a properly quoted CSV string so it flows through the exact same
+ * parseSheet/autoMapHeaders engine as an actual CSV upload, instead of
+ * duplicating the column-mapping logic for a second input format. Legacy
+ * .xls (pre-2007 binary format) is NOT readable this way -- ExcelJS only
+ * understands the OOXML .xlsx format -- and throws; the caller (
+ * BulkImportModal) catches that and tells the user to re-save as .xlsx.
+ */
+export async function extractExcelText(file: File): Promise<string> {
+  const buffer = await file.arrayBuffer();
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.load(buffer);
+  const worksheet = workbook.worksheets[0];
+  if (!worksheet) return "";
+  const lines: string[] = [];
+  worksheet.eachRow({ includeEmpty: false }, row => {
+    const cells = (row.values as unknown[]).slice(1).map(excelCellToString);
+    lines.push(cells.map(csvEscape).join(","));
+  });
+  return lines.join("\n");
+}
+
 export async function extractPdfTableText(file: File): Promise<string> {
   const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
   const pdfWorkerUrl = (await import("pdfjs-dist/legacy/build/pdf.worker.min.mjs?url")).default;
