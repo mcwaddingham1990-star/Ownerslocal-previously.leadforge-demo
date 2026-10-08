@@ -80,7 +80,6 @@ export const EstimatesPage: React.FC = () => {
   const { estimates: propsEstimates, setEstimates, schedulingEvents, customers, recentRoster, setGeneratedPdfDraft, documents, setDocuments, businessProfile, estimatePrefill, setEstimatePrefill, setBuildJobPrefill } = useDomainData();
   const [isCustomerPickerOpen, setIsCustomerPickerOpen] = useState(false);
   const {
-    openPlaceholderPage: onOpenPlaceholder,
     takeSnapshot: onTakeSnapshot,
     openPageAIAnalysis: onOpenAIAnalysis,
     navigateToScreen: onNavigateToScreen,
@@ -822,12 +821,8 @@ export const EstimatesPage: React.FC = () => {
     }));
 
   // Handle navigation with safety checks
-  const handleLinkNavigation = (screenId: string, fallbackLabel: string, icon: string) => {
-    if (onNavigateToScreen && ["customers", "leads", "dashboard"].includes(screenId)) {
-      onNavigateToScreen(screenId);
-    } else {
-      onOpenPlaceholder(fallbackLabel, icon);
-    }
+  const handleLinkNavigation = (screenId: string) => {
+    onNavigateToScreen(screenId);
   };
 
   const renderEstimatePricingEditor = () => (
@@ -1642,17 +1637,17 @@ export const EstimatesPage: React.FC = () => {
             { id: "customers", label: "Customers Module", icon: "👥" },
             { id: "leads", label: "Leads Module", icon: "🎯" },
             { id: "inventory", label: "Inventory", icon: "📦" },
-            { id: "scheduling", label: "Scheduling Grid", icon: "📅" },
-            { id: "jobs", label: "Jobs Dispatch", icon: "🛠️" },
+            { id: "scheduling", label: "Scheduling", icon: "📅" },
+            { id: "dispatch", label: "Dispatch", icon: "🚚" },
+            { id: "jobs", label: "Jobs", icon: "🛠️" },
             { id: "documents", label: "Documents", icon: "📂" },
             { id: "revenue", label: "Revenue", icon: "💰" },
             { id: "ai_assistant", label: "AI Assistant", icon: "🤖" },
-            { id: "dashboard", label: "Dashboard", icon: "📊" },
-            { id: "shared_events", label: "History", icon: "⚙️" }
+            { id: "dashboard", label: "Dashboard", icon: "📊" }
           ].map((node) => (
             <button
               key={node.id}
-              onClick={() => handleLinkNavigation(node.id, node.label, node.icon)}
+              onClick={() => handleLinkNavigation(node.id)}
               className="p-2.5 bg-white hover:bg-[#C7E3FA] border border-[#9EC8EF] text-[#1F3557] rounded-xl text-[10px] uppercase font-black tracking-wider transition-colors cursor-pointer text-center flex items-center justify-center gap-1.5 shadow-2xs"
             >
               <span>{node.icon}</span>
