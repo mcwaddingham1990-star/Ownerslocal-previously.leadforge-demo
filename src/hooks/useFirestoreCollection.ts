@@ -1,5 +1,6 @@
-import { useState, Dispatch, SetStateAction } from "react";
+import { useRef, useState, Dispatch, SetStateAction } from "react";
 import { MOCK_SEED_DATA } from "../lib/mockSeedData";
+import { emitCollectionEvent } from "../lib/eventBus";
 
 type WithId = { id?: string };
 
@@ -23,15 +24,34 @@ export function useFirestoreCollection<T extends WithId>(
     const seed = (MOCK_SEED_DATA[collectionName] as T[]) || [];
     return options?.normalize ? seed.map(options.normalize) : seed;
   });
+  const itemsRef = useRef(items);
 
+  // Same create/update/delete events the real hook emits, so the event
+  // cascades (Automation Engine, Event Engine subscribers) still run here.
   const setItems: Dispatch<SetStateAction<T[]>> = (value) => {
-    setItemsState(prev => {
-      const next = typeof value === "function" ? (value as (p: T[]) => T[])(prev) : value;
-      return options?.normalize ? next.map(options.normalize) : next;
-    });
+    const prev = itemsRef.current;
+    const raw = typeof value === "function" ? (value as (p: T[]) => T[])(prev) : value;
+    const next = options?.normalize ? raw.map(options.normalize) : raw;
+    itemsRef.current = next;
+    setItemsState(next);
+    emitDiffEvents(collectionName, prev, next);
   };
 
   const refresh = async () => {};
 
   return [items, setItems, refresh];
+}
+
+function emitDiffEvents<T extends WithId>(collection: string, prev: T[], next: T[]): void {
+  const prevMap = new Map(prev.map(item => [item.id, item]));
+  const nextIds = new Set<string | undefined>();
+  for (const item of next) {
+    nextIds.add(item.id);
+    const previous = prevMap.get(item.id);
+    if (!previous) emitCollectionEvent({ collection, type: "created", item });
+    else if (JSON.stringify(previous) !== JSON.stringify(item)) emitCollectionEvent({ collection, type: "updated", item, previous });
+  }
+  for (const item of prev) {
+    if (!nextIds.has(item.id)) emitCollectionEvent({ collection, type: "deleted", item });
+  }
 }

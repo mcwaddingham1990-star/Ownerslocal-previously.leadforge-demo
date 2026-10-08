@@ -26,9 +26,13 @@ export default defineConfig(() => {
       'process.env.GOOGLE_MAPS_MAP_ID': JSON.stringify(process.env.GOOGLE_MAPS_MAP_ID || ''),
     },
     resolve: {
-      alias: {
-        '@': path.resolve(__dirname, '.'),
-      },
+      // Every `firebase/firestore` import goes through the demo shim (writes
+      // succeed instantly without storing anything, reads come back empty)
+      // so nothing waits on the unreachable placeholder Firebase project.
+      alias: [
+        { find: /^firebase\/firestore$/, replacement: path.resolve(__dirname, 'src/lib/demoFirestoreShim.ts') },
+        { find: '@', replacement: path.resolve(__dirname, '.') },
+      ],
     },
     server: {
       port: parseInt(process.env.PORT || '3000'),
