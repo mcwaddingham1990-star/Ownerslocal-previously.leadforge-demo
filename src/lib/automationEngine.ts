@@ -53,7 +53,7 @@ export const AUTOMATION_TRIGGERS: TriggerDefinition[] = [
   { id: "booking.website.created", label: "Website Booking", description: "A job booked through Online Booking on your website, or a request sent from your website lead form.", collection: "leads", creation: true },
   { id: "booking.portal.created", label: "Customer Portal Booking", description: "A job a customer booked (or a service request they sent) from their Customer Portal.", collection: "leads", creation: true },
   { id: "estimate.created", label: "Estimate Created", description: "A new estimate is saved.", collection: "estimates", creation: true },
-  { id: "estimate.accepted", label: "Estimate Accepted", description: "An estimate's status becomes Accepted (by you or by the customer in the portal).", collection: "estimates", creation: false },
+  { id: "estimate.accepted", label: "Estimate Accepted", description: "An estimate becomes Accepted or Signed (by you, an in-person or remote signature, or the customer in the portal).", collection: "estimates", creation: false },
   { id: "job.created", label: "Job Created", description: "A new job is created.", collection: "scheduling_events", creation: true },
   { id: "job.completed", label: "Job Completed", description: "A job's status becomes Completed.", collection: "scheduling_events", creation: false },
   { id: "appointment.created", label: "Appointment Created", description: "A customer appointment (site visit, consultation, inspection, estimate visit...) is scheduled.", collection: "scheduling_events", creation: true },
@@ -121,7 +121,7 @@ const ALL_TRIGGERS: AutomationTrigger[] = AUTOMATION_TRIGGERS.map(t => t.id);
  * marking leads lost, scripting/code.
  */
 export const AUTOMATION_ACTIONS: ActionDefinition[] = [
-  { id: "create_job", label: "Create Job", description: "Runs the same Estimate/Lead → Job conversion as the Convert to Job button. Never creates a second job for the same estimate or lead.", triggers: [...LEAD_TRIGGERS, "estimate.accepted"] },
+  { id: "create_job", label: "Prompt to Build Job", description: "Asks you to build the job: opens the Build Job form pre-filled from the estimate or lead so you set its schedule, crew, job tracking and job costing. Never creates a job by itself, and never for an estimate or lead that already has one.", triggers: [...LEAD_TRIGGERS, "estimate.accepted"] },
   { id: "create_appointment", label: "Create Appointment", description: "Puts an unassigned appointment on the Scheduling calendar.", triggers: [...LEAD_TRIGGERS, ...ESTIMATE_TRIGGERS, "job.created"] },
   { id: "create_invoice", label: "Create Invoice", description: "Creates the job's invoice the same way the Job → Invoice handoff does. Never a second open invoice for the same job.", triggers: ["job.completed"] },
   { id: "send_customer_confirmation", label: "Send Customer Confirmation", description: "Posts a confirmation in the customer's Messages / Customer Portal conversation.", triggers: [...ESTIMATE_TRIGGERS, ...JOB_TRIGGERS, "appointment.created", "invoice.created", "invoice.paid", ...BOOKING_TRIGGERS] },
@@ -233,7 +233,10 @@ export function deriveAutomationEvents(evt: CollectionEvent): AutomationEvent[] 
 
   if (collection === "estimates") {
     if (type === "created") events.push(makeEvent("estimate.created", "estimates", item, undefined));
-    if (type === "updated" && previous?.status !== "Accepted" && item.status === "Accepted") {
+    // Signed and Accepted mean the same thing for an estimate.
+    const acceptedNow = item.status === "Accepted" || item.status === "Signed";
+    const acceptedBefore = previous?.status === "Accepted" || previous?.status === "Signed";
+    if (type === "updated" && acceptedNow && !acceptedBefore) {
       events.push(makeEvent("estimate.accepted", "estimates", item, previous));
     }
   }
@@ -678,13 +681,13 @@ export interface AutomationTemplate {
 export const AUTOMATION_TEMPLATES: AutomationTemplate[] = [
   {
     id: "estimate_accepted_job",
-    name: "Estimate Accepted → Create Job",
-    description: "Convert accepted estimates into jobs, tell the owner, and confirm with the customer.",
+    name: "Estimate Accepted → Build Job",
+    description: "Prompt you to build the job for an accepted (signed) estimate, tell the owner, and confirm with the customer.",
     trigger: "estimate.accepted",
     conditions: [],
     actions: [
-      { type: "create_job", config: { daysFromNow: 1 } },
-      { type: "notify_team", config: { recipients: "owner", message: "Estimate {number} for {customer} ({amount}) was accepted -- a job was created." } },
+      { type: "create_job" },
+      { type: "notify_team", config: { recipients: "owner", message: "Estimate {number} for {customer} ({amount}) was accepted -- build the job from Estimates or Jobs." } },
       { type: "send_customer_confirmation", config: { message: "Thanks, {customer}! We received your approval of estimate {number} and are getting your job on the schedule. -- {business}" } }
     ]
   },

@@ -9,6 +9,7 @@
  * engine can recognise -- and ignore -- the collection events its own writes
  * produce.
  */
+import { estimateBuildJobPrompt, leadBuildJobPrompt, type BuildJobPromptRequest } from "./buildJobPrompts";
 import type { Dispatch, SetStateAction } from "react";
 import type { Customer, EmployeeRecord, Estimate, Lead, SchedulingEvent, AppNotification } from "../types/domain";
 import type { Invoice, JournalEntry, SalesTaxRate } from "../types/accounting";
@@ -88,6 +89,8 @@ export interface AutomationActionDeps {
   actorEmail?: string;
   getData: () => AutomationDataSnapshot;
   createJob: CreateJobFn;
+  /** Shows the "build the job?" prompt (Build Job form pre-filled). Returns false when it was already asked about. */
+  promptBuildJob: (request: BuildJobPromptRequest) => boolean;
   createAppointment: CreateAppointmentFn;
   updateJob: (jobId: string, updates: Partial<SchedulingEvent>, actionLabel?: string) => SchedulingEvent | null;
   setLeads: Dispatch<SetStateAction<Lead[]>>;
@@ -212,55 +215,31 @@ export function createAutomationActionHandlers(deps: AutomationActionDeps): Reco
   const now = () => (deps.now ? deps.now() : new Date());
   const automationLabel = (automation: Automation) => `automation "${automation.name}"`;
 
-  const createJob: AutomationActionHandler = (action, event, automation) => {
+  // "Create Job" (shown as Prompt to Build Job) never creates a bare job:
+  // a real job needs its schedule, crew, job tracking and job costing, so it
+  // asks the user to build it in the shared Build Job form, pre-filled from
+  // the estimate/lead. Nothing is created until that form is saved.
+  const createJob: AutomationActionHandler = (_action, event) => {
     const data = deps.getData();
     const r = event.record;
-    const date = dateFromNow(action.config?.daysFromNow, now());
     if (event.collection === "estimates") {
       const estimate: Estimate = data.estimates.find(e => e.id === r.id) || r;
       const existing = data.schedulingEvents.find(e => e.sourceEstimateId === estimate.id);
       if (existing) return skipped(`Job ${existing.jobNumber || existing.id} already exists for estimate ${estimate.number}.`, existing.id);
       const matchedCustomer = resolveEventCustomer(event, data.customers);
-      // Same mapping as the estimate's own "Convert to Job" button
-      // (EstimatesPage.openBuildJobFromEstimate), through the same createJob.
-      const job = deps.createJob({
-        customerId: matchedCustomer?.id,
-        customer: estimate.customerName,
-        customerPhone: normalizeContactPhone(estimate.phone || matchedCustomer?.phone),
-        customerEmail: matchedCustomer?.email,
-        customerAddress: estimate.address || matchedCustomer?.address,
-        description: estimate.projectSpecifics || undefined,
-        notes: estimate.notes,
-        budget: estimate.amount,
-        date,
-        startTime: "09:00",
-        endTime: "11:00",
-        sourceEstimateId: estimate.id,
-        source: matchedCustomer?.source || estimate.source,
-        createdByAutomationId: automation.id
-      });
-      return completed(`Created job ${job.jobNumber || job.id} (unassigned, ${date}) from estimate ${estimate.number}.`, job.id);
+      if (!deps.promptBuildJob(estimateBuildJobPrompt(estimate, matchedCustomer))) {
+        return skipped(`Already asked to build the job for estimate ${estimate.number}.`);
+      }
+      return completed(`Asked to build the job for estimate ${estimate.number} (Build Job form pre-filled; no job created automatically).`);
     }
     if (event.collection === "leads") {
       const lead: Lead = data.leads.find(l => l.id === r.id) || r;
       const existing = data.schedulingEvents.find(e => e.eventType === "Job" && e.sourceLeadId === lead.id);
       if (existing) return skipped(`Job ${existing.jobNumber || existing.id} already exists for this lead.`, existing.id);
-      // Same mapping as the lead's own "Build Job" button (LeadsPage).
-      const job = deps.createJob({
-        customer: lead.name,
-        customerPhone: lead.phone,
-        customerEmail: lead.email,
-        customerAddress: lead.address,
-        notes: lead.notes,
-        budget: lead.estimatedValue,
-        date,
-        startTime: "09:00",
-        endTime: "11:00",
-        sourceLeadId: lead.id,
-        source: lead.source,
-        createdByAutomationId: automation.id
-      });
-      return completed(`Created job ${job.jobNumber || job.id} (unassigned, ${date}) from lead ${lead.name}.`, job.id);
+      if (!deps.promptBuildJob(leadBuildJobPrompt(lead))) {
+        return skipped(`Already asked to build the job for ${lead.name}.`);
+      }
+      return completed(`Asked to build the job for lead ${lead.name} (Build Job form pre-filled; no job created automatically).`);
     }
     if (event.collection === "scheduling_events" && event.record?.eventType === "Job") return skipped("This booking is already a job.", event.record.id);
     return skipped("Create Job only applies to estimates and leads.");

@@ -586,7 +586,10 @@ export const DocumentsPage: React.FC = () => {
       // accidental same-ID copies so signing can never add another table row.
       setEstimates(prev => prev
         .filter((estimate, index, all) => all.findIndex(item => item.id === estimate.id) === index)
-        .map(estimate => estimate.id === sourceEstimateId ? { ...estimate, status: "Signed" as const } : estimate));
+        .map(estimate => estimate.id === sourceEstimateId
+          // Signed means accepted -- the acceptance prompt then asks to build the job.
+          ? { ...estimate, status: "Accepted" as const, acceptedAt: new Date().toISOString(), acceptedVia: "in_person_signature" }
+          : estimate));
 
       if (sourceEstimate) {
         const normalizedCompany = normalizeEstimateCompany(sourceEstimate.customerName, sourceEstimate.company);

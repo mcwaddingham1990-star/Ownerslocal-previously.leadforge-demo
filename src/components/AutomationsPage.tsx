@@ -81,7 +81,7 @@ interface BuilderProps {
 
 const defaultConfigFor = (type: AutomationActionType, trigger: AutomationTrigger): AutomationAction["config"] => {
   switch (type) {
-    case "create_job": return { daysFromNow: 1 };
+    case "create_job": return {};
     case "create_appointment": return { appointmentType: "Site Visit", daysFromNow: 1 };
     case "create_follow_up_task": return { daysFromNow: 2 };
     case "notify_team": return { recipients: "owner" };
@@ -232,7 +232,7 @@ const AutomationBuilder: React.FC<BuilderProps> = ({ initial, isNew, onCancel, o
                       </div>
                       <button type="button" onClick={() => update({ actions: draft.actions.filter(x => x.id !== a.id) })} className="rounded-lg p-1 text-slate-400 hover:text-rose-600" aria-label="Remove action"><X className="h-3.5 w-3.5" /></button>
                     </div>
-                    {(a.type === "create_job" || a.type === "create_appointment" || a.type === "create_follow_up_task") && (
+                    {(a.type === "create_appointment" || a.type === "create_follow_up_task") && (
                       <label className="flex items-center gap-2 text-[11px] font-semibold text-slate-600">
                         Schedule
                         <input type="number" min={0} max={365} value={cfg.daysFromNow ?? 1} onChange={e => updateAction(a.id, { daysFromNow: Math.max(0, Math.min(365, parseInt(e.target.value, 10) || 0)) })} className="w-16 rounded-lg border border-[#A9CDEE] px-2 py-1 text-xs" />
