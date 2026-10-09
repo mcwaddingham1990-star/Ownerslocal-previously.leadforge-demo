@@ -259,17 +259,26 @@
    scrolls on its own. */
 @media screen and (min-width:801px){
   .selfiesave-editor-root .workspace {height:calc(100dvh - 72px);min-height:0;overflow:hidden}
-  .selfiesave-editor-root .workspace>.editor-wrap {height:100%;min-height:0;overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch}
-  .selfiesave-editor-root .workspace>.sidebar {height:100%;min-height:0;overflow-y:auto;overscroll-behavior:contain}
+  /* No overscroll containment here: in a phone's "Desktop site" mode the
+     page is pinch-zoomed, and a drag that reaches the document's end must
+     carry on and pan the zoomed view, or the user is stuck on one spot. */
+  .selfiesave-editor-root .workspace>.editor-wrap {height:100%;min-height:0;overflow-y:auto;overscroll-behavior:auto;-webkit-overflow-scrolling:touch}
+  .selfiesave-editor-root .workspace>.sidebar {height:100%;min-height:0;overflow-y:auto;overscroll-behavior:auto}
 }
 
 /* Phones: the left menu (signature/initials lines, images, clauses, Insert
    Text...) opens as a slide-out drawer from the top bar's "Add Items". */
 .selfiesave-editor-root .topbar nav button.tools-drawer-btn,
+.selfiesave-editor-root .tools-fab,
 .selfiesave-editor-root .tools-drawer-close,
 .selfiesave-editor-root .tools-drawer-backdrop {display:none}
 @media screen and (max-width:800px){
-  .selfiesave-editor-root .topbar nav button.tools-drawer-btn {display:flex}
+  .selfiesave-editor-root .topbar nav button.tools-drawer-btn {display:flex;background:#2c6deb;color:#fff;font-weight:700}
+  .selfiesave-editor-root .tools-fab {
+    display:block;position:fixed;right:16px;bottom:calc(20px + env(safe-area-inset-bottom));z-index:40;
+    border:0;border-radius:999px;padding:14px 20px;background:#2c6deb;color:#fff;
+    font-size:15px;font-weight:800;box-shadow:0 8px 22px #10243e55;
+  }
   .selfiesave-editor-root .sidebar.tools-drawer-open {
     display:block;position:fixed;top:72px;left:0;bottom:0;z-index:45;
     width:min(320px,88vw);overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;
@@ -280,3 +289,4 @@
   .selfiesave-editor-root .sidebar.tools-drawer-open .side-head {display:flex;align-items:center;justify-content:space-between}
   .selfiesave-editor-root .sidebar.tools-drawer-open .tools-drawer-close {display:block;border:0;background:#eef2f6;border-radius:8px;width:34px;height:34px;font-size:20px;line-height:1;color:#1d2b3a}
 }
+@media print{.selfiesave-editor-root .tools-fab,.selfiesave-editor-root .tools-drawer-backdrop{display:none!important}}
