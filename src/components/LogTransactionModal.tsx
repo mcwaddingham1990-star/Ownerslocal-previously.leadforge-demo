@@ -1,10 +1,12 @@
 import React, { useRef, useState } from "react";
-import { Camera, Keyboard, X, AlertTriangle, Loader2, DollarSign } from "lucide-react";
+import { Camera, Keyboard, X, AlertTriangle, Loader2, DollarSign, Repeat } from "lucide-react";
 import { Transaction } from "../types/domain";
 import { downscaleImageToBase64 } from "../lib/imageCompression";
 import { buildScanSnapshotDocument, SNAPSHOT_PHOTO_MAX_BASE64_LENGTH } from "../lib/scanSnapshotDocument";
 import { authedFetch } from "../lib/apiClient";
 import { useDomainData } from "../context/DomainDataContext";
+import { useNavTelemetry } from "../context/NavTelemetryContext";
+import { planRepeatingExpense, RECURRING_FREQUENCY_LABELS, type RecurringFrequency } from "../lib/recurringExpense";
 
 interface LogTransactionModalProps {
   type: "income" | "expense";
@@ -32,7 +34,8 @@ const INCOME_CATEGORIES = ["Job Payment", "Check Deposit", "Deposit", "Refund", 
  * user confirming the form, typed or scanned.
  */
 export function LogTransactionModal({ type, createdBy, onSave, onClose }: LogTransactionModalProps) {
-  const { setDocuments, schedulingEvents } = useDomainData();
+  const { setDocuments, schedulingEvents, setRecurringTransactions } = useDomainData();
+  const { triggerNotification } = useNavTelemetry();
   const jobs = React.useMemo(() => schedulingEvents.filter(e => e.eventType === "Job"), [schedulingEvents]);
   const [mode, setMode] = useState<Mode>("choose");
   // One stable id per form-fill, reused unchanged across a retry (see
@@ -61,6 +64,19 @@ export function LogTransactionModal({ type, createdBy, onSave, onClose }: LogTra
   // Optional job link (expenses only) so Jobs' cost breakdown can roll this
   // up as an "other cost" alongside labor and materials.
   const [jobId, setJobId] = useState("");
+  // Expenses only: one-time (default) or repeating on a schedule. Repeating
+  // is never required.
+  const [repeating, setRepeating] = useState(false);
+  const [frequency, setFrequency] = useState<RecurringFrequency>("monthly");
+  const dateInputRef = useRef<HTMLInputElement | null>(null);
+  const isRepeating = type === "expense" && repeating;
+  const chooseRepeating = (next: boolean) => {
+    setRepeating(next);
+    // Open the calendar right away so the due day gets picked.
+    if (next) {
+      try { dateInputRef.current?.showPicker?.(); } catch { dateInputRef.current?.focus(); }
+    }
+  };
 
   const categories = type === "income" ? INCOME_CATEGORIES : EXPENSE_CATEGORIES;
   const label = type === "income" ? "Income" : "Expense";
@@ -74,6 +90,7 @@ export function LogTransactionModal({ type, createdBy, onSave, onClose }: LogTra
     setCategory("");
     setDate(todayStr());
     setJobId("");
+    setRepeating(false);
     setScanError(null);
     setMode("form");
   };
@@ -131,6 +148,29 @@ export function LogTransactionModal({ type, createdBy, onSave, onClose }: LogTra
     setSaveError(null);
     if (!pendingIdRef.current) pendingIdRef.current = `txn_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     try {
+      if (isRepeating) {
+        const plan = planRepeatingExpense({
+          id: `rec_${pendingIdRef.current}`,
+          amount: parsedAmount,
+          description: description.trim(),
+          category: category || undefined,
+          jobId: jobId || undefined,
+          dueDate: date,
+          frequency,
+          today: todayStr(),
+          createdAt: new Date().toISOString(),
+          createdBy
+        });
+        // Keyed by the same stable id, so a retry replaces rather than duplicates.
+        setRecurringTransactions(prev => [...prev.filter(r => r.id !== plan.recurring.id), plan.recurring]);
+        const repeats = RECURRING_FREQUENCY_LABELS[frequency].toLowerCase();
+        if (!plan.logFirstNow) {
+          triggerNotification(`Repeating expense set: it will be logged ${repeats}, starting ${date}.`);
+          onClose();
+          return;
+        }
+        triggerNotification(`Expense logged and set to repeat ${repeats}. Next one: ${plan.recurring.nextRunDate}.`);
+      }
       await onSave({
         id: pendingIdRef.current,
         type,
@@ -141,7 +181,8 @@ export function LogTransactionModal({ type, createdBy, onSave, onClose }: LogTra
         date,
         createdAt: new Date().toISOString(),
         createdBy,
-        jobId: type === "expense" && jobId ? jobId : undefined
+        jobId: type === "expense" && jobId ? jobId : undefined,
+        ...(isRepeating ? { recurringTransactionId: `rec_${pendingIdRef.current}` } : {})
       });
       const savedTxnId = pendingIdRef.current;
       pendingIdRef.current = null;
@@ -255,6 +296,45 @@ export function LogTransactionModal({ type, createdBy, onSave, onClose }: LogTra
                 className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 font-semibold focus:outline-none focus:border-blue-400"
               />
             </div>
+            {type === "expense" && (
+              <fieldset className="space-y-1">
+                <legend className="text-[9px] uppercase tracking-wider text-slate-400 font-extrabold">How often?</legend>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    aria-pressed={!repeating}
+                    onClick={() => chooseRepeating(false)}
+                    className={`py-2 rounded-xl font-bold border cursor-pointer ${!repeating ? "bg-blue-600 text-white border-blue-600" : "bg-slate-50 text-slate-600 border-transparent"}`}
+                  >
+                    One-time
+                  </button>
+                  <button
+                    type="button"
+                    aria-pressed={repeating}
+                    onClick={() => chooseRepeating(true)}
+                    className={`py-2 rounded-xl font-bold border cursor-pointer flex items-center justify-center gap-1.5 ${repeating ? "bg-blue-600 text-white border-blue-600" : "bg-slate-50 text-slate-600 border-transparent"}`}
+                  >
+                    <Repeat className="w-3.5 h-3.5" /> Repeating expense
+                  </button>
+                </div>
+              </fieldset>
+            )}
+            {isRepeating && (
+              <div className="space-y-1">
+                <label htmlFor="log-txn-frequency" className="text-[9px] uppercase tracking-wider text-slate-400 font-extrabold">Repeats</label>
+                <select
+                  id="log-txn-frequency"
+                  value={frequency}
+                  onChange={(e) => setFrequency(e.target.value as RecurringFrequency)}
+                  className="w-full bg-slate-50 border border-slate-200 rounded-xl px-2 py-2 font-semibold focus:outline-none focus:border-blue-400"
+                >
+                  {(Object.keys(RECURRING_FREQUENCY_LABELS) as RecurringFrequency[]).map(f => <option key={f} value={f}>{RECURRING_FREQUENCY_LABELS[f]}</option>)}
+                </select>
+                <p className="text-[9.5px] text-slate-400 font-sans">
+                  Pick the day it's due below. {date && date <= todayStr() ? "This one is logged now, then again on each due date." : "It's logged automatically on each due date."} Stop it anytime in Accounting › Recurring.
+                </p>
+              </div>
+            )}
             <div className="grid grid-cols-2 gap-2.5">
               <div className="space-y-1">
                 <label htmlFor="log-txn-category" className="text-[9px] uppercase tracking-wider text-slate-400 font-extrabold">Category (optional)</label>
@@ -271,8 +351,9 @@ export function LogTransactionModal({ type, createdBy, onSave, onClose }: LogTra
               <div className="space-y-1">
                 {/* No min/max on purpose: back-dating an older payment or expense
                     is a normal, supported entry. */}
-                <label htmlFor="log-txn-date" className="text-[9px] uppercase tracking-wider text-slate-400 font-extrabold">Date (past dates OK)</label>
+                <label htmlFor="log-txn-date" className="text-[9px] uppercase tracking-wider text-slate-400 font-extrabold">{isRepeating ? "Due date" : "Date (past dates OK)"}</label>
                 <input
+                  ref={dateInputRef}
                   id="log-txn-date"
                   type="date"
                   required
@@ -315,7 +396,7 @@ export function LogTransactionModal({ type, createdBy, onSave, onClose }: LogTra
               disabled={!canSave || isSaving}
               className="flex-1 py-2 text-xs font-bold bg-blue-600 text-white hover:bg-blue-700 rounded-xl shadow-md cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
             >
-              {isSaving ? "Saving..." : `Save ${label}`}
+              {isSaving ? "Saving..." : isRepeating ? "Save Repeating Expense" : `Save ${label}`}
             </button>
           )}
         </div>

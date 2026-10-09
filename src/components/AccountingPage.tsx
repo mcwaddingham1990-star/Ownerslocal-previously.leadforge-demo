@@ -45,6 +45,7 @@ import {
 } from "../lib/accountingEngine";
 import { buildInvoicePdf, bytesToBase64 } from "../lib/pdfExport";
 import { MAX_INLINE_BASE64_LENGTH } from "../lib/firestoreDocumentLimits";
+import { advanceRecurringDate } from "../lib/recurringExpense";
 import SendChoiceModal from "./SendChoiceModal";
 import ESignChoiceModal from "./ESignChoiceModal";
 import { buildCustomerPortalLink } from "../lib/customerPortalClient";
@@ -2278,7 +2279,7 @@ function RecurringTab({ recurringTransactions, setRecurringTransactions, setInvo
   return (
     <div className="space-y-4">
       <div className="flex justify-between items-center">
-        <h3 className="text-sm font-black text-[#1F3557] uppercase">Recurring Invoices &amp; Bills</h3>
+        <h3 className="text-sm font-black text-[#1F3557] uppercase">Recurring Invoices, Bills &amp; Expenses</h3>
         {canEdit && (
           <button onClick={() => setIsAdding(true)} className="px-3 py-2 bg-[#315C9F] hover:bg-[#1F3557] text-white text-xs font-bold rounded-xl uppercase flex items-center gap-1.5 cursor-pointer">
             <Plus className="w-3.5 h-3.5" /> New Recurring
@@ -2286,7 +2287,7 @@ function RecurringTab({ recurringTransactions, setRecurringTransactions, setInvo
         )}
       </div>
       <p className="text-[10px] text-emerald-700 bg-emerald-50/80 border border-emerald-200 rounded-xl p-2.5">
-        Automatic processing is active. Due recurring invoices and bills are generated server-side; “Run Now” remains available for an immediate manual run.
+        Automatic processing is active. Due recurring invoices and bills are generated server-side, and repeating expenses (set up from Log Expense) are logged on their due dates. “Run Now” remains available for an immediate manual run of an invoice or bill.
       </p>
       <div className="space-y-2">
         {recurringTransactions.length === 0 && <p className="text-xs text-[#5E7393] text-center py-6">No recurring items yet.</p>}
@@ -2294,10 +2295,30 @@ function RecurringTab({ recurringTransactions, setRecurringTransactions, setInvo
           <div key={r.id} className="bg-[#C7E3FA] rounded-xl border border-[#9EC8EF] p-3 flex justify-between items-center text-xs">
             <div>
               <p className="font-bold text-[#1F3557]">{r.templateName} <span className="text-[9px] text-[#5E7393] uppercase">({r.type})</span></p>
-              <p className="text-[10px] text-[#5E7393]">{r.payload.customerOrVendor} · {r.frequency} · Next: {r.nextRunDate}</p>
+              <p className="text-[10px] text-[#5E7393]">{[r.payload.customerOrVendor, r.type === "expense" ? `$${(r.payload.lineItems?.[0]?.unitPrice || 0).toFixed(2)}` : "", r.frequency, r.active === false ? "Paused" : `Next: ${r.nextRunDate}`].filter(Boolean).join(" · ")}</p>
             </div>
             {canEdit && (
-              <button onClick={() => runNow(r)} className="text-[#315C9F] font-bold text-[10px] hover:underline cursor-pointer">Run Now</button>
+              <div className="flex items-center gap-3">
+                {r.type !== "expense" && r.active !== false && (
+                  <button onClick={() => runNow(r)} className="text-[#315C9F] font-bold text-[10px] hover:underline cursor-pointer">Run Now</button>
+                )}
+                <button
+                  onClick={() => {
+                    setRecurringTransactions((prev: RecurringTransaction[]) => prev.map(x => {
+                      if (x.id !== r.id) return x;
+                      if (x.active !== false) return { ...x, active: false };
+                      // Resuming picks up at the next due date -- the paused stretch isn't back-filled.
+                      let nextRunDate = x.nextRunDate;
+                      while (nextRunDate < todayStr()) nextRunDate = advanceRecurringDate(nextRunDate, x.frequency);
+                      return { ...x, active: true, nextRunDate };
+                    }));
+                    triggerNotification(`"${r.templateName}" ${r.active === false ? "resumed" : "paused"}.`);
+                  }}
+                  className="text-[#315C9F] font-bold text-[10px] hover:underline cursor-pointer"
+                >
+                  {r.active === false ? "Resume" : "Stop"}
+                </button>
+              </div>
             )}
           </div>
         ))}

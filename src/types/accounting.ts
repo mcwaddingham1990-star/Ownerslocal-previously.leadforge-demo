@@ -161,7 +161,9 @@ export interface BankAccount {
 
 export interface RecurringTransaction {
   id: string;
-  type: "invoice" | "bill";
+  /** "expense" = a repeating expense from Log Expense: each run logs a
+   * real expense transaction (not a bill to pay later). */
+  type: "invoice" | "bill" | "expense";
   templateName: string;
   frequency: "weekly" | "biweekly" | "monthly" | "quarterly" | "yearly";
   nextRunDate: string; // YYYY-MM-DD
@@ -176,8 +178,11 @@ export interface RecurringTransaction {
     category?: string;
     dueInDays: number;
     notes?: string;
+    /** Repeating expenses only: the job each logged expense is costed to. */
+    jobId?: string;
   };
   createdAt: string;
+  createdBy?: string;
 }
 
 export interface MileageLog {
