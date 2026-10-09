@@ -201,6 +201,78 @@ export default function SelfieSaveEditor({accountEmail,accountName,documentId,in
       editor.removeEventListener("touchcancel",end);
     };
   },[]);
+  // One-finger scrolling safety net. Some phones/browser modes (e.g. Chrome's
+  // "Desktop site") have left the document not scrolling under a finger.
+  // These listeners are passive and only watch: when the finger has clearly
+  // moved up/down but the browser hasn't scrolled the document, the editor
+  // scrolls it itself (with a short glide on release). Whenever the browser
+  // does scroll natively, this stays out of the way.
+  useEffect(()=>{
+    if(splash)return;
+    const wrap=editorRef.current;
+    if(!wrap)return;
+    let gesture:{y:number;lastY:number;lastT:number;startTop:number;manual:boolean;expected:number;velocity:number;off:boolean}|null=null;
+    let glide=0;
+    const stopGlide=()=>{if(glide){cancelAnimationFrame(glide);glide=0}};
+    const scrollsItself=(target:EventTarget|null)=>{
+      for(let el=target as HTMLElement|null;el&&el!==wrap;el=el.parentElement){
+        if(el.closest(".grab-handle,.resize-handle"))return true;
+        const style=getComputedStyle(el);
+        if(/(auto|scroll)/.test(style.overflowY)&&el.scrollHeight>el.clientHeight+1)return true;
+      }
+      return false;
+    };
+    const start=(event:TouchEvent)=>{
+      stopGlide();
+      if(event.touches.length!==1||scrollsItself(event.target)){gesture=null;return}
+      const y=event.touches[0].clientY;
+      gesture={y,lastY:y,lastT:performance.now(),startTop:wrap.scrollTop,manual:false,expected:wrap.scrollTop,velocity:0,off:false};
+    };
+    const move=(event:TouchEvent)=>{
+      const g=gesture;
+      if(!g||g.off)return;
+      if(event.touches.length!==1||dragRef.current||resizeRef.current){g.off=true;return}
+      const y=event.touches[0].clientY,now=performance.now();
+      if(!g.manual){
+        if(Math.abs(y-g.y)<24)return;
+        // The browser already scrolled: native scrolling works, leave it be.
+        if(Math.abs(wrap.scrollTop-g.startTop)>1){g.off=true;return}
+        g.manual=true;
+        g.lastY=y;g.lastT=now;g.expected=wrap.scrollTop;
+        return;
+      }
+      // Native scrolling kicked in after all -- hand it back.
+      if(Math.abs(wrap.scrollTop-g.expected)>2){g.off=true;return}
+      const dy=g.lastY-y,dt=Math.max(1,now-g.lastT);
+      wrap.scrollTop+=dy;
+      g.expected=wrap.scrollTop;
+      g.velocity=g.velocity*.6+(dy/dt)*.4;
+      g.lastY=y;g.lastT=now;
+    };
+    const end=()=>{
+      const g=gesture;gesture=null;
+      if(!g||!g.manual||g.off||Math.abs(g.velocity)<.05)return;
+      let v=g.velocity*16,last=performance.now();
+      const step=(now:number)=>{
+        const frames=Math.min(3,(now-last)/16);last=now;
+        wrap.scrollTop+=v*frames;
+        v*=Math.pow(.94,frames);
+        glide=Math.abs(v)>.5?requestAnimationFrame(step):0;
+      };
+      glide=requestAnimationFrame(step);
+    };
+    wrap.addEventListener("touchstart",start,{passive:true});
+    wrap.addEventListener("touchmove",move,{passive:true});
+    wrap.addEventListener("touchend",end,{passive:true});
+    wrap.addEventListener("touchcancel",end,{passive:true});
+    return()=>{
+      stopGlide();
+      wrap.removeEventListener("touchstart",start);
+      wrap.removeEventListener("touchmove",move);
+      wrap.removeEventListener("touchend",end);
+      wrap.removeEventListener("touchcancel",end);
+    };
+  },[splash]);
   const lastScrollTopRef=useRef(0);
   const nextIdRef=useRef(Date.now());
   const textDraftRef=useRef(new Map<number,{value:string;w:number;h:number}>());
