@@ -6,8 +6,10 @@ import { BookOpen, X } from "lucide-react";
 
 /**
  * Page tutorials. Pops up the first time an account opens a page, until they
- * tick "Don't show this again" (closing without it hides it for the rest of
- * this browser session only). `openRequest` re-opens the current page's
+ * tick "Don't show tutorials again" -- which turns off the automatic pop-ups
+ * on every page (one tick, not one per page), on this device's sign-in
+ * screen too. Closing without it hides that page's tutorial for the rest of
+ * this browser session only. `openRequest` re-opens the current page's
  * tutorial on demand -- the sidebar's "Revisit Tutorial" button bumps it.
  *
  * "Don't show again" is per account (tutorial_progress/{uid}, so it follows
@@ -25,6 +27,9 @@ interface TutorialHostProps {
 
 const localKey = (uid?: string | null) => `ol_tutorials_dismissed:${uid || "device"}`;
 const SESSION_KEY = "ol_tutorials_closed_this_session";
+/** Marker in the dismissed set meaning "no automatic tutorials anywhere". */
+const ALL = "*";
+const isOff = (set: Set<string>, id: string) => set.has(ALL) || set.has(id);
 
 function readSet(storage: Storage | undefined, key: string): Set<string> {
   try {
@@ -52,6 +57,8 @@ export const TutorialHost: React.FC<TutorialHostProps> = ({ tutorialId, accountU
   const [openId, setOpenId] = useState<string | null>(null);
   const [dontShowAgain, setDontShowAgain] = useState(false);
   const lastOpenRequest = useRef(openRequest);
+  // True while the open tutorial was asked for (Revisit Tutorial), not popped up automatically.
+  const openedOnRequest = useRef(false);
 
   // Pull this account's saved choices so a new device doesn't re-show tutorials they already turned off.
   useEffect(() => {
@@ -90,8 +97,13 @@ export const TutorialHost: React.FC<TutorialHostProps> = ({ tutorialId, accountU
   // First visit to a page: show its tutorial unless turned off or already closed this session.
   useEffect(() => {
     if (!ready || !tutorialId || !TUTORIALS[tutorialId]) return;
-    if (dismissed.has(tutorialId)) return;
+    if (isOff(dismissed, tutorialId)) {
+      // Turned off on another device and that arrived after it popped up here.
+      setOpenId((current) => (current === tutorialId && !openedOnRequest.current ? null : current));
+      return;
+    }
     if (readSet(browserSession(), SESSION_KEY).has(tutorialId)) return;
+    openedOnRequest.current = false;
     setDontShowAgain(false);
     setOpenId(tutorialId);
   }, [ready, tutorialId, dismissed]);
@@ -106,7 +118,8 @@ export const TutorialHost: React.FC<TutorialHostProps> = ({ tutorialId, accountU
     if (openRequest === lastOpenRequest.current) return;
     lastOpenRequest.current = openRequest;
     if (tutorialId && TUTORIALS[tutorialId]) {
-      setDontShowAgain(dismissed.has(tutorialId));
+      openedOnRequest.current = true;
+      setDontShowAgain(isOff(dismissed, tutorialId));
       setOpenId(tutorialId);
     }
   }, [openRequest, tutorialId, dismissed]);
@@ -120,17 +133,27 @@ export const TutorialHost: React.FC<TutorialHostProps> = ({ tutorialId, accountU
     closedThisSession.add(id);
     writeSet(browserSession(), SESSION_KEY, closedThisSession);
 
-    const wasDismissed = dismissed.has(id);
-    if (dontShowAgain === wasDismissed) return;
+    if (dontShowAgain === isOff(dismissed, id)) return;
     const next = new Set<string>(dismissed);
-    if (dontShowAgain) next.add(id);
-    else next.delete(id);
+    if (dontShowAgain) {
+      next.add(ALL);
+      next.add(id);
+    } else {
+      // Unticked from Revisit Tutorial: automatic tutorials come back.
+      next.delete(ALL);
+      next.delete(id);
+    }
     setDismissed(next);
     writeSet(browserLocal(), localKey(accountUid), next);
     if (accountUid) {
+      // This device's signed-out screens (sign-in) follow the account's choice.
+      const device = readSet(browserLocal(), localKey(null));
+      if (dontShowAgain) device.add(ALL);
+      else device.delete(ALL);
+      writeSet(browserLocal(), localKey(null), device);
       setDoc(
         doc(db, "tutorial_progress", accountUid),
-        { dismissed: { [id]: dontShowAgain }, updatedAt: new Date().toISOString() },
+        { dismissed: { [ALL]: dontShowAgain, [id]: dontShowAgain }, updatedAt: new Date().toISOString() },
         { merge: true }
       ).catch(() => { /* kept locally; syncs next time it's changed */ });
     }
@@ -182,6 +205,9 @@ export const TutorialHost: React.FC<TutorialHostProps> = ({ tutorialId, accountU
           {paragraphs.map((p, i) => (
             <p key={i} className="text-[13px] leading-relaxed text-[#1F3557] font-sans">{p}</p>
           ))}
+          <p className="text-[11px] leading-snug text-[#5E7393] font-sans">
+            Tick “Don’t show tutorials again” to stop these pop-ups on every page. You can still open any page’s tutorial from Revisit Tutorial in the menu.
+          </p>
         </div>
 
         <div className="px-5 py-4 border-t border-[#A9CDEE] bg-[#D6ECFD] flex items-center justify-between gap-3">
@@ -192,7 +218,7 @@ export const TutorialHost: React.FC<TutorialHostProps> = ({ tutorialId, accountU
               onChange={(e) => setDontShowAgain(e.target.checked)}
               className="h-4 w-4 rounded border-[#A9CDEE] text-[#315C9F]"
             />
-            Don’t show this again
+            Don’t show tutorials again
           </label>
           <button
             onClick={close}
