@@ -28,6 +28,11 @@ export const MODULE_CATALOG: Array<{ id: string; label: string; singleAction?: P
   { id: "payments", label: "Payments (Stripe)" },
   { id: "revenue", label: "Revenue" },
   { id: "accounting", label: "Accounting & Bookkeeping" },
+  // Individual money-entry rights, separate from Accounting: lets a role log
+  // expenses or payments (Revenue's Record Expense / Add Payment) without
+  // opening up the books. Accounting "Add or Edit" still includes both.
+  { id: "add_expenses", label: "Add Expenses", singleAction: "edit" },
+  { id: "log_revenue", label: "Log Revenue / Payments", singleAction: "edit" },
   { id: "jobs", label: "Jobs" },
   { id: "work_orders", label: "Work Orders" },
   { id: "price_book", label: "Price Book" },

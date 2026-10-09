@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 import { useVisualViewportBottomRight } from "./hooks/useVisualViewportBottomRight";
 import { db, auth } from "./firebase";
 import { doc, setDoc, getDoc, getDocFromServer, writeBatch, waitForPendingWrites, deleteDoc, updateDoc } from "firebase/firestore";
-import { fullAccessGranular, defaultGranularFromModuleList, hasPermission, GranularPermissions } from "./types/permissions";
+import { fullAccessGranular, defaultGranularFromModuleList, hasPermission, hasEffectivePermission, GranularPermissions } from "./types/permissions";
 import { RevenueEvent, EmployeeRecord, TimeClockLog, Transaction, WorkOrder } from "./types/domain";
 import { PriceBookFolder, PriceBookModel } from "./types/priceBook";
 import { Membership } from "./types/membership";
@@ -2549,6 +2549,30 @@ export default function App() {
       setIsGeneratingFinancialStatement(false);
     }
   };
+
+  // Who may log an expense / a payment: the owner, anyone with Accounting
+  // "Add or Edit", or a role given the individual Add Expenses / Log Revenue
+  // permission (Firestore enforces the same -- see canLogTransaction).
+  const canLogTransaction = (type: "income" | "expense"): boolean => {
+    if (!loggedInUser) return false;
+    if (!simulatedRole && !loggedInUser.isEmployee) return true;
+    const activeRole = simulatedRole || loggedInUser.role;
+    if (activeRole === "Owner") return true;
+    const capability = type === "expense" ? "add_expenses" : "log_revenue";
+    if (simulatedRole) {
+      const roleKey = activeRole.toLowerCase().replace(/ /g, "_");
+      const custom = selectedRoles.find(r => r.name === activeRole || r.id === roleKey);
+      if (custom?.modulePermissions) {
+        return hasPermission(custom.modulePermissions, capability, "edit") || hasPermission(custom.modulePermissions, "accounting", "edit");
+      }
+      const list = custom?.permissions || DEFAULT_ROLES_DATA[roleKey]?.permissions || [];
+      return list.includes(capability) || list.includes("accounting");
+    }
+    return hasEffectivePermission(loggedInUser.granularPermissions, loggedInUser.permissions, capability, "edit")
+      || hasEffectivePermission(loggedInUser.granularPermissions, loggedInUser.permissions, "accounting", "edit");
+  };
+  const canLogExpense = canLogTransaction("expense");
+  const canLogRevenue = canLogTransaction("income");
 
   const [logTransactionType, setLogTransactionType] = useState<"income" | "expense" | null>(() => {
     const saved = sessionStorage.getItem("ownerslocal_pending_financial_scan");
@@ -7812,7 +7836,7 @@ Access to full financial telemetry is restricted.`;
                             { label: "Add Custom Payment", action: "payment", icon: CreditCard },
                             { label: "Run Payroll", action: "payroll", icon: Users },
                             { label: "Create Invoice", action: "invoice", icon: FileText }
-                          ].map((btn, idx) => (
+                          ].filter(btn => (btn.action !== "expense" || canLogExpense) && (btn.action !== "payment" || canLogRevenue)).map((btn, idx) => (
                             <button
                               key={idx}
                               disabled={btn.action === "payroll" && isRunningPayroll}
@@ -8086,7 +8110,7 @@ Access to full financial telemetry is restricted.`;
                                 </span>
                               </div>
 
-                              {logTransactionType && (
+                              {logTransactionType && canLogTransaction(logTransactionType) && (
                                 <LogTransactionModal
                                   type={logTransactionType}
                                   createdBy={loggedInUser?.email}
@@ -8486,7 +8510,7 @@ Access to full financial telemetry is restricted.`;
                                   {/* Adds straight into this list through the same income/expense
                                       pipeline as Record Expense / Add Custom Payment above -- any
                                       date allowed, so older payments can be back-filled. */}
-                                  <button
+                                  {canLogRevenue && <button
                                     type="button"
                                     onClick={() => {
                                       sessionStorage.setItem("ownerslocal_pending_financial_scan", "income");
@@ -8495,7 +8519,7 @@ Access to full financial telemetry is restricted.`;
                                     className="px-3 py-2 text-[11px] font-bold rounded-xl bg-[#315C9F] text-white border border-[#315C9F] hover:bg-[#1F3557] cursor-pointer flex items-center gap-1.5"
                                   >
                                     <Plus className="w-3.5 h-3.5" /> Add Payment
-                                  </button>
+                                  </button>}
                                   <button
                                     type="button"
                                     onClick={() => downloadCsv(
@@ -8551,7 +8575,7 @@ Access to full financial telemetry is restricted.`;
                                   {/* Adds straight into this list through the same income/expense
                                       pipeline as Record Expense / Add Custom Payment above -- any
                                       date allowed, so older expenses can be back-filled. */}
-                                  <button
+                                  {canLogExpense && <button
                                     type="button"
                                     onClick={() => {
                                       sessionStorage.setItem("ownerslocal_pending_financial_scan", "expense");
@@ -8560,7 +8584,7 @@ Access to full financial telemetry is restricted.`;
                                     className="px-3 py-2 text-[11px] font-bold rounded-xl bg-[#315C9F] text-white border border-[#315C9F] hover:bg-[#1F3557] cursor-pointer flex items-center gap-1.5"
                                   >
                                     <Plus className="w-3.5 h-3.5" /> Add Expense
-                                  </button>
+                                  </button>}
                                   <button
                                     type="button"
                                     onClick={() => downloadCsv(
