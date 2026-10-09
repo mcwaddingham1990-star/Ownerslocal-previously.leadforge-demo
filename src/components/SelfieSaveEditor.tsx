@@ -1,5 +1,5 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
-import { createPortal } from "react-dom";
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal, flushSync } from "react-dom";
 import "./selfiesave-editor.css";
 // Vite resolves these to hashed asset URLs at build time, keeping the PDF.js
 // worker version locked to whatever `pdfjs-dist` is installed -- no risk of
@@ -14,14 +14,22 @@ import SignaturePad from "./SignaturePad";
 import SendChoiceModal from "./SendChoiceModal";
 import ESignChoiceModal from "./ESignChoiceModal";
 import { ESignLegalInfoModal, ESignComplianceFooter } from "./ESignLegalInfoModal";
+import { flowDisplayText, layoutFlow, locateFlowCaret, stripFlowFiller, type FlowSlot } from "../lib/flowText";
 
 type FieldKind = "signature" | "initials";
 type SignField = { id:number; party:number; line:number; kind:FieldKind; signed:boolean; committed:boolean; role?:string; name?:string; image?:string; signatureImage?:string; stamp?:string; centralStamp?:string; coords?:string };
-type CanvasObject = { id:number; kind:"text"|"image"|"link"|"video"; page:number; x:number; y:number; w:number; h:number; value:string; scale?:number; source?:"pdf"; fontSize?:number; fontFamily?:string; backgroundColor?:string; color?:string };
+type CanvasObject = { id:number; kind:"text"|"image"|"link"|"video"; page:number; x:number; y:number; w:number; h:number; value:string; scale?:number; source?:"pdf"; fontSize?:number; fontFamily?:string; backgroundColor?:string; color?:string; flowId?:number; flowIndex?:number };
 type Placement = { page?:number; x:number; y:number; w?:number; h?:number };
 type Features = { signatures:boolean; initials:boolean; selfies:boolean; photoId:boolean; location:boolean; displayLocation:boolean; timestamps:boolean; draftingDate:boolean };
 type ImportedPdfText = { value:string; left:number; top:number; width:number; height:number; fontSize:number; fontFamily?:string; backgroundColor?:string };
 type ImportedPdfPage = { image:string; width:number; height:number; text:ImportedPdfText[] };
+
+// Insert Text ("type anywhere") boxes: one flowing text per tap, wrapped at
+// the page margins and continued onto the next page, like a word processor.
+const FLOW_LINE_HEIGHT=1.35;
+const FLOW_FONT="Arial, Helvetica, sans-serif";
+const FLOW_DEFAULT_SIZE=16;
+const isFlow=(o:CanvasObject|undefined):o is CanvasObject&{flowId:number}=>typeof o?.flowId==="number";
 
 const Icon=({children}:{children:React.ReactNode})=><span aria-hidden="true" className="icon">{children}</span>;
 // Selfie capture is a real evidence *option*, never a default requirement --
@@ -280,7 +288,7 @@ export default function SelfieSaveEditor({accountEmail,accountName,documentId,in
       };
       if(d.key.startsWith("object:")){const id=Number(d.key.slice(7));setObjects(v=>v.map(o=>o.id===id?{...o,...next}:o))}else setPlacements(v=>({...v,[d.key]:{...v[d.key],...next}}))
     };
-    const end=(e:PointerEvent)=>{if(dragRef.current?.pointerId===e.pointerId)dragRef.current=null;if(resizeRef.current?.pointerId===e.pointerId)resizeRef.current=null};
+    const end=(e:PointerEvent)=>{const d=dragRef.current;if(d?.pointerId===e.pointerId){dragRef.current=null;if(d.key.startsWith("object:")){const id=Number(d.key.slice(7));setTimeout(()=>{const o=objectsRef.current.find(x=>x.id===id);if(isFlow(o))flowReflowRef.current(o.flowId)},0)}}if(resizeRef.current?.pointerId===e.pointerId)resizeRef.current=null};
     window.addEventListener("pointermove",move,{passive:false});window.addEventListener("pointerup",end);window.addEventListener("pointercancel",end);return()=>{window.removeEventListener("pointermove",move);window.removeEventListener("pointerup",end);window.removeEventListener("pointercancel",end)}
   },[]);
   const contentLocked=fields.some(f=>f.committed)||finalLocked;
@@ -298,12 +306,14 @@ export default function SelfieSaveEditor({accountEmail,accountName,documentId,in
   const selectedFontSize=Math.max(1,Math.min(30,Math.round(selectedTextObject?.fontSize||12)));
   const setSelectedFontSize=(fontSize:number)=>{
     if(!selectedTextObject||contentLocked)return;
+    if(isFlow(selectedTextObject)){flowReflowRef.current(selectedTextObject.flowId,{fontSize});return}
     setObjects(current=>current.map(o=>o.id===selectedTextObject.id?{...o,fontSize}:o));
   };
   const selectedTextColor=selectedTextObject?.color||"#1F3557";
   const setSelectedTextColor=(color:string)=>{
     if(!selectedTextObject||contentLocked)return;
-    setObjects(current=>current.map(o=>o.id===selectedTextObject.id?{...o,color}:o));
+    const flowId=selectedTextObject.flowId;
+    setObjects(current=>current.map(o=>o.id===selectedTextObject.id||(flowId!==undefined&&o.flowId===flowId)?{...o,color}:o));
   };
   const updateFeature=(k:keyof Features)=>setFeatures(v=>({...v,[k]:!v[k]}));
   const targetPage=()=>menu?.page||1;
@@ -419,6 +429,231 @@ export default function SelfieSaveEditor({accountEmail,accountName,documentId,in
     textDraftRef.current.delete(id);
     setObjects(v=>v.map(o=>o.id===id?{...o,...draft}:o));
   };
+  // ---- Insert Text: tap anywhere, type, and the text flows page to page ----
+  const [typeMode,setTypeMode]=useState(false);
+  const objectsRef=useRef(objects);
+  objectsRef.current=objects;
+  const pendingCaretRef=useRef<{id:number;offset:number}|null>(null);
+  const composingRef=useRef(false);
+  const measurerRef=useRef<HTMLDivElement|null>(null);
+  useEffect(()=>()=>{measurerRef.current?.remove()},[]);
+  const flowElement=(id:number)=>window.document.querySelector<HTMLElement>(`[data-object-id="${id}"] .flow-content`);
+  const flowChain=(flowId:number)=>objectsRef.current.filter(o=>o.flowId===flowId).sort((a,b)=>(a.flowIndex||0)-(b.flowIndex||0));
+  const readFlow=(el:HTMLElement)=>stripFlowFiller(el.textContent||"");
+  // Character offsets of the current selection inside one flow box.
+  const flowSelection=(el:HTMLElement)=>{
+    const selection=window.getSelection();
+    if(!selection||!selection.rangeCount)return null;
+    const range=selection.getRangeAt(0);
+    if(!el.contains(range.startContainer)||!el.contains(range.endContainer))return null;
+    const offsetOf=(node:Node,offset:number)=>{const before=window.document.createRange();before.selectNodeContents(el);before.setEnd(node,offset);return stripFlowFiller(before.toString()).length};
+    return {start:offsetOf(range.startContainer,range.startOffset),end:offsetOf(range.endContainer,range.endOffset)};
+  };
+  // Hidden twin of a flow box, used to measure how tall text wraps.
+  const measureFlow=(fontSize:number,fontFamily:string)=>(text:string,width:number)=>{
+    let m=measurerRef.current;
+    if(!m||!m.isConnected){
+      m=window.document.createElement("div");
+      m.setAttribute("aria-hidden","true");
+      Object.assign(m.style,{position:"fixed",left:"-10000px",top:"0",visibility:"hidden",pointerEvents:"none",whiteSpace:"pre-wrap",overflowWrap:"break-word",wordBreak:"normal",padding:"0",margin:"0",border:"0",boxSizing:"content-box"});
+      (editorRef.current?.closest(".selfiesave-editor-root")||window.document.body).appendChild(m);
+      measurerRef.current=m;
+    }
+    m.style.width=`${Math.max(1,width)}px`;
+    m.style.font=`${fontSize}px/${FLOW_LINE_HEIGHT} ${fontFamily}`;
+    m.textContent=text===""||text.endsWith("\n")?text+"​":text;
+    return m.getBoundingClientRect().height;
+  };
+  // Page margins for flowing text, from the page's real (unzoomed) size.
+  const flowPageBox=(page:number)=>{
+    const papers=Array.from(window.document.querySelectorAll<HTMLElement>(".document-pages .paper"));
+    const paper=papers[page-1]||papers.find(p=>!p.classList.contains("imported-pdf-page"))||papers[papers.length-1];
+    const imported=!!papers[page-1]?.classList.contains("imported-pdf-page");
+    const W=paper?.offsetWidth||816,H=paper?.offsetHeight||1030;
+    return imported
+      ?{W,H,imported,side:Math.max(8,Math.round(W*.05)),top:Math.round(H*.05),bottom:Math.round(H*.05)}
+      :{W,H,imported,side:Math.max(20,Math.round(W*.088)),top:Math.max(84,Math.round(H*.08)),bottom:Math.max(64,Math.round(H*.065))};
+  };
+  // Re-lays a whole flow after any edit: refills each page to its bottom
+  // margin, spills the rest onto following pages (adding pages as needed),
+  // drops boxes that emptied out, and remembers where the caret belongs.
+  const applyFlow=(flowId:number,text:string,caret:number|null,preferId?:number,style?:Partial<CanvasObject>)=>{
+    const chain=flowChain(flowId);
+    if(!chain.length)return;
+    const first={...chain[0],...style};
+    const fontSize=first.fontSize||FLOW_DEFAULT_SIZE,fontFamily=first.fontFamily||FLOW_FONT;
+    const measure=measureFlow(fontSize,fontFamily);
+    const lineHeight=Math.ceil(fontSize*FLOW_LINE_HEIGHT);
+    const slotFor=(index:number):FlowSlot=>{
+      const page=first.page+index,m=flowPageBox(page);
+      if(index===0)return {page,x:first.x,y:first.y,w:Math.max(120,m.W-m.side-first.x),maxH:m.H-m.bottom-first.y};
+      const existing=chain[index];
+      const x=existing?existing.x:m.side,y=existing?existing.y:m.top,w=existing?existing.w:m.W-2*m.side;
+      return {page,x,y,w,maxH:m.H-m.bottom-y};
+    };
+    const segments=layoutFlow(text,slotFor,measure);
+    const next:CanvasObject[]=segments.map(({slot,value},index)=>({
+      ...(chain[index]||{}),
+      id:chain[index]?.id??newId(),
+      kind:"text",page:slot.page,x:slot.x,y:slot.y,w:slot.w,
+      h:Math.max(lineHeight,Math.ceil(measure(value,slot.w))),
+      value,scale:1,fontSize,fontFamily,color:first.color,flowId,flowIndex:index
+    }));
+    const byId=new Map(next.map(o=>[o.id,o]));
+    setObjects(current=>{
+      const kept=current.filter(o=>o.flowId!==flowId||byId.has(o.id)).map(o=>byId.get(o.id)||o);
+      const known=new Set(kept.map(o=>o.id));
+      return [...kept,...next.filter(o=>!known.has(o.id))];
+    });
+    setPageCount(count=>Math.max(count,next[next.length-1].page));
+    setSelected(current=>current?.startsWith("object:")&&chain.some(o=>`object:${o.id}`===current)&&!byId.has(Number(current.slice(7)))?null:current);
+    if(caret!==null){
+      const location=locateFlowCaret(segments.map(s=>s.value),caret,next.findIndex(o=>o.id===preferId));
+      pendingCaretRef.current={id:next[location.index].id,offset:location.offset};
+    }
+  };
+  // Re-flows from what's on screen in one box (it's the only one that can
+  // differ from state -- every edit re-syncs the rest).
+  const reflowFromElement=(id:number,el:HTMLElement,keepCaret:boolean)=>{
+    const box=objectsRef.current.find(o=>o.id===id);
+    if(!isFlow(box))return;
+    const chain=flowChain(box.flowId),index=chain.findIndex(o=>o.id===id);
+    const values=chain.map((o,i)=>i===index?readFlow(el):o.value);
+    const selection=keepCaret?flowSelection(el):null;
+    const before=values.slice(0,index).join("").length;
+    applyFlow(box.flowId,values.join(""),selection?before+selection.end:null,id);
+  };
+  const reflowChain=(flowId:number,style?:Partial<CanvasObject>)=>{
+    const chain=flowChain(flowId);
+    if(chain.length)applyFlow(flowId,chain.map(o=>o.value).join(""),null,undefined,style);
+  };
+  const placeFlowCaret=(el:HTMLElement,offset:number)=>{
+    const current=window.document.activeElement===el?flowSelection(el):null;
+    if(current&&current.start===offset&&current.end===offset)return;
+    if(window.document.activeElement!==el)el.focus({preventScroll:true});
+    const selection=window.getSelection();
+    if(!selection)return;
+    const range=window.document.createRange();
+    const walker=window.document.createTreeWalker(el,NodeFilter.SHOW_TEXT);
+    let remaining=offset,placed=false;
+    for(let node=walker.nextNode();node;node=walker.nextNode()){
+      const length=(node.nodeValue||"").length;
+      if(remaining<=length){range.setStart(node,remaining);placed=true;break}
+      remaining-=length;
+    }
+    if(!placed)range.setStart(el,el.childNodes.length);
+    range.collapse(true);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    // Keep the caret on screen when it jumps to the next page, and clear
+    // of the on-screen keyboard.
+    const wrap=editorRef.current;
+    if(!wrap)return;
+    const caretRect=range.getBoundingClientRect();
+    const rect=caretRect.height?caretRect:el.getBoundingClientRect();
+    const view=wrap.getBoundingClientRect();
+    const visualBottom=window.visualViewport?Math.min(view.bottom,window.visualViewport.offsetTop+window.visualViewport.height):view.bottom;
+    if(rect.bottom>visualBottom-24)wrap.scrollTop+=rect.bottom-visualBottom+96;
+    else if(rect.top<view.top+120)wrap.scrollTop-=view.top+120-rect.top;
+  };
+  // State -> screen for flow boxes. Their text is managed here rather than as
+  // React children so typing never fights React over the DOM, and the caret
+  // survives text moving between pages.
+  useLayoutEffect(()=>{
+    const lastIndex=new Map<number,number>();
+    objects.forEach(o=>{if(isFlow(o))lastIndex.set(o.flowId,Math.max(lastIndex.get(o.flowId)??0,o.flowIndex||0))});
+    objects.forEach(o=>{
+      if(!isFlow(o))return;
+      const el=flowElement(o.id);
+      if(!el||(composingRef.current&&window.document.activeElement===el))return;
+      const shown=flowDisplayText(o.value,(o.flowIndex||0)===lastIndex.get(o.flowId));
+      if(el.textContent!==shown)el.textContent=shown;
+    });
+    const pending=pendingCaretRef.current;
+    if(pending){
+      pendingCaretRef.current=null;
+      const el=flowElement(pending.id);
+      if(el)placeFlowCaret(el,pending.offset);
+    }
+  });
+  // Starts a new flow with the caret blinking at a point on a page. Rendered
+  // synchronously so focus happens inside the tap -- that is what lets
+  // phones open the keyboard.
+  const startFlowAt=(page:number,pageX:number,pageY:number)=>{
+    if(contentLocked)return;
+    const m=flowPageBox(page);
+    const lineHeight=Math.ceil(FLOW_DEFAULT_SIZE*FLOW_LINE_HEIGHT);
+    const x=Math.round(Math.max(m.side,Math.min(pageX,m.W-m.side-120)));
+    const y=Math.round(Math.max(m.imported?4:70,Math.min(pageY-lineHeight/2,m.H-m.bottom-lineHeight)));
+    const id=newId();
+    flushSync(()=>{
+      setObjects(current=>[...current,{id,kind:"text",page,x,y,w:Math.max(120,m.W-m.side-x),h:lineHeight,value:"",scale:1,fontSize:FLOW_DEFAULT_SIZE,fontFamily:FLOW_FONT,color:"#1F3557",flowId:id,flowIndex:0}]);
+      setSelected(`object:${id}`);
+      setMenu(null);
+    });
+    const el=flowElement(id);
+    if(el)placeFlowCaret(el,0);
+  };
+  const startFlowFromTap=(e:React.MouseEvent<HTMLElement>,page:number)=>{
+    if(!typeMode||contentLocked)return;
+    if((e.target as HTMLElement).closest(".canvas-object,input,textarea,button,select,a,label"))return;
+    const paper=e.currentTarget,rect=paper.getBoundingClientRect();
+    const scale=paper.offsetWidth?rect.width/paper.offsetWidth:1;
+    startFlowAt(page,(e.clientX-rect.left)/scale,(e.clientY-rect.top)/scale);
+  };
+  const toggleTypeMode=()=>{
+    if(contentLocked)return;
+    setTypeMode(!typeMode);
+    notify(typeMode?"Insert Text off":"Tap anywhere on the page and start typing");
+  };
+  // An Insert Text box that was never typed in disappears when you leave it.
+  const dropEmptyFlow=(flowId:number)=>{
+    setTimeout(()=>{
+      const chain=flowChain(flowId);
+      if(!chain.length||chain.some(o=>flowElement(o.id)===window.document.activeElement))return;
+      if(chain.every(o=>!o.value.trim()))setObjects(current=>current.filter(o=>o.flowId!==flowId));
+    },0);
+  };
+  // Line breaks, and deleting across a page break, are handled here so the
+  // text stays one continuous flow. (beforeinput covers phone keyboards,
+  // which don't report real keys.)
+  const flowEditKey=(el:HTMLElement,kind:"newline"|"back"|"forward")=>{
+    const id=Number(el.closest<HTMLElement>("[data-object-id]")?.dataset.objectId);
+    const box=objectsRef.current.find(o=>o.id===id);
+    const selection=flowSelection(el);
+    if(!isFlow(box)||!selection)return false;
+    const chain=flowChain(box.flowId),index=chain.findIndex(o=>o.id===id);
+    const values=chain.map((o,i)=>i===index?readFlow(el):o.value);
+    const before=values.slice(0,index).join("").length,text=values.join("");
+    const start=before+selection.start,end=before+selection.end;
+    if(kind==="newline"){applyFlow(box.flowId,text.slice(0,start)+"\n"+text.slice(end),start+1,id);return true}
+    if(start!==end)return false;
+    if(kind==="back"&&selection.start===0&&index>0&&start>0){applyFlow(box.flowId,text.slice(0,start-1)+text.slice(start),start-1,id);return true}
+    if(kind==="forward"&&selection.end===values[index].length&&index<chain.length-1&&start<text.length){applyFlow(box.flowId,text.slice(0,start)+text.slice(start+1),start,id);return true}
+    return false;
+  };
+  const flowEditKeyRef=useRef(flowEditKey);
+  flowEditKeyRef.current=flowEditKey;
+  useEffect(()=>{
+    const editor=editorRef.current;
+    if(!editor)return;
+    const beforeInput=(event:Event)=>{
+      const e=event as InputEvent;
+      const el=(e.target as HTMLElement|null)?.closest?.<HTMLElement>(".flow-content");
+      if(!el||e.isComposing)return;
+      const kind=e.inputType==="insertParagraph"||e.inputType==="insertLineBreak"?"newline":e.inputType==="deleteContentBackward"?"back":e.inputType==="deleteContentForward"?"forward":null;
+      if(kind&&flowEditKeyRef.current(el,kind))e.preventDefault();
+    };
+    editor.addEventListener("beforeinput",beforeInput);
+    return()=>editor.removeEventListener("beforeinput",beforeInput);
+  },[splash]);
+  const flowKeyDown=(e:React.KeyboardEvent<HTMLElement>)=>{
+    if(e.nativeEvent.isComposing||e.ctrlKey||e.metaKey||e.altKey)return;
+    const kind=e.key==="Enter"?"newline":e.key==="Backspace"?"back":e.key==="Delete"?"forward":null;
+    if(kind&&flowEditKey(e.currentTarget,kind))e.preventDefault();
+  };
+  const flowReflowRef=useRef(reflowChain);
+  flowReflowRef.current=reflowChain;
   const resetDocument=()=>{if(contentLocked){notify("Signed versions cannot be reset or edited");return}setHeader("");setFooter("");setClauses([]);setFields([]);setObjects([]);setPlacements({});setSelected(null);setPageCount(1);setPdfPages([]);setSourcePdfBytes(null);setFilename("Untitled document");setSetup(true)};
   async function loadPdf(file:File,fromInitial=false){
     if(contentLocked)return;
@@ -854,9 +1089,9 @@ export default function SelfieSaveEditor({accountEmail,accountName,documentId,in
     dragRef.current={key,pointerId:e.pointerId,offsetX:itemRect?(e.clientX-itemRect.left)/pageScale:0,offsetY:itemRect?(e.clientY-itemRect.top)/pageScale:0,w:position.w||fallback.w,h:position.h||fallback.h,start:{clientX:e.clientX,clientY:e.clientY,x:position.x,y:position.y,page:o?.page||placements[key]?.page||1}};
   }
   function beginResize(e:React.PointerEvent,key:string,edge:string){e.preventDefault();e.stopPropagation();if(contentLocked||e.button!==0)return;const o=key.startsWith("object:")?objects.find(x=>x.id===Number(key.slice(7))):null;const p=o||placements[key];if(!p)return;const fallback=key.startsWith("field:")?{w:560,h:110}:{w:560,h:70};setSelected(key);dragRef.current=null;e.currentTarget.setPointerCapture?.(e.pointerId);resizeRef.current={key,pointerId:e.pointerId,edge,startX:e.clientX,startY:e.clientY,x:p.x,y:p.y,w:p.w||fallback.w,h:p.h||fallback.h,scale:o?.scale||1}}
-  async function deleteItem(key:string){if(contentLocked)return;if(!(await requestConfirm("Delete this item from the document?")))return;if(key.startsWith("object:")){setObjects(v=>v.filter(o=>o.id!==Number(key.slice(7))))}else if(key.startsWith("field:")){setFields(v=>v.filter(f=>f.id!==Number(key.slice(6))));setPlacements(v=>{const n={...v};delete n[key];return n})}else{const index=Number(key.slice(7));setClauses(v=>v.filter((_,i)=>i!==index));setPlacements(v=>{const n:Record<string,Placement>={};Object.entries(v).forEach(([k,p]:[string,Placement])=>{if(!k.startsWith("clause:"))n[k]=p;else{const i=Number(k.slice(7));if(i<index)n[k]=p;else if(i>index)n[`clause:${i-1}`]=p}});return n})}setSelected(null);notify("Item deleted")}
-  function duplicateItem(key:string){if(contentLocked)return;if(key.startsWith("object:")){const source=objects.find(o=>o.id===Number(key.slice(7)));if(source){const copy={...source,id:newId(),x:source.x+18,y:source.y+18};setObjects(v=>[...v,copy]);setSelected(`object:${copy.id}`)}}else if(key.startsWith("field:")){const source=fields.find(f=>f.id===Number(key.slice(6)));if(source){const id=newId(),copy={...source,id,line:fields.filter(f=>f.kind===source.kind&&f.party===source.party).length+1,signed:false,committed:false,name:undefined,image:undefined,stamp:undefined,centralStamp:undefined,coords:undefined};setFields(v=>[...v,copy]);const p=placements[key]||{x:90,y:320,w:560,h:110};setPlacements(v=>({...v,[`field:${id}`]:{...p,x:p.x+18,y:p.y+18}}));setSelected(`field:${id}`)}}else{const i=Number(key.slice(7)),value=clauses[i]||"";setClauses(v=>[...v.slice(0,i+1),value,...v.slice(i+1)]);setPlacements(v=>{const n:Record<string,Placement>={};Object.entries(v).forEach(([k,p]:[string,Placement])=>{if(k.startsWith("clause:")&&Number(k.slice(7))>i)n[`clause:${Number(k.slice(7))+1}`]=p;else n[k]=p});const p=v[key]||{x:90,y:180+i*90,w:560,h:70};n[`clause:${i+1}`]={...p,x:p.x+18,y:p.y+18};return n});setSelected(`clause:${i+1}`)}notify("Item duplicated")}
-  const itemControls=(key:string)=><><button type="button" className="grab-handle" onPointerDown={e=>beginDrag(e,key)} aria-label="Grab to move this item">☝ Grab to move</button><div className="object-actions"><button type="button" onPointerDown={e=>e.stopPropagation()} onClick={()=>duplicateItem(key)}>⧉ Duplicate</button><button type="button" onPointerDown={e=>e.stopPropagation()} onClick={()=>deleteItem(key)}>🗑 Delete</button></div>{["nw","n","ne","e","se","s","sw","w"].map(edge=><span key={edge} className={`resize-handle handle-${edge}`} onPointerDown={e=>beginResize(e,key,edge)} aria-hidden="true"/>)}</>;
+  async function deleteItem(key:string){if(contentLocked)return;if(!(await requestConfirm("Delete this item from the document?")))return;if(key.startsWith("object:")){const target=objects.find(o=>o.id===Number(key.slice(7)));setObjects(v=>v.filter(o=>o.id!==target?.id&&(!isFlow(target)||o.flowId!==target.flowId)))}else if(key.startsWith("field:")){setFields(v=>v.filter(f=>f.id!==Number(key.slice(6))));setPlacements(v=>{const n={...v};delete n[key];return n})}else{const index=Number(key.slice(7));setClauses(v=>v.filter((_,i)=>i!==index));setPlacements(v=>{const n:Record<string,Placement>={};Object.entries(v).forEach(([k,p]:[string,Placement])=>{if(!k.startsWith("clause:"))n[k]=p;else{const i=Number(k.slice(7));if(i<index)n[k]=p;else if(i>index)n[`clause:${i-1}`]=p}});return n})}setSelected(null);notify("Item deleted")}
+  function duplicateItem(key:string){if(contentLocked)return;if(key.startsWith("object:")){const source=objects.find(o=>o.id===Number(key.slice(7)));if(source){const copy={...source,id:newId(),x:source.x+18,y:source.y+18,flowId:undefined,flowIndex:undefined};setObjects(v=>[...v,copy]);setSelected(`object:${copy.id}`)}}else if(key.startsWith("field:")){const source=fields.find(f=>f.id===Number(key.slice(6)));if(source){const id=newId(),copy={...source,id,line:fields.filter(f=>f.kind===source.kind&&f.party===source.party).length+1,signed:false,committed:false,name:undefined,image:undefined,stamp:undefined,centralStamp:undefined,coords:undefined};setFields(v=>[...v,copy]);const p=placements[key]||{x:90,y:320,w:560,h:110};setPlacements(v=>({...v,[`field:${id}`]:{...p,x:p.x+18,y:p.y+18}}));setSelected(`field:${id}`)}}else{const i=Number(key.slice(7)),value=clauses[i]||"";setClauses(v=>[...v.slice(0,i+1),value,...v.slice(i+1)]);setPlacements(v=>{const n:Record<string,Placement>={};Object.entries(v).forEach(([k,p]:[string,Placement])=>{if(k.startsWith("clause:")&&Number(k.slice(7))>i)n[`clause:${Number(k.slice(7))+1}`]=p;else n[k]=p});const p=v[key]||{x:90,y:180+i*90,w:560,h:70};n[`clause:${i+1}`]={...p,x:p.x+18,y:p.y+18};return n});setSelected(`clause:${i+1}`)}notify("Item duplicated")}
+  const itemControls=(key:string,resizable=true)=><><button type="button" className="grab-handle" onPointerDown={e=>beginDrag(e,key)} aria-label="Grab to move this item">☝ Grab to move</button><div className="object-actions"><button type="button" onPointerDown={e=>e.stopPropagation()} onClick={()=>duplicateItem(key)}>⧉ Duplicate</button><button type="button" onPointerDown={e=>e.stopPropagation()} onClick={()=>deleteItem(key)}>🗑 Delete</button></div>{resizable&&["nw","n","ne","e","se","s","sw","w"].map(edge=><span key={edge} className={`resize-handle handle-${edge}`} onPointerDown={e=>beginResize(e,key,edge)} aria-hidden="true"/>)}</>;
 
   const displayName=accountName||accountEmail;
 
@@ -869,8 +1104,8 @@ export default function SelfieSaveEditor({accountEmail,accountName,documentId,in
     {toast&&<div className="toast">✓ {toast}</div>}
     {confirmState&&<div className="modal-backdrop" role="dialog" aria-modal="true"><div className="modal"><p>{confirmState.message}</p><div style={{display:"flex",justifyContent:"flex-end",gap:"10px",marginTop:"18px"}}><button type="button" style={{border:0,borderRadius:"8px",padding:"11px 16px",background:"#eef2f6",color:"#1d2b3a",fontWeight:"bold"}} onClick={()=>resolveConfirm(false)}>Cancel</button><button type="button" style={{border:0,borderRadius:"8px",padding:"11px 16px",background:"var(--blue)",color:"white",fontWeight:"bold"}} onClick={()=>resolveConfirm(true)}>Confirm</button></div></div></div>}
     {pendingField&&<div className="modal-backdrop" role="dialog" aria-modal="true"><div className="modal"><button className="modal-close" onClick={()=>setPendingField(null)}>×</button><p className="eyebrow">ASSIGN FIELD</p><h2>Add {pendingField.kind} line</h2><p>Choose which signer must complete this field.</p><label>Signer number<input type="number" min="1" inputMode="numeric" autoFocus value={pendingParty} onChange={e=>setPendingParty(e.target.value)}/></label><button className="capture" onClick={confirmAddField}>Add to document</button></div></div>}
-    <header className="topbar"><a className="brand" href="#" onClick={e=>e.preventDefault()}><span className="brand-mark">P</span><span>{signatureOnlyMode?"Sign PDF":"PDF Editor"}<small>{signatureOnlyMode?"Review and sign":"eSign optional"}</small></span></a>{!signatureOnlyMode&&<nav aria-label="Document tools"><button onClick={resetDocument}><Icon>＋</Icon><span>New</span></button><button disabled={contentLocked||loadingPdf} onClick={openPdfPicker}><Icon>⇧</Icon><span>{loadingPdf?"Opening…":"Load PDF"}</span></button><input ref={pdfInputRef} className="pdf-file-input" type="file" accept="application/pdf,.pdf" onChange={e=>{const file=e.target.files?.[0];if(file)void loadPdf(file)}}/><button disabled={contentLocked} onClick={()=>textInputRef.current?.click()}><Icon>▤</Icon><span>Load text</span></button><input ref={textInputRef} className="pdf-file-input" type="file" accept="text/plain,text/markdown,text/csv,.txt,.text,.md,.csv" onChange={e=>{const file=e.target.files?.[0];if(file)void loadText(file)}}/><input ref={imageInputRef} className="pdf-file-input" type="file" accept="image/*" onChange={e=>{const file=e.target.files?.[0];e.target.value="";if(file)void handleImageFileSelected(file)}}/><button disabled={contentLocked} onClick={()=>notify("Select PDF text or tap a text box to edit it directly")}><Icon>✎</Icon><span>Edit</span></button><button disabled={contentLocked} onClick={openCollectSignatures} className="capture-signatures-btn"><Icon>🖊</Icon><span>Collect Signatures</span></button></nav>}{signatureOnlyMode&&<input ref={pdfInputRef} className="pdf-file-input" type="file" accept="application/pdf,.pdf" onChange={e=>{const file=e.target.files?.[0];if(file)void loadPdf(file)}}/>}<div className="header-actions"><span className="account-email">{displayName}</span><button type="button" className="sign-out" onClick={onClose}>Close</button><span className={`status ${finalLocked?"locked":""}`}>{finalLocked?"🔒 Signed":signatureOnlyMode?"● Ready to sign":contentLocked?"🔏 Signed version":"● Draft"}</span></div></header>
-    <section className={`workspace ${signatureOnlyMode?"signature-only-workspace":""}`}>{!signatureOnlyMode&&<aside className="sidebar"><div className="side-head"><h2>Document setup</h2></div><label>File name<input value={filename} disabled={contentLocked} onChange={e=>setFilename(e.target.value)}/></label><p className="fixed-name">Final file: <strong>{filename||"Untitled"}.pdf</strong></p><hr/><h3>Insert anywhere</h3><button className="insert" onClick={()=>addObject("text")} disabled={contentLocked}><Icon>T</Icon><span><strong>Free text box</strong><small>Type directly on page</small></span><b>＋</b></button><button className="insert" onClick={triggerImageUpload} disabled={contentLocked}><Icon>▧</Icon><span><strong>Upload image</strong><small>From your device</small></span><b>＋</b></button><button className="insert" onClick={openPriceBook} disabled={contentLocked}><Icon>💲</Icon><span><strong>Add Flat Rate Pricing Model</strong><small>Insert from the Price Book</small></span><b>＋</b></button><button className="insert" onClick={addClause} disabled={contentLocked}><Icon>§</Icon><span><strong>Contract clause</strong><small>Numbered text field</small></span><b>＋</b></button><button className="insert" onClick={()=>addField("signature")} disabled={contentLocked}><Icon>⌁</Icon><span><strong>Signature line</strong><small>Assign any signer</small></span><b>＋</b></button><button className="insert" onClick={()=>addField("initials")} disabled={contentLocked}><Icon>Ab</Icon><span><strong>Initials line</strong><small>Assign any signer</small></span><b>＋</b></button><button className="insert" onClick={()=>setSetup(true)} disabled={contentLocked}><Icon>⚙</Icon><span><strong>Evidence options</strong><small>Choose document requirements</small></span><b>›</b></button>{contentLocked&&<div className="security"><Icon>🔒</Icon><p><strong>Signed copy protected</strong><br/>Editing is disabled because a signer committed. Make a new unsigned version for any changes.</p></div>}</aside>}
+    <header className="topbar"><a className="brand" href="#" onClick={e=>e.preventDefault()}><span className="brand-mark">P</span><span>{signatureOnlyMode?"Sign PDF":"PDF Editor"}<small>{signatureOnlyMode?"Review and sign":"eSign optional"}</small></span></a>{!signatureOnlyMode&&<nav aria-label="Document tools"><button onClick={resetDocument}><Icon>＋</Icon><span>New</span></button><button disabled={contentLocked||loadingPdf} onClick={openPdfPicker}><Icon>⇧</Icon><span>{loadingPdf?"Opening…":"Load PDF"}</span></button><input ref={pdfInputRef} className="pdf-file-input" type="file" accept="application/pdf,.pdf" onChange={e=>{const file=e.target.files?.[0];if(file)void loadPdf(file)}}/><button disabled={contentLocked} onClick={()=>textInputRef.current?.click()}><Icon>▤</Icon><span>Load text</span></button><button disabled={contentLocked} onClick={toggleTypeMode} className={`insert-text-btn ${typeMode?"type-mode-on":""}`} aria-pressed={typeMode}><Icon>T</Icon><span>Insert Text</span></button><input ref={textInputRef} className="pdf-file-input" type="file" accept="text/plain,text/markdown,text/csv,.txt,.text,.md,.csv" onChange={e=>{const file=e.target.files?.[0];if(file)void loadText(file)}}/><input ref={imageInputRef} className="pdf-file-input" type="file" accept="image/*" onChange={e=>{const file=e.target.files?.[0];e.target.value="";if(file)void handleImageFileSelected(file)}}/><button disabled={contentLocked} onClick={()=>notify("Select PDF text or tap a text box to edit it directly")}><Icon>✎</Icon><span>Edit</span></button><button disabled={contentLocked} onClick={openCollectSignatures} className="capture-signatures-btn"><Icon>🖊</Icon><span>Collect Signatures</span></button></nav>}{signatureOnlyMode&&<input ref={pdfInputRef} className="pdf-file-input" type="file" accept="application/pdf,.pdf" onChange={e=>{const file=e.target.files?.[0];if(file)void loadPdf(file)}}/>}<div className="header-actions"><span className="account-email">{displayName}</span><button type="button" className="sign-out" onClick={onClose}>Close</button><span className={`status ${finalLocked?"locked":""}`}>{finalLocked?"🔒 Signed":signatureOnlyMode?"● Ready to sign":contentLocked?"🔏 Signed version":"● Draft"}</span></div></header>
+    <section className={`workspace ${signatureOnlyMode?"signature-only-workspace":""}`}>{!signatureOnlyMode&&<aside className="sidebar"><div className="side-head"><h2>Document setup</h2></div><label>File name<input value={filename} disabled={contentLocked} onChange={e=>setFilename(e.target.value)}/></label><p className="fixed-name">Final file: <strong>{filename||"Untitled"}.pdf</strong></p><hr/><h3>Insert anywhere</h3><button className={`insert ${typeMode?"type-mode-on":""}`} onClick={toggleTypeMode} disabled={contentLocked} aria-pressed={typeMode}><Icon>T</Icon><span><strong>Insert Text</strong><small>{typeMode?"On — tap the page and type":"Tap the page, then type"}</small></span><b>{typeMode?"✓":"＋"}</b></button><button className="insert" onClick={triggerImageUpload} disabled={contentLocked}><Icon>▧</Icon><span><strong>Upload image</strong><small>From your device</small></span><b>＋</b></button><button className="insert" onClick={openPriceBook} disabled={contentLocked}><Icon>💲</Icon><span><strong>Add Flat Rate Pricing Model</strong><small>Insert from the Price Book</small></span><b>＋</b></button><button className="insert" onClick={addClause} disabled={contentLocked}><Icon>§</Icon><span><strong>Contract clause</strong><small>Numbered text field</small></span><b>＋</b></button><button className="insert" onClick={()=>addField("signature")} disabled={contentLocked}><Icon>⌁</Icon><span><strong>Signature line</strong><small>Assign any signer</small></span><b>＋</b></button><button className="insert" onClick={()=>addField("initials")} disabled={contentLocked}><Icon>Ab</Icon><span><strong>Initials line</strong><small>Assign any signer</small></span><b>＋</b></button><button className="insert" onClick={()=>setSetup(true)} disabled={contentLocked}><Icon>⚙</Icon><span><strong>Evidence options</strong><small>Choose document requirements</small></span><b>›</b></button>{contentLocked&&<div className="security"><Icon>🔒</Icon><p><strong>Signed copy protected</strong><br/>Editing is disabled because a signer committed. Make a new unsigned version for any changes.</p></div>}</aside>}
       <section ref={editorRef} className="editor-wrap" onScroll={growPages}><div className="editor-tools"><span>{signatureOnlyMode?"Review the PDF and tap the signature box":contentLocked?"Signed document viewer":"Free-form document editor"}</span><div><button type="button" onClick={zoomOut} disabled={zoom<=0.4} aria-label="Zoom out">−</button><button type="button" onClick={zoomReset} aria-label="Reset zoom">{Math.round(zoom*100)}%</button><button type="button" onClick={zoomIn} disabled={zoom>=2.5} aria-label="Zoom in">＋</button><select disabled={contentLocked}><option>Georgia</option><option>Arial</option></select><select aria-label="Font size" disabled={contentLocked||!selectedTextObject} value={selectedFontSize} onChange={e=>setSelectedFontSize(Number(e.target.value))}>{Array.from({length:30},(_,index)=>index+1).map(size=><option key={size} value={size}>{size} pt</option>)}</select><input aria-label="Font color" type="color" disabled={contentLocked||!selectedTextObject} value={selectedTextColor} onChange={e=>setSelectedTextColor(e.target.value)} style={{width:28,height:28,padding:0,border:"1px solid #d7e3ee",borderRadius:6,cursor:selectedTextObject?"pointer":"not-allowed"}}/><button disabled={contentLocked}><b>B</b></button><button disabled={contentLocked}><i>I</i></button></div><span>{selected&&!contentLocked?"Use the blue Grab to move tab":""}</span></div>
         {/* Document actions live immediately above the PDF and stick to the
             top of this scroll viewport. They stay visible while the document
@@ -884,12 +1119,12 @@ export default function SelfieSaveEditor({accountEmail,accountName,documentId,in
             Transforms enlarge the PDF visually without enlarging the
             scrollable area, which makes the document feel frozen/clipped on
             touch screens. Layout zoom keeps scroll and pinch zoom honest. */}
-        <div className="document-pages" style={zoomedPagesStyle}>{Array.from({length:pageCount},(_,pageIndex)=>{const page=pageIndex+1,pdfPage=pdfPages[pageIndex];return <article ref={page===1?paperRef:undefined} key={page} className={`paper ${pdfPage?"imported-pdf-page":""} ${finalLocked?"paper-locked":""}`} style={pdfPage?{aspectRatio:`${pdfPage.width} / ${pdfPage.height}`}:{}} onPointerDown={e=>{if(!(e.target as HTMLElement).closest(".canvas-object"))setSelected(null)}} onDoubleClick={e=>openObjectMenu(e,page)}>
-          {pdfPage?<><img className="pdf-page-background" src={pdfPage.image} alt={`Imported PDF page ${page}`}/>{!contentLocked&&<div className="pdf-text-layer" aria-label={`Tap text on PDF page ${page} to edit it`}>{pdfPage.text.map((item,index)=><span key={`${index}-${item.left}-${item.top}`} data-page={page} data-index={index} className="pdf-text-content" onPointerDown={event=>{pdfTextPointerRef.current={id:`${event.pointerId}:${page}:${index}`,x:event.clientX,y:event.clientY}}} onPointerUp={event=>editImportedPdfTextFromPointer(event,page,item)} style={{left:`${item.left}%`,top:`${item.top}%`,width:`${Math.max(item.width,.8)}%`,height:`${Math.max(item.height,1)}%`,fontSize:`${item.height}cqh`,fontFamily:item.fontFamily}}>{item.value}</span>)}</div>}</>:<div className="paper-header"><input placeholder="Optional header" value={header} disabled={contentLocked} onChange={e=>setHeader(e.target.value)}/><span>{features.draftingDate?`Date document was drafted: ${draftDate}`:""}</span></div>}<div className="blank-page-hint">{page===1&&!pdfPage&&!contentLocked&&!clauses.length&&!objects.length&&<>Tap <b>Free text box</b>, or double-tap anywhere on this white page to add something.</>}</div>
-          {objects.filter(o=>(o.page||1)===page).map(o=>{const key=`object:${o.id}`;const scaleX=o.w/(o.kind==="text"?96:280),scaleY=o.h/(o.kind==="text"?40:160),contentScale=o.kind==="text"?1:Math.max(.55,Math.min(3,Math.max(scaleX,scaleY)));return <div key={o.id} data-object-id={o.id} className={`canvas-object ${o.kind==="text"?"text-object":""} ${o.source==="pdf"?"pdf-edit-object":""} ${selected===key?"selected":""}`} style={{left:o.x,top:o.y,width:o.w,height:o.h,fontSize:o.fontSize,fontFamily:o.fontFamily,color:o.color,backgroundColor:o.source==="pdf"?o.backgroundColor:undefined,"--content-scale":contentScale} as React.CSSProperties} onPointerDown={e=>pointerDown(e,key)} onDoubleClick={e=>e.stopPropagation()}>{selected===key&&itemControls(key)}{o.kind==="image"&&/^(https?:|data:image\/)/.test(o.value)?<img src={o.value} alt="Document object"/>:o.kind==="video"&&/^https?:/.test(o.value)?<video src={o.value} controls/>:o.kind==="link"&&/^https?:/.test(o.value)?<a href={o.value} target="_blank" rel="noreferrer">{o.value}</a>:<div className="editable-object-content" contentEditable={!contentLocked} suppressContentEditableWarning onInput={e=>o.kind==="text"&&editTextObject(o.id,e.currentTarget,(e.nativeEvent as InputEvent).inputType||"insertText")} onBlur={e=>o.kind==="text"&&commitTextObject(o.id,e.currentTarget)}>{o.value}</div>}</div>})}
+        <div className={`document-pages ${typeMode&&!contentLocked?"type-mode":""}`} style={zoomedPagesStyle}>{Array.from({length:pageCount},(_,pageIndex)=>{const page=pageIndex+1,pdfPage=pdfPages[pageIndex];return <article ref={page===1?paperRef:undefined} key={page} className={`paper ${pdfPage?"imported-pdf-page":""} ${finalLocked?"paper-locked":""}`} style={pdfPage?{aspectRatio:`${pdfPage.width} / ${pdfPage.height}`}:{}} onPointerDown={e=>{if(!(e.target as HTMLElement).closest(".canvas-object"))setSelected(null)}} onClick={e=>startFlowFromTap(e,page)} onDoubleClick={e=>{if(!typeMode)openObjectMenu(e,page)}}>
+          {pdfPage?<><img className="pdf-page-background" src={pdfPage.image} alt={`Imported PDF page ${page}`}/>{!contentLocked&&<div className="pdf-text-layer" aria-label={`Tap text on PDF page ${page} to edit it`}>{pdfPage.text.map((item,index)=><span key={`${index}-${item.left}-${item.top}`} data-page={page} data-index={index} className="pdf-text-content" onPointerDown={event=>{pdfTextPointerRef.current={id:`${event.pointerId}:${page}:${index}`,x:event.clientX,y:event.clientY}}} onPointerUp={event=>editImportedPdfTextFromPointer(event,page,item)} style={{left:`${item.left}%`,top:`${item.top}%`,width:`${Math.max(item.width,.8)}%`,height:`${Math.max(item.height,1)}%`,fontSize:`${item.height}cqh`,fontFamily:item.fontFamily}}>{item.value}</span>)}</div>}</>:<div className="paper-header"><input placeholder="Optional header" value={header} disabled={contentLocked} onChange={e=>setHeader(e.target.value)}/><span>{features.draftingDate?`Date document was drafted: ${draftDate}`:""}</span></div>}<div className="blank-page-hint">{page===1&&!pdfPage&&!contentLocked&&!clauses.length&&!objects.length&&(typeMode?<>Tap anywhere on the page and start typing.</>:<>Tap <b>Insert Text</b>, then tap anywhere on the page and type. Double-tap the page for more.</>)}</div>
+          {objects.filter(o=>(o.page||1)===page).map(o=>{const key=`object:${o.id}`;const scaleX=o.w/(o.kind==="text"?96:280),scaleY=o.h/(o.kind==="text"?40:160),contentScale=o.kind==="text"?1:Math.max(.55,Math.min(3,Math.max(scaleX,scaleY)));const flow=isFlow(o);return <div key={o.id} data-object-id={o.id} className={`canvas-object ${o.kind==="text"?"text-object":""} ${flow?"flow-text-object":""} ${o.source==="pdf"?"pdf-edit-object":""} ${selected===key?"selected":""}`} style={{left:o.x,top:o.y,width:o.w,height:o.h,fontSize:o.fontSize,fontFamily:o.fontFamily,color:o.color,backgroundColor:o.source==="pdf"?o.backgroundColor:undefined,"--content-scale":contentScale} as React.CSSProperties} onPointerDown={e=>pointerDown(e,key)} onDoubleClick={e=>e.stopPropagation()}>{selected===key&&itemControls(key,!flow)}{flow?<div className="editable-object-content flow-content" contentEditable={contentLocked?false:"plaintext-only"} suppressContentEditableWarning spellCheck role="textbox" aria-multiline="true" aria-label="Document text" style={{fontSize:o.fontSize||FLOW_DEFAULT_SIZE,fontFamily:o.fontFamily||FLOW_FONT,lineHeight:FLOW_LINE_HEIGHT,color:o.color}} onInput={e=>{if(!(e.nativeEvent as InputEvent).isComposing&&!composingRef.current)reflowFromElement(o.id,e.currentTarget,true)}} onKeyDown={flowKeyDown} onFocus={()=>{if(!contentLocked)setSelected(key)}} onCompositionStart={()=>{composingRef.current=true}} onCompositionEnd={e=>{composingRef.current=false;reflowFromElement(o.id,e.currentTarget,true)}} onBlur={e=>{composingRef.current=false;if(readFlow(e.currentTarget)!==o.value)reflowFromElement(o.id,e.currentTarget,false);dropEmptyFlow(o.flowId)}}/>:o.kind==="image"&&/^(https?:|data:image\/)/.test(o.value)?<img src={o.value} alt="Document object"/>:o.kind==="video"&&/^https?:/.test(o.value)?<video src={o.value} controls/>:o.kind==="link"&&/^https?:/.test(o.value)?<a href={o.value} target="_blank" rel="noreferrer">{o.value}</a>:<div className="editable-object-content" contentEditable={!contentLocked} suppressContentEditableWarning onInput={e=>o.kind==="text"&&editTextObject(o.id,e.currentTarget,(e.nativeEvent as InputEvent).inputType||"insertText")} onBlur={e=>o.kind==="text"&&commitTextObject(o.id,e.currentTarget)}>{o.value}</div>}</div>})}
           <div className="paper-body">{clauses.map((c,i)=>{const key=`clause:${i}`,pos=placements[key]||{page:1,x:90,y:180+i*90,w:560,h:70};if((pos.page||1)!==page)return null;const contentScale=Math.max(.55,Math.min(3,Math.max((pos.w||560)/560,(pos.h||70)/70)));return <label key={key} className={`canvas-object movable-clause ${selected===key?"selected":""}`} style={{left:pos.x,top:pos.y,width:pos.w||560,height:pos.h||70,"--content-scale":contentScale} as React.CSSProperties} onPointerDown={e=>pointerDown(e,key)}>{selected===key&&itemControls(key)}<b>{i+1}.</b><textarea autoFocus={i===clauses.length-1} placeholder={`Contract Conditions Clause ${i+1}`} value={c} disabled={contentLocked} onChange={e=>setClauses(v=>v.map((x,j)=>j===i?e.target.value:x))}/></label>})}{fields.map(f=>{const key=`field:${f.id}`,pos=placements[key]||{page:1,x:90,y:320,w:560,h:110};if((pos.page||1)!==page)return null;const contentScale=Math.max(.55,Math.min(2,Math.max((pos.w||560)/560,(pos.h||110)/110)));const partyFields=fields.filter(x=>x.party===f.party),isLastPartyField=partyFields.at(-1)?.id===f.id,partyReady=partyFields.every(x=>x.signed),partyCommitted=partyFields.every(x=>x.committed);return <div className={`canvas-object movable-field sign-field ${f.signed?"is-signed":""} ${selected===key?"selected":""}`} style={{left:pos.x,top:pos.y,width:pos.w||560,height:pos.h||110,"--content-scale":contentScale} as React.CSSProperties} onPointerDown={e=>pointerDown(e,key)} key={f.id}>{selected===key&&itemControls(key)}<div className="sign-label"><span>{f.kind} · Party {f.party} · Line {f.line}</span><span>{f.committed?"✓ Committed & locked":f.signed?"Ready to commit":"Required"}</span></div>{f.signed?<><div className="evidence"><div><strong className="script">{f.name}</strong>{!f.committed&&<button onClick={()=>beginSign(f.id)}>Change before commit</button>}</div>{f.signatureImage&&<img src={f.signatureImage} alt={`Drawn signature for ${f.name}`} style={{background:"#fff",border:"1px solid #d7e3ee",borderRadius:6,maxHeight:70}}/>}{f.image&&<img src={f.image} alt={`Verification selfie for ${f.name}`}/>}<div>{features.timestamps&&<><small>Device: {f.stamp}</small><small>{f.centralStamp}</small></>}{features.displayLocation&&<small>{f.coords}</small>}</div></div>{isLastPartyField&&!partyCommitted&&<button className="commit-signer field-commit" disabled={!partyReady} onClick={()=>commitParty(f.party)}>Save signed document — Signer {f.party}</button>}</>:<button className="sign-button" onClick={()=>beginSign(f.id)}><Icon>◉</Icon> Complete {f.kind}{features.selfies?" & capture selfie":""}</button>}</div>})}</div>{!pdfPage&&<footer className="paper-footer"><input placeholder="Optional footer" value={footer} disabled={contentLocked} onChange={e=>setFooter(e.target.value)}/><b>Page {page}</b></footer>}
         </article>})}</div></section></section>
-    {menu&&<div className="object-menu-backdrop" onPointerDown={()=>setMenu(null)}><div className="floating" role="dialog" aria-modal="true" aria-label="Add object" onPointerDown={e=>e.stopPropagation()}><button onClick={()=>addObject("text")}>T Custom text field</button><button onClick={addClause}>§ Contract clause</button><button onClick={()=>addField("signature")}>⌁ Signature line</button><button onClick={()=>addField("initials")}>Ab Initials line</button><button onClick={triggerImageUpload}>▧ Upload Image</button><button onClick={openPriceBook}>💲 Pricing Model</button><button onClick={()=>addObject("link")}>↗ Link</button><button onClick={()=>addObject("video")}>▶ Video</button></div></div>}
+    {menu&&<div className="object-menu-backdrop" onPointerDown={()=>setMenu(null)}><div className="floating" role="dialog" aria-modal="true" aria-label="Add object" onPointerDown={e=>e.stopPropagation()}><button onClick={()=>{if(menu)startFlowAt(menu.page,menu.x,menu.y)}}>T Insert text here</button><button onClick={addClause}>§ Contract clause</button><button onClick={()=>addField("signature")}>⌁ Signature line</button><button onClick={()=>addField("initials")}>Ab Initials line</button><button onClick={triggerImageUpload}>▧ Upload Image</button><button onClick={openPriceBook}>💲 Pricing Model</button><button onClick={()=>addObject("link")}>↗ Link</button><button onClick={()=>addObject("video")}>▶ Video</button></div></div>}
     <ESignChoiceModal
       isOpen={signSetup}
       onClose={()=>setSignSetup(false)}
