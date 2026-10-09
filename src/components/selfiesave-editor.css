@@ -262,3 +262,21 @@
   .selfiesave-editor-root .workspace>.editor-wrap {height:100%;min-height:0;overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch}
   .selfiesave-editor-root .workspace>.sidebar {height:100%;min-height:0;overflow-y:auto;overscroll-behavior:contain}
 }
+
+/* Phones: the left menu (signature/initials lines, images, clauses, Insert
+   Text...) opens as a slide-out drawer from the top bar's "Add Items". */
+.selfiesave-editor-root .topbar nav button.tools-drawer-btn,
+.selfiesave-editor-root .tools-drawer-close,
+.selfiesave-editor-root .tools-drawer-backdrop {display:none}
+@media screen and (max-width:800px){
+  .selfiesave-editor-root .topbar nav button.tools-drawer-btn {display:flex}
+  .selfiesave-editor-root .sidebar.tools-drawer-open {
+    display:block;position:fixed;top:72px;left:0;bottom:0;z-index:45;
+    width:min(320px,88vw);overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;
+    padding:16px 14px calc(24px + env(safe-area-inset-bottom));
+    box-shadow:8px 0 28px #10243e40;
+  }
+  .selfiesave-editor-root .tools-drawer-backdrop {display:block;position:fixed;inset:72px 0 0 0;z-index:44;background:#0b1f3740}
+  .selfiesave-editor-root .sidebar.tools-drawer-open .side-head {display:flex;align-items:center;justify-content:space-between}
+  .selfiesave-editor-root .sidebar.tools-drawer-open .tools-drawer-close {display:block;border:0;background:#eef2f6;border-radius:8px;width:34px;height:34px;font-size:20px;line-height:1;color:#1d2b3a}
+}
