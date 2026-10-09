@@ -118,3 +118,46 @@ export function flowDisplayText(value: string, isLastBox: boolean): string {
 export function stripFlowFiller(text: string): string {
   return text.split(FLOW_FILLER).join("");
 }
+
+/** Normalizes pasted text: Windows/old-Mac line endings become "\n", and
+ * the non-breaking spaces some apps copy become plain spaces. */
+export function normalizePastedText(text: string): string {
+  return text.replace(/\r\n?/g, "\n").replace(/ /g, " ");
+}
+
+const BLOCK_TAGS = new Set(["DIV", "P", "LI", "TR", "H1", "H2", "H3", "H4", "H5", "H6", "BLOCKQUOTE", "PRE"]);
+
+/**
+ * The text of a typed-in box, line breaks included. Browsers sometimes put a
+ * line break in as a <br> or a new <div> instead of a "\n" character (pasting
+ * or a phone keyboard's Enter), and textContent silently drops those -- which
+ * glued pasted columns into one paragraph. With `stop`, returns only the text
+ * before that point (for caret offsets). The zero-width filler is removed.
+ */
+export function flowTextOf(root: Node, stop?: { node: Node; offset: number }): string {
+  let out = "";
+  let done = false;
+  const walk = (node: Node) => {
+    for (let i = 0; i < node.childNodes.length && !done; i++) {
+      if (stop && stop.node === node && stop.offset === i) { done = true; return; }
+      const child = node.childNodes[i];
+      if (child.nodeType === 3) {
+        const value = child.nodeValue || "";
+        if (stop && stop.node === child) { out += value.slice(0, stop.offset); done = true; return; }
+        out += value;
+      } else if (child.nodeType === 1) {
+        const tag = (child as Element).tagName;
+        if (tag === "BR") { out += "\n"; continue; }
+        const block = BLOCK_TAGS.has(tag);
+        if (block && out && !out.endsWith("\n")) out += "\n";
+        walk(child);
+        if (done) return;
+        // A block ends its line unless it already did (e.g. ended in <br>).
+        if (block && i < node.childNodes.length - 1 && !out.endsWith("\n")) out += "\n";
+      }
+    }
+    if (stop && stop.node === node && stop.offset >= node.childNodes.length) done = true;
+  };
+  walk(root);
+  return stripFlowFiller(out);
+}
