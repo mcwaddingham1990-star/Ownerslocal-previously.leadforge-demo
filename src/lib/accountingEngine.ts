@@ -36,7 +36,7 @@ export function postTransactionEntry(txn: Transaction): JournalEntry {
   if (txn.type === "income") {
     return buildEntry(
       txn.date,
-      `Income: ${txn.description}`,
+      txn.description ? `Income: ${txn.description}` : "Income",
       "income",
       txn.id,
       [
@@ -49,7 +49,7 @@ export function postTransactionEntry(txn: Transaction): JournalEntry {
   const expenseAccountId = accountIdForExpenseCategory(txn.category);
   return buildEntry(
     txn.date,
-    `Expense: ${txn.description}`,
+    txn.description ? `Expense: ${txn.description}` : "Expense",
     txn.source === "payroll" ? "payroll" : "expense",
     txn.id,
     [

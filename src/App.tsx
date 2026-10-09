@@ -33,6 +33,7 @@ import CustomerPortalPage from "./components/CustomerPortalPage";
 import { TimeClockApprovalModal } from "./components/TimeClockApprovalModal";
 import { RolePermissionEditorModal, MODULE_CATALOG } from "./components/RolePermissionEditorModal";
 import { LogTransactionModal } from "./components/LogTransactionModal";
+import { BuildJobPromptHost } from "./components/BuildJobPromptHost";
 import {
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
@@ -136,6 +137,8 @@ import { SchedulingPage, SchedulingEvent } from "./components/SchedulingPage";
 import { DispatchPage } from "./components/DispatchPage";
 import { JobsPage } from "./components/JobsPage";
 import { ServiceAgreementsPage } from "./components/ServiceAgreementsPage";
+import { RevenueDetailModal, type RevenueDetailRow } from "./components/RevenueDetailModal";
+import { countableIncome, incomeCountedAsJobRevenue } from "./lib/revenueDedup";
 import { TimeClockPage } from "./components/TimeClockPage";
 import { InventoryPage, INITIAL_INVENTORY, InventoryItem } from "./components/InventoryPage";
 import { InteractiveMapPage } from "./components/InteractiveMapPage";
@@ -147,6 +150,7 @@ import { BillingPage } from "./components/BillingPage";
 import { PaywallGate } from "./components/PaywallGate";
 import TutorialHost from "./components/TutorialHost";
 import { useSubscriptionStatus } from "./hooks/useSubscriptionStatus";
+import { freeTrialDaysLeft } from "./lib/freeTrial";
 import { RosterPage } from "./components/RosterPage";
 import { MessagesPage } from "./components/MessagesPage";
 import { TrainingPage } from "./components/TrainingPage";
@@ -1218,7 +1222,8 @@ function getRevenueStepSeries(
   revenueEvents: RevenueEvent[],
   transactions: Transaction[] = [],
   bills: Bill[] = [],
-  journalEntries: JournalEntry[] = []
+  journalEntries: JournalEntry[] = [],
+  invoices: Invoice[] = []
 ): { points: RevenueStepPoint[]; periodStart: Date; periodEnd: Date } {
   const now = new Date();
   let periodStart: Date;
@@ -1254,8 +1259,12 @@ function getRevenueStepSeries(
     const t = new Date(e.date).getTime();
     if (inRange(t)) events.push({ time: t, kind: "payment", amount: e.amount });
   }
+  // A paid invoice for an already-completed job is the same money as its
+  // revenue event -- count the job once (see lib/revenueDedup.ts).
+  const alreadyCounted = incomeCountedAsJobRevenue(transactions, invoices, revenueEvents);
   for (const t of transactions) {
     if (t.type !== "income" && t.type !== "expense") continue;
+    if (alreadyCounted.has(t.id)) continue;
     const time = new Date(t.date).getTime();
     if (inRange(time)) events.push({ time, kind: t.type === "income" ? "payment" : "expense", amount: t.amount });
   }
@@ -2047,7 +2056,7 @@ export default function App() {
   // logging income actually moves this number, not just an ignored ledger.
   const completedJobsRevenue =
     revenueEvents.reduce((sum, e) => sum + e.amount, 0) +
-    transactions.filter((t) => t.type === "income").reduce((sum, t) => sum + t.amount, 0);
+    countableIncome(transactions, invoices, revenueEvents).reduce((sum, t) => sum + t.amount, 0);
   const [preSelectedDate, setPreSelectedDate] = useState<string | undefined>(undefined);
   const [preSelectedCustomerId, setPreSelectedCustomerId] = useState<string | undefined>(undefined);
   // Lets other pages deep-link into a specific Settings sub-section (e.g.
@@ -2371,6 +2380,8 @@ export default function App() {
   // "all" is each table's default (every payment / every expense).
   const [paymentsTableFilter, setPaymentsTableFilter] = useState("all");
   const [expensesTableFilter, setExpensesTableFilter] = useState("all");
+  // Revenue page tile pop-up: the payments/expenses behind a tile's number.
+  const [revenueDetail, setRevenueDetail] = useState<{ title: string; periodLabel: string; mode: "payments" | "expenses" | "net"; rows: RevenueDetailRow[] } | null>(null);
   const [newBulletinTitle, setNewBulletinTitle] = useState("");
   const [newBulletinContent, setNewBulletinContent] = useState("");
   const [isAddingBulletin, setIsAddingBulletin] = useState(false);
@@ -3898,6 +3909,9 @@ Access to full financial telemetry is restricted.`;
     setIsSubmitting(true);
     const saved = await saveProfileToFirestore();
     setIsSubmitting(false);
+    // Phone/address are first entered here -- re-check free trial
+    // eligibility (one trial per business) against the saved details.
+    if (saved && !isEditingBusinessProfile) subscription.refresh();
 
     // Editing an existing business profile is not onboarding. In particular,
     // an Office Manager must never continue into Step 2, whose final action
@@ -4092,11 +4106,13 @@ Access to full financial telemetry is restricted.`;
       batch.set(doc(db, "transactions", newTxn.id), persistedTxn);
       batch.set(doc(db, "journal_entries", journalEntry.id), persistedJournalEntry);
       await batch.commit();
-      setTransactions(prev => [...prev, newTxn]);
+      // Keyed by the stable id -- a repeated save of the same submission
+      // replaces its row instead of listing the payment/expense twice.
+      setTransactions(prev => [...prev.filter(x => x.id !== newTxn.id), newTxn]);
       // Real double-entry posting -- every logged transaction moves the
       // real ledger (Cash + Revenue or Cash + the matching expense
       // account), not just a line in a list. See accountingEngine.ts.
-      setJournalEntries(prev => [...prev, journalEntry]);
+      setJournalEntries(prev => [...prev.filter(x => x.id !== journalEntry.id), journalEntry]);
       setLogTransactionType(null);
       sessionStorage.removeItem("ownerslocal_pending_financial_scan");
       triggerNotification(`${t.type === "income" ? "Income" : "Expense"} logged: $${t.amount.toLocaleString()}`);
@@ -4751,6 +4767,7 @@ Access to full financial telemetry is restricted.`;
 
   if (
     subscriptionGateApplies && loggedInUser && !subscription.isAdminBusiness &&
+    !subscription.trialActive &&
     (!subscription.configured || (!subscription.subscriptionActive && !subscription.bypassActive))
   ) {
     return (
@@ -4769,6 +4786,7 @@ Access to full financial telemetry is restricted.`;
     <NavTelemetryContext.Provider value={navTelemetryContextValue}>
     <EventEngineEffects />
     <AutomationEngineEffects />
+    {isLoggedIn && <BuildJobPromptHost onOpenJobs={() => navigateToScreen("jobs")} />}
     {isLoggedIn && <CompletionGuard />}
     <TutorialHost
       tutorialId={
@@ -6479,6 +6497,7 @@ Access to full financial telemetry is restricted.`;
                             {isSignUpSubmitting ? "Registering..." : "Sign Up"}
                           </button>
                         </div>
+                        <p className="text-center text-[10.5px] font-semibold text-slate-500">Includes a 7-day free trial. No card needed.</p>
                       </form>
                     </div>
                   </div>
@@ -7012,6 +7031,23 @@ Access to full financial telemetry is restricted.`;
                         className="shrink-0 px-3 py-1 bg-amber-950 text-amber-50 rounded-lg text-[10.5px] uppercase tracking-wide cursor-pointer hover:bg-amber-900"
                       >
                         Exit Simulation
+                      </button>
+                    </div>
+                  )}
+
+                  {/* No-card free trial (see src/lib/freeTrial.ts) -- the owner sees how long is left and can subscribe anytime. */}
+                  {subscription.trialActive && !subscription.subscriptionActive && !subscription.bypassActive && !loggedInUser?.isEmployee && activeScreen.id !== "billing" && (
+                    <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-[#A9CDEE] bg-[#E3F3FF] px-4 py-2.5 text-xs font-bold text-[#1F3557]">
+                      <span>
+                        Free trial: {freeTrialDaysLeft(subscription.trialEndsAt)} day{freeTrialDaysLeft(subscription.trialEndsAt) === 1 ? "" : "s"} left
+                        <span className="ml-1 font-semibold text-[#5E7393]">· ends {subscription.trialEndsAt ? new Date(subscription.trialEndsAt).toLocaleDateString() : ""}</span>
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => navigateToScreen("billing")}
+                        className="shrink-0 rounded-lg bg-[#315C9F] px-3 py-1 text-[10.5px] uppercase tracking-wide text-white cursor-pointer hover:bg-[#1F3557]"
+                      >
+                        Subscribe
                       </button>
                     </div>
                   )}
@@ -7832,7 +7868,7 @@ Access to full financial telemetry is restricted.`;
                         <span className="pointer-events-none absolute bottom-3 left-3 w-5 h-5 border-b-2 border-l-2 border-white" />
                         <span className="pointer-events-none absolute bottom-3 right-3 w-5 h-5 border-b-2 border-r-2 border-white" />
                         {(() => {
-                          const stepData = getRevenueStepSeries(revenuePageFilter, revenueEvents, transactions, bills, journalEntries);
+                          const stepData = getRevenueStepSeries(revenuePageFilter, revenueEvents, transactions, bills, journalEntries, invoices);
                           const { points, periodStart, periodEnd } = stepData;
                           const latest = points[points.length - 1];
                           const paymentsTotal = latest.Payments;
@@ -7850,8 +7886,37 @@ Access to full financial telemetry is restricted.`;
                             const t = new Date(d).getTime();
                             return !Number.isNaN(t) && t >= periodStart.getTime() && t <= periodEnd.getTime();
                           };
+                          // Tile pop-ups list exactly what the tile totals add up:
+                          // completed-job revenue + logged income, and logged
+                          // expenses + bills, all within this period (same sources
+                          // as getRevenueStepSeries).
+                          const incomeToCount = countableIncome(transactions, invoices, revenueEvents);
+                          const periodPaymentRows: RevenueDetailRow[] = [
+                            ...revenueEvents.filter(e => inPeriod(e.date)).map(e => ({ id: e.id, date: e.date, description: `Completed job — ${e.customer}`, category: "Completed Job Revenue", kind: "payment" as const, amount: e.amount })),
+                            ...incomeToCount.filter(t => inPeriod(t.date)).map(t => ({ id: t.id, date: t.date, description: t.description || "Logged income", category: "Logged Income", kind: "payment" as const, amount: t.amount }))
+                          ];
+                          const periodBillAmounts = billExpenseAmounts(bills, journalEntries);
+                          const periodExpenseRows: RevenueDetailRow[] = [
+                            ...transactions.filter(t => t.type === "expense" && inPeriod(t.date)).map(t => ({ id: t.id, date: t.date, description: t.description || "Logged expense", category: t.category || "Uncategorized", kind: "expense" as const, amount: t.amount })),
+                            ...bills.filter(b => b.status !== "void" && inPeriod(b.issuedDate)).map(b => ({ id: b.id, date: b.issuedDate, description: [b.vendor, b.serviceProvided || b.billNumber].filter(Boolean).join(" — ") || "Bill", category: b.category || "Bill", kind: "expense" as const, amount: periodBillAmounts.get(b.id) ?? 0 }))
+                          ];
+                          const byNewest = (a: RevenueDetailRow, b: RevenueDetailRow) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0);
+                          const openRevenueDetail = (mode: "payments" | "expenses" | "net", title: string) => setRevenueDetail({
+                            title,
+                            mode,
+                            periodLabel: `${revenuePageFilter} · ${periodStart.toLocaleDateString()} – ${periodEnd.toLocaleDateString()}`,
+                            rows: (mode === "payments" ? periodPaymentRows : mode === "expenses" ? periodExpenseRows : [...periodPaymentRows, ...periodExpenseRows]).slice().sort(byNewest)
+                          });
+                          const tileButtonProps = (mode: "payments" | "expenses" | "net", title: string) => ({
+                            role: "button" as const,
+                            tabIndex: 0,
+                            title: "Click to see the details",
+                            onClick: () => openRevenueDetail(mode, title),
+                            onKeyDown: (e: React.KeyboardEvent) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openRevenueDetail(mode, title); } }
+                          });
+
                           const jobRevenueThisPeriod = revenueEvents.filter(e => inPeriod(e.date)).reduce((s, e) => s + e.amount, 0);
-                          const loggedIncomeThisPeriod = transactions.filter(t => t.type === "income" && inPeriod(t.date)).reduce((s, t) => s + t.amount, 0);
+                          const loggedIncomeThisPeriod = incomeToCount.filter(t => inPeriod(t.date)).reduce((s, t) => s + t.amount, 0);
 
                           // Ledger-derived -- one row per real expense account for this
                           // period, the same function the Revenue page's statement table
@@ -8176,7 +8241,7 @@ Access to full financial telemetry is restricted.`;
 
                               {/* REVENUE BREAKDOWN / EXPENSE BREAKDOWN / CASH FLOW -- all real, this-period data */}
                               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                                <div className="bg-[linear-gradient(145deg,rgba(225,243,255,0.96),rgba(194,227,251,0.96))] rounded-lg p-4 border border-white shadow-[0_0_15px_rgba(56,189,248,0.35),inset_0_0_18px_rgba(255,255,255,0.82)]">
+                                <div {...tileButtonProps("payments", "Where Your Income Came From")} className="cursor-pointer transition hover:ring-2 hover:ring-[#22D3EE]/60 bg-[linear-gradient(145deg,rgba(225,243,255,0.96),rgba(194,227,251,0.96))] rounded-lg p-4 border border-white shadow-[0_0_15px_rgba(56,189,248,0.35),inset_0_0_18px_rgba(255,255,255,0.82)]">
                                   <p className="text-[10px] font-mono font-black text-[#07599a] uppercase tracking-widest mb-2">Where Your Income Came From</p>
                                   {revenueSlices.length === 0 ? (
                                     <p className="text-[10.5px] text-[#2473aa]/55 font-mono text-center py-8">No revenue this period yet.</p>
@@ -8205,7 +8270,7 @@ Access to full financial telemetry is restricted.`;
                                   )}
                                 </div>
 
-                                <div className="bg-[linear-gradient(145deg,rgba(225,243,255,0.96),rgba(194,227,251,0.96))] rounded-lg p-4 border border-white shadow-[0_0_15px_rgba(56,189,248,0.35),inset_0_0_18px_rgba(255,255,255,0.82)]">
+                                <div {...tileButtonProps("expenses", "Where Your Money Went")} className="cursor-pointer transition hover:ring-2 hover:ring-[#22D3EE]/60 bg-[linear-gradient(145deg,rgba(225,243,255,0.96),rgba(194,227,251,0.96))] rounded-lg p-4 border border-white shadow-[0_0_15px_rgba(56,189,248,0.35),inset_0_0_18px_rgba(255,255,255,0.82)]">
                                   <p className="text-[10px] font-mono font-black text-[#07599a] uppercase tracking-widest mb-2">Where Your Money Went</p>
                                   {expenseSlices.length === 0 ? (
                                     <p className="text-[10.5px] text-[#2473aa]/55 font-mono text-center py-8">No expenses this period yet.</p>
@@ -8234,7 +8299,7 @@ Access to full financial telemetry is restricted.`;
                                   )}
                                 </div>
 
-                                <div className="bg-[linear-gradient(145deg,rgba(225,243,255,0.96),rgba(194,227,251,0.96))] rounded-lg p-4 border border-white shadow-[0_0_15px_rgba(56,189,248,0.35),inset_0_0_18px_rgba(255,255,255,0.82)]">
+                                <div {...tileButtonProps("net", "Cash Flow")} className="cursor-pointer transition hover:ring-2 hover:ring-[#22D3EE]/60 bg-[linear-gradient(145deg,rgba(225,243,255,0.96),rgba(194,227,251,0.96))] rounded-lg p-4 border border-white shadow-[0_0_15px_rgba(56,189,248,0.35),inset_0_0_18px_rgba(255,255,255,0.82)]">
                                   <p className="text-[10px] font-mono font-black text-[#07599a] uppercase tracking-widest mb-2">Cash Flow</p>
                                   <div style={{ filter: 'drop-shadow(0 0 6px rgba(74,222,128,0.4))' }}>
                                     <ResponsiveContainer width="100%" height={100}>
@@ -8254,11 +8319,11 @@ Access to full financial telemetry is restricted.`;
                               {/* REAL STAT TILES -- own row, below the breakdowns */}
                               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                                 {([
-                                  { label: "Payments Collected", val: paymentsTotal, pct: paymentsPct, icon: DollarSign, color: "#22D3EE", bg: "bg-cyan-400/10" },
-                                  { label: "Expenses", val: expensesTotal, pct: expensesPct, icon: TrendingDown, color: "#FB7185", bg: "bg-rose-400/10" },
-                                  { label: "Net Revenue", val: netTotal, pct: netPct, icon: TrendingUp, color: "#4ADE80", bg: "bg-emerald-400/10" }
+                                  { label: "Payments Collected", mode: "payments" as const, val: paymentsTotal, pct: paymentsPct, icon: DollarSign, color: "#22D3EE", bg: "bg-cyan-400/10" },
+                                  { label: "Expenses", mode: "expenses" as const, val: expensesTotal, pct: expensesPct, icon: TrendingDown, color: "#FB7185", bg: "bg-rose-400/10" },
+                                  { label: "Net Revenue", mode: "net" as const, val: netTotal, pct: netPct, icon: TrendingUp, color: "#4ADE80", bg: "bg-emerald-400/10" }
                                 ]).map((tile, idx) => (
-                                  <div key={idx} className="bg-[linear-gradient(145deg,rgba(225,243,255,0.96),rgba(194,227,251,0.96))] rounded-lg p-4 border border-white shadow-[0_0_15px_rgba(56,189,248,0.35),inset_0_0_18px_rgba(255,255,255,0.82)]">
+                                  <div key={idx} {...tileButtonProps(tile.mode, tile.label)} className="cursor-pointer transition hover:ring-2 hover:ring-[#22D3EE]/60 bg-[linear-gradient(145deg,rgba(225,243,255,0.96),rgba(194,227,251,0.96))] rounded-lg p-4 border border-white shadow-[0_0_15px_rgba(56,189,248,0.35),inset_0_0_18px_rgba(255,255,255,0.82)]">
                                     <div className="flex items-center justify-between mb-1.5">
                                       <span className="text-[9px] font-mono font-bold text-[#07599a] uppercase tracking-widest">{tile.label}</span>
                                       <div className={`w-7 h-7 rounded-full border flex items-center justify-center ${tile.bg}`} style={{ borderColor: tile.color, color: tile.color, boxShadow: `0 0 8px ${tile.color}66` }}>
@@ -8374,7 +8439,7 @@ Access to full financial telemetry is restricted.`;
 
                         const allPaymentItems = [
                           ...revenueEvents.map(e => ({ id: e.id, date: e.date, memo: `Completed job — ${e.customer}`, amount: e.amount, source: "Completed Job Revenue" })),
-                          ...transactions.filter(t => t.type === "income").map(t => ({ id: t.id, date: t.date, memo: t.description || "Logged income", amount: t.amount, source: "Logged Income" }))
+                          ...countableIncome(transactions, invoices, revenueEvents).map(t => ({ id: t.id, date: t.date, memo: t.description || "Logged income", amount: t.amount, source: "Logged Income" }))
                         ].sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
                         const paymentItems = paymentsTableFilter === "all" ? allPaymentItems : allPaymentItems.filter(i => i.source === paymentsTableFilter);
                         const paymentsTotal = paymentItems.reduce((s, i) => s + i.amount, 0);
@@ -8418,6 +8483,19 @@ Access to full financial telemetry is restricted.`;
                                     <option value="Completed Job Revenue">Completed Job Revenue</option>
                                     <option value="Logged Income">Logged Income</option>
                                   </select>
+                                  {/* Adds straight into this list through the same income/expense
+                                      pipeline as Record Expense / Add Custom Payment above -- any
+                                      date allowed, so older payments can be back-filled. */}
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      sessionStorage.setItem("ownerslocal_pending_financial_scan", "income");
+                                      setLogTransactionType("income");
+                                    }}
+                                    className="px-3 py-2 text-[11px] font-bold rounded-xl bg-[#315C9F] text-white border border-[#315C9F] hover:bg-[#1F3557] cursor-pointer flex items-center gap-1.5"
+                                  >
+                                    <Plus className="w-3.5 h-3.5" /> Add Payment
+                                  </button>
                                   <button
                                     type="button"
                                     onClick={() => downloadCsv(
@@ -8470,6 +8548,19 @@ Access to full financial telemetry is restricted.`;
                                     <option value="all">All Expenses</option>
                                     {expenseCategoryAccounts.map(acct => <option key={acct.id} value={acct.name}>{acct.name}</option>)}
                                   </select>
+                                  {/* Adds straight into this list through the same income/expense
+                                      pipeline as Record Expense / Add Custom Payment above -- any
+                                      date allowed, so older expenses can be back-filled. */}
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      sessionStorage.setItem("ownerslocal_pending_financial_scan", "expense");
+                                      setLogTransactionType("expense");
+                                    }}
+                                    className="px-3 py-2 text-[11px] font-bold rounded-xl bg-[#315C9F] text-white border border-[#315C9F] hover:bg-[#1F3557] cursor-pointer flex items-center gap-1.5"
+                                  >
+                                    <Plus className="w-3.5 h-3.5" /> Add Expense
+                                  </button>
                                   <button
                                     type="button"
                                     onClick={() => downloadCsv(
@@ -8540,6 +8631,21 @@ Access to full financial telemetry is restricted.`;
                       </div>
 
                       <PriceBookModal isOpen={isPriceBookOpen} onClose={() => setIsPriceBookOpen(false)} />
+
+                      {revenueDetail && (
+                        <RevenueDetailModal
+                          title={revenueDetail.title}
+                          periodLabel={revenueDetail.periodLabel}
+                          mode={revenueDetail.mode}
+                          rows={revenueDetail.rows}
+                          onClose={() => setRevenueDetail(null)}
+                          onDownloadCsv={() => downloadCsv(
+                            `${revenueDetail.title} - ${new Date().toISOString().slice(0, 10)}.csv`,
+                            ["Type", "Category / Source", "Date", "Description", "Amount"],
+                            revenueDetail.rows.map(r => [r.kind === "payment" ? "Payment" : "Expense", r.category, r.date.slice(0, 10), r.description, r.amount.toFixed(2)])
+                          )}
+                        />
+                      )}
 
                       {/* FINANCIAL REPORTS FLOATING PANE */}
                       {isFinancialSnapshotOpen && (

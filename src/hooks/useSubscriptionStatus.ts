@@ -38,6 +38,9 @@ export type SubscriptionState =
       cancelAtPeriodEnd: false;
       bypassActive: false;
       bypassExpiresAt: null;
+      trialActive: false;
+      trialEndsAt: null;
+      trialBlocked: false;
       isAdminBusiness: false;
       seatPricing: SeatPricing;
     }
@@ -52,6 +55,11 @@ export type SubscriptionState =
       /** A redeemed platform-admin access code, valid for 30 days from redemption -- see server/paywallBypass.ts. */
       bypassActive: boolean;
       bypassExpiresAt: number | null;
+      /** No-card free trial (7 days from the owner's signup) -- see src/lib/freeTrial.ts. */
+      trialActive: boolean;
+      trialEndsAt: number | null;
+      /** No trial: this business matches one that signed up earlier (server/trialEligibility.ts). */
+      trialBlocked: boolean;
       /** The hardcoded platform-admin business (the.owner@ownerslocal.com) -- never gated regardless of the fields above. */
       isAdminBusiness: boolean;
       seatPricing: SeatPricing;
@@ -68,6 +76,9 @@ const initialState: SubscriptionState = {
   cancelAtPeriodEnd: false,
   bypassActive: false,
   bypassExpiresAt: null,
+  trialActive: false,
+  trialEndsAt: null,
+  trialBlocked: false,
   isAdminBusiness: false,
   seatPricing: DEFAULT_SEAT_PRICING,
 };
@@ -82,6 +93,9 @@ const failedState = (error: string): SubscriptionState => ({
   cancelAtPeriodEnd: false,
   bypassActive: false,
   bypassExpiresAt: null,
+  trialActive: false,
+  trialEndsAt: null,
+  trialBlocked: false,
   isAdminBusiness: false,
   seatPricing: DEFAULT_SEAT_PRICING,
   error,
@@ -128,6 +142,9 @@ export function useSubscriptionStatus(): SubscriptionState & { refresh: () => vo
           cancelAtPeriodEnd: !!data.cancelAtPeriodEnd,
           bypassActive: !!data.bypassActive,
           bypassExpiresAt: typeof data.bypassExpiresAt === "number" ? data.bypassExpiresAt : null,
+          trialActive: !!data.trialActive,
+          trialEndsAt: typeof data.trialEndsAt === "number" ? data.trialEndsAt : null,
+          trialBlocked: !!data.trialBlocked,
           isAdminBusiness: !!data.isAdminBusiness,
           seatPricing: data.seatPricing || DEFAULT_SEAT_PRICING,
         });

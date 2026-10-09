@@ -169,6 +169,9 @@ export interface Estimate {
    * name-matching when it's present. */
   customerId?: string;
   status: "Draft" | "Pending" | "Sent" | "Viewed" | "Signed" | "Accepted" | "Declined" | "Expired" | "Completed";
+  /** When/how the estimate was accepted (a signature counts as acceptance). */
+  acceptedAt?: string;
+  acceptedVia?: string;
   salesRep: string;
   amount: number;
   createdDate: string;

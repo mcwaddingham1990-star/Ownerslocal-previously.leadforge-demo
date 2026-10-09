@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import { requestBuildJobPrompt } from "../lib/buildJobPrompts";
 import { collection, doc, getDocs, limit, query, runTransaction, updateDoc, where } from "firebase/firestore";
 import { db } from "../firebase";
 import { useAuth } from "../context/AuthContext";
@@ -158,6 +159,7 @@ export function useAutomationEngine(): void {
         };
       },
       createJob: input => latest.current.domainActions.createJob(input),
+      promptBuildJob: request => requestBuildJobPrompt(request),
       createAppointment: input => latest.current.domainActions.createAppointment(input),
       updateJob: (jobId, updates, label) => latest.current.domainActions.updateJob(jobId, updates, label),
       setLeads: value => latest.current.domain.setLeads(value),

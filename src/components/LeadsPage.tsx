@@ -1,4 +1,5 @@
 import React, { useState, useMemo, useRef, useEffect } from "react";
+import { leadPromptKey, suppressBuildJobPrompt } from "../lib/buildJobPrompts";
 import { downloadCsv, parseCsv } from "../lib/csv";
 import { parseAddress } from "./StructuredAddressFields";
 import { useDomainActions } from "../hooks/useDomainActions";
@@ -261,6 +262,7 @@ export const LeadsPage: React.FC = () => {
   // openEstimateFromLead above, so "build a job straight from a lead" opens
   // the exact same popup as building one from a Customer or an Estimate.
   const openBuildJobFromLead = (lead: Lead) => {
+    suppressBuildJobPrompt(leadPromptKey(lead.id));
     setBuildJobPrefill({
       customerName: lead.name,
       customerPhone: lead.phone,

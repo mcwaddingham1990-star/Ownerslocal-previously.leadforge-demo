@@ -1224,7 +1224,7 @@ function ExpenseTransactionsTable({ rows, emptyLabel }: { rows: any[]; emptyLabe
             {sorted.map(t => (
               <tr key={t.id}>
                 <td className="px-4 py-3">{t.date}</td>
-                <td className="px-4 py-3 font-bold text-[#1F3557]">{t.description}</td>
+                <td className="px-4 py-3 font-bold text-[#1F3557]">{t.description || "Expense"}</td>
                 <td className="px-4 py-3">{t.category || "Uncategorized"}</td>
                 <td className="px-4 py-3 text-[10px] uppercase text-[#5E7393]">{t.source === "ai_scan" ? "AI Scan" : t.source === "manual" ? "Manual" : t.source}</td>
                 <td className="px-4 py-3 text-right font-mono font-bold text-rose-600">{fmt(t.amount)}</td>

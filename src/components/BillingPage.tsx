@@ -4,6 +4,7 @@ import { authedFetch } from "../lib/apiClient";
 import { redeemBypassCode } from "../lib/paywallClient";
 import { useNavTelemetry } from "../context/NavTelemetryContext";
 import { useSubscriptionStatus } from "../hooks/useSubscriptionStatus";
+import { FREE_TRIAL_DAYS, freeTrialDaysLeft } from "../lib/freeTrial";
 
 // Mirrors the discount server/subscriptionRoutes.ts actually applies
 // (FIRST_MONTH_PRICE_CENTS via the "once" coupon) -- shown as copy here so
@@ -191,10 +192,28 @@ export const BillingPage: React.FC<BillingPageProps> = ({ onAccessGranted }) => 
             )}
           </div>
         </div>
+      ) : subscription.trialActive ? (
+        <div className="bg-[#E7F7EE] border border-[#A9E0C0] rounded-2xl p-4 flex items-start gap-3">
+          <CheckCircle2 className="w-4 h-4 text-[#1F7A46] shrink-0 mt-0.5" />
+          <div className="text-xs text-[#1F5C36] space-y-1">
+            <div className="font-bold">
+              Free trial: {freeTrialDaysLeft(subscription.trialEndsAt)} day{freeTrialDaysLeft(subscription.trialEndsAt) === 1 ? "" : "s"} left
+            </div>
+            {subscription.trialEndsAt && (
+              <div>Your {FREE_TRIAL_DAYS}-day free trial ends {new Date(subscription.trialEndsAt).toLocaleDateString()}. No card needed until then. Subscribe anytime to keep access; your first month starts the day you subscribe.</div>
+            )}
+          </div>
+        </div>
       ) : (
         <div className="bg-[#E3F3FF] border border-[#A9CDEE] rounded-2xl p-4 flex items-start gap-3">
           <CreditCard className="w-4 h-4 text-[#315C9F] shrink-0 mt-0.5" />
           <div className="text-xs text-[#1F3557]">
+            {!subscription.status && subscription.trialBlocked && (
+              <div className="font-bold">This business matches one that already used Owner’sLOCAL’s free trial, so it isn’t eligible for another. Subscribe to continue.</div>
+            )}
+            {!subscription.status && !subscription.trialBlocked && subscription.trialEndsAt && subscription.trialEndsAt <= Date.now() && (
+              <div className="font-bold">Your {FREE_TRIAL_DAYS}-day free trial has ended. Subscribe to keep using Owner’sLOCAL.</div>
+            )}
             {subscription.status
               ? STATUS_LABELS[subscription.status] || `Subscription status: ${subscription.status}`
               : "No active subscription."}
