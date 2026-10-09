@@ -14,7 +14,7 @@ import SignaturePad from "./SignaturePad";
 import SendChoiceModal from "./SendChoiceModal";
 import ESignChoiceModal from "./ESignChoiceModal";
 import { ESignLegalInfoModal, ESignComplianceFooter } from "./ESignLegalInfoModal";
-import { flowDisplayText, layoutFlow, locateFlowCaret, stripFlowFiller, type FlowSlot } from "../lib/flowText";
+import { flowDisplayText, flowTextOf, layoutFlow, locateFlowCaret, normalizePastedText, type FlowSlot } from "../lib/flowText";
 
 type FieldKind = "signature" | "initials";
 type SignField = { id:number; party:number; line:number; kind:FieldKind; signed:boolean; committed:boolean; role?:string; name?:string; image?:string; signatureImage?:string; stamp?:string; centralStamp?:string; coords?:string };
@@ -439,14 +439,14 @@ export default function SelfieSaveEditor({accountEmail,accountName,documentId,in
   useEffect(()=>()=>{measurerRef.current?.remove()},[]);
   const flowElement=(id:number)=>window.document.querySelector<HTMLElement>(`[data-object-id="${id}"] .flow-content`);
   const flowChain=(flowId:number)=>objectsRef.current.filter(o=>o.flowId===flowId).sort((a,b)=>(a.flowIndex||0)-(b.flowIndex||0));
-  const readFlow=(el:HTMLElement)=>stripFlowFiller(el.textContent||"");
+  const readFlow=(el:HTMLElement)=>flowTextOf(el);
   // Character offsets of the current selection inside one flow box.
   const flowSelection=(el:HTMLElement)=>{
     const selection=window.getSelection();
     if(!selection||!selection.rangeCount)return null;
     const range=selection.getRangeAt(0);
     if(!el.contains(range.startContainer)||!el.contains(range.endContainer))return null;
-    const offsetOf=(node:Node,offset:number)=>{const before=window.document.createRange();before.selectNodeContents(el);before.setEnd(node,offset);return stripFlowFiller(before.toString()).length};
+    const offsetOf=(node:Node,offset:number)=>flowTextOf(el,{node,offset}).length;
     return {start:offsetOf(range.startContainer,range.startOffset),end:offsetOf(range.endContainer,range.endOffset)};
   };
   // Hidden twin of a flow box, used to measure how tall text wraps.
@@ -617,7 +617,7 @@ export default function SelfieSaveEditor({accountEmail,accountName,documentId,in
   // Line breaks, and deleting across a page break, are handled here so the
   // text stays one continuous flow. (beforeinput covers phone keyboards,
   // which don't report real keys.)
-  const flowEditKey=(el:HTMLElement,kind:"newline"|"back"|"forward")=>{
+  const flowEditKey=(el:HTMLElement,kind:"newline"|"back"|"forward"|"paste",pasted="")=>{
     const id=Number(el.closest<HTMLElement>("[data-object-id]")?.dataset.objectId);
     const box=objectsRef.current.find(o=>o.id===id);
     const selection=flowSelection(el);
@@ -627,6 +627,8 @@ export default function SelfieSaveEditor({accountEmail,accountName,documentId,in
     const before=values.slice(0,index).join("").length,text=values.join("");
     const start=before+selection.start,end=before+selection.end;
     if(kind==="newline"){applyFlow(box.flowId,text.slice(0,start)+"\n"+text.slice(end),start+1,id);return true}
+    // Pasted text keeps its own lines -- a pasted column stays a column.
+    if(kind==="paste"){applyFlow(box.flowId,text.slice(0,start)+pasted+text.slice(end),start+pasted.length,id);return true}
     if(start!==end)return false;
     if(kind==="back"&&selection.start===0&&index>0&&start>0){applyFlow(box.flowId,text.slice(0,start-1)+text.slice(start),start-1,id);return true}
     if(kind==="forward"&&selection.end===values[index].length&&index<chain.length-1&&start<text.length){applyFlow(box.flowId,text.slice(0,start)+text.slice(start+1),start,id);return true}
@@ -641,11 +643,48 @@ export default function SelfieSaveEditor({accountEmail,accountName,documentId,in
       const e=event as InputEvent;
       const el=(e.target as HTMLElement|null)?.closest?.<HTMLElement>(".flow-content");
       if(!el||e.isComposing)return;
+      // Phone keyboards' clipboard paste arrives here rather than as a paste event.
+      if(e.inputType==="insertFromPaste"||e.inputType==="insertFromDrop"){
+        const pasted=e.dataTransfer?.getData("text/plain");
+        if(pasted&&flowEditKeyRef.current(el,"paste",normalizePastedText(pasted)))e.preventDefault();
+        return;
+      }
       const kind=e.inputType==="insertParagraph"||e.inputType==="insertLineBreak"?"newline":e.inputType==="deleteContentBackward"?"back":e.inputType==="deleteContentForward"?"forward":null;
       if(kind&&flowEditKeyRef.current(el,kind))e.preventDefault();
     };
+    // Pasting keeps the copied line breaks (a column stays a column) in
+    // Insert Text boxes and in every other text box on the page.
+    const paste=(event:ClipboardEvent)=>{
+      const target=event.target as HTMLElement|null;
+      const pasted=event.clipboardData?.getData("text/plain");
+      if(!pasted)return;
+      const text=normalizePastedText(pasted);
+      const flowEl=target?.closest?.<HTMLElement>(".flow-content");
+      if(flowEl){
+        if(flowEditKeyRef.current(flowEl,"paste",text))event.preventDefault();
+        return;
+      }
+      const boxEl=target?.closest?.<HTMLElement>(".editable-object-content");
+      if(boxEl&&boxEl.isContentEditable){
+        // Inserted as one plain text node so its "\n"s survive (these boxes
+        // keep line breaks as characters, shown via pre-wrap).
+        const selection=window.getSelection();
+        if(!selection||!selection.rangeCount||!boxEl.contains(selection.getRangeAt(0).commonAncestorContainer))return;
+        event.preventDefault();
+        const range=selection.getRangeAt(0);
+        range.deleteContents();
+        const node=window.document.createTextNode(text);
+        range.insertNode(node);
+        range.setStartAfter(node);
+        range.collapse(true);
+        selection.removeAllRanges();
+        selection.addRange(range);
+        boxEl.dispatchEvent(new InputEvent("input",{bubbles:true,inputType:"insertFromPaste"}));
+      }
+    };
     editor.addEventListener("beforeinput",beforeInput);
-    return()=>editor.removeEventListener("beforeinput",beforeInput);
+    editor.addEventListener("paste",paste);
+    return()=>{editor.removeEventListener("beforeinput",beforeInput);editor.removeEventListener("paste",paste)};
   },[splash]);
   const flowKeyDown=(e:React.KeyboardEvent<HTMLElement>)=>{
     if(e.nativeEvent.isComposing||e.ctrlKey||e.metaKey||e.altKey)return;

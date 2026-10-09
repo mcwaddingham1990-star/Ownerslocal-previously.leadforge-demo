@@ -251,3 +251,14 @@
 .selfiesave-editor-root .canvas-object.flow-text-object {padding:0;min-width:0;min-height:0;max-width:none;background:transparent;touch-action:pan-x pan-y}
 .selfiesave-editor-root .canvas-object.flow-text-object.selected {outline:1px dashed #2c6deb66;outline-offset:3px;background:transparent;touch-action:pan-x pan-y}
 .selfiesave-editor-root .canvas-object.flow-text-object>.flow-content {width:100%;height:auto;min-height:1lh;overflow:visible;white-space:pre-wrap;overflow-wrap:break-word;word-break:normal;padding:0;margin:0;cursor:text;-webkit-user-select:text;user-select:text;caret-color:#174f9d}
+
+/* Wider screens (desktop, tablets, phones showing the sidebar): the
+   workspace used to grow as tall as the pages while the shell above it
+   clips, so nothing could scroll. Cap it at the screen like phones do, so
+   the document scrolls with a finger, wheel or trackpad, and the sidebar
+   scrolls on its own. */
+@media screen and (min-width:801px){
+  .selfiesave-editor-root .workspace {height:calc(100dvh - 72px);min-height:0;overflow:hidden}
+  .selfiesave-editor-root .workspace>.editor-wrap {height:100%;min-height:0;overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch}
+  .selfiesave-editor-root .workspace>.sidebar {height:100%;min-height:0;overflow-y:auto;overscroll-behavior:contain}
+}
