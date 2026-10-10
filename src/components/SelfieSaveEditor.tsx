@@ -201,78 +201,6 @@ export default function SelfieSaveEditor({accountEmail,accountName,documentId,in
       editor.removeEventListener("touchcancel",end);
     };
   },[]);
-  // One-finger scrolling safety net. Some phones/browser modes (e.g. Chrome's
-  // "Desktop site") have left the document not scrolling under a finger.
-  // These listeners are passive and only watch: when the finger has clearly
-  // moved up/down but the browser hasn't scrolled the document, the editor
-  // scrolls it itself (with a short glide on release). Whenever the browser
-  // does scroll natively, this stays out of the way.
-  useEffect(()=>{
-    if(splash)return;
-    const wrap=editorRef.current;
-    if(!wrap)return;
-    let gesture:{y:number;lastY:number;lastT:number;startTop:number;manual:boolean;expected:number;velocity:number;off:boolean}|null=null;
-    let glide=0;
-    const stopGlide=()=>{if(glide){cancelAnimationFrame(glide);glide=0}};
-    const scrollsItself=(target:EventTarget|null)=>{
-      for(let el=target as HTMLElement|null;el&&el!==wrap;el=el.parentElement){
-        if(el.closest(".grab-handle,.resize-handle"))return true;
-        const style=getComputedStyle(el);
-        if(/(auto|scroll)/.test(style.overflowY)&&el.scrollHeight>el.clientHeight+1)return true;
-      }
-      return false;
-    };
-    const start=(event:TouchEvent)=>{
-      stopGlide();
-      if(event.touches.length!==1||scrollsItself(event.target)){gesture=null;return}
-      const y=event.touches[0].clientY;
-      gesture={y,lastY:y,lastT:performance.now(),startTop:wrap.scrollTop,manual:false,expected:wrap.scrollTop,velocity:0,off:false};
-    };
-    const move=(event:TouchEvent)=>{
-      const g=gesture;
-      if(!g||g.off)return;
-      if(event.touches.length!==1||dragRef.current||resizeRef.current){g.off=true;return}
-      const y=event.touches[0].clientY,now=performance.now();
-      if(!g.manual){
-        if(Math.abs(y-g.y)<24)return;
-        // The browser already scrolled: native scrolling works, leave it be.
-        if(Math.abs(wrap.scrollTop-g.startTop)>1){g.off=true;return}
-        g.manual=true;
-        g.lastY=y;g.lastT=now;g.expected=wrap.scrollTop;
-        return;
-      }
-      // Native scrolling kicked in after all -- hand it back.
-      if(Math.abs(wrap.scrollTop-g.expected)>2){g.off=true;return}
-      const dy=g.lastY-y,dt=Math.max(1,now-g.lastT);
-      wrap.scrollTop+=dy;
-      g.expected=wrap.scrollTop;
-      g.velocity=g.velocity*.6+(dy/dt)*.4;
-      g.lastY=y;g.lastT=now;
-    };
-    const end=()=>{
-      const g=gesture;gesture=null;
-      if(!g||!g.manual||g.off||Math.abs(g.velocity)<.05)return;
-      let v=g.velocity*16,last=performance.now();
-      const step=(now:number)=>{
-        const frames=Math.min(3,(now-last)/16);last=now;
-        wrap.scrollTop+=v*frames;
-        v*=Math.pow(.94,frames);
-        glide=Math.abs(v)>.5?requestAnimationFrame(step):0;
-      };
-      glide=requestAnimationFrame(step);
-    };
-    wrap.addEventListener("touchstart",start,{passive:true});
-    wrap.addEventListener("touchmove",move,{passive:true});
-    wrap.addEventListener("touchend",end,{passive:true});
-    wrap.addEventListener("touchcancel",end,{passive:true});
-    return()=>{
-      stopGlide();
-      wrap.removeEventListener("touchstart",start);
-      wrap.removeEventListener("touchmove",move);
-      wrap.removeEventListener("touchend",end);
-      wrap.removeEventListener("touchcancel",end);
-    };
-  },[splash]);
   const lastScrollTopRef=useRef(0);
   const nextIdRef=useRef(Date.now());
   const textDraftRef=useRef(new Map<number,{value:string;w:number;h:number}>());
@@ -285,21 +213,24 @@ export default function SelfieSaveEditor({accountEmail,accountName,documentId,in
 
   useEffect(()=>{const t=setTimeout(()=>setSplash(false),1400);return()=>clearTimeout(t)},[]);
   // SelfieSave is a true full-screen editor, not a card inside Documents.
-  // Lock the page underneath while it is open so mobile Safari/Chrome cannot
-  // scroll the Documents screen behind the editor.
+  // The document scrolls the ordinary browser page -- the one kind of
+  // scrolling every phone browser handles reliably, in phone and "Desktop
+  // site" mode and while pinch-zoomed (an inner scroll box kept refusing a
+  // finger on real phones). While it is open the app underneath is hidden
+  // (html.selfiesave-open #root, see selfiesave-editor.css) so only the
+  // editor is on the page; leaving restores the app and its scroll spot.
   useEffect(()=>{
-    const bodyOverflow=document.body.style.overflow;
-    const htmlOverflow=document.documentElement.style.overflow;
-    document.body.style.overflow="hidden";
-    document.documentElement.style.overflow="hidden";
-    // No pull-to-refresh reloading the page mid-edit, now that drags on the
-    // document may pass through to the browser's zoomed view.
-    const htmlOverscroll=document.documentElement.style.overscrollBehaviorY;
-    document.documentElement.style.overscrollBehaviorY="none";
+    const root=document.documentElement;
+    const appScroll=window.scrollY;
+    const htmlOverscroll=root.style.overscrollBehaviorY;
+    root.classList.add("selfiesave-open");
+    // No pull-to-refresh reloading the page mid-edit.
+    root.style.overscrollBehaviorY="none";
+    window.scrollTo(0,0);
     return()=>{
-      document.body.style.overflow=bodyOverflow;
-      document.documentElement.style.overflow=htmlOverflow;
-      document.documentElement.style.overscrollBehaviorY=htmlOverscroll;
+      root.classList.remove("selfiesave-open");
+      root.style.overscrollBehaviorY=htmlOverscroll;
+      window.scrollTo(0,appScroll);
     };
   },[]);
   useEffect(()=>{
@@ -395,10 +326,10 @@ export default function SelfieSaveEditor({accountEmail,accountName,documentId,in
   const updateFeature=(k:keyof Features)=>setFeatures(v=>({...v,[k]:!v[k]}));
   // New items go on the page you're looking at (or the one you double-tapped).
   const visiblePage=()=>{
-    const wrap=editorRef.current;
     const papers=Array.from(window.document.querySelectorAll<HTMLElement>(".document-pages .paper"));
-    if(!wrap||!papers.length)return 1;
-    const top=wrap.getBoundingClientRect().top+140;
+    if(!papers.length)return 1;
+    // Below the sticky top bar and action strip, in what's actually on screen.
+    const top=(window.visualViewport?.offsetTop||0)+220;
     const index=papers.findIndex(p=>p.getBoundingClientRect().bottom>top);
     return index<0?papers.length:index+1;
   };
@@ -635,14 +566,12 @@ export default function SelfieSaveEditor({accountEmail,accountName,documentId,in
     selection.addRange(range);
     // Keep the caret on screen when it jumps to the next page, and clear
     // of the on-screen keyboard.
-    const wrap=editorRef.current;
-    if(!wrap)return;
     const caretRect=range.getBoundingClientRect();
     const rect=caretRect.height?caretRect:el.getBoundingClientRect();
-    const view=wrap.getBoundingClientRect();
-    const visualBottom=window.visualViewport?Math.min(view.bottom,window.visualViewport.offsetTop+window.visualViewport.height):view.bottom;
-    if(rect.bottom>visualBottom-24)wrap.scrollTop+=rect.bottom-visualBottom+96;
-    else if(rect.top<view.top+120)wrap.scrollTop-=view.top+120-rect.top;
+    const visualTop=window.visualViewport?window.visualViewport.offsetTop:0;
+    const visualBottom=window.visualViewport?visualTop+window.visualViewport.height:window.innerHeight;
+    if(rect.bottom>visualBottom-24)window.scrollBy(0,rect.bottom-visualBottom+96);
+    else if(rect.top<visualTop+90)window.scrollBy(0,rect.top-visualTop-90);
   };
   // State -> screen for flow boxes. Their text is managed here rather than as
   // React children so typing never fights React over the DOM, and the caret
@@ -953,7 +882,17 @@ export default function SelfieSaveEditor({accountEmail,accountName,documentId,in
     }catch(error){console.error(error);notify("That text file could not be opened")}
     finally{if(textInputRef.current)textInputRef.current.value=""}
   }
-  const growPages=(e:React.UIEvent<HTMLElement>)=>{const el=e.currentTarget,goingDown=el.scrollTop>lastScrollTopRef.current;lastScrollTopRef.current=el.scrollTop;if(goingDown&&el.scrollHeight-el.scrollTop-el.clientHeight<180)setPageCount(v=>v+1)};
+  // Scrolling down near the end adds a blank page, like a word processor.
+  useEffect(()=>{
+    const onScroll=()=>{
+      const top=window.scrollY,goingDown=top>lastScrollTopRef.current;
+      lastScrollTopRef.current=top;
+      const doc=window.document.documentElement;
+      if(goingDown&&doc.scrollHeight-top-window.innerHeight<180)setPageCount(v=>v+1);
+    };
+    window.addEventListener("scroll",onScroll,{passive:true});
+    return()=>window.removeEventListener("scroll",onScroll);
+  },[]);
   // menu.x/y become the new object's placement coordinates (in the page's
   // unscaled layout space), so the click position has to be divided back out
   // of the current zoom factor -- getBoundingClientRect() reports the
@@ -1151,7 +1090,7 @@ export default function SelfieSaveEditor({accountEmail,accountName,documentId,in
     setSignSetup(false);
     setSetup(false);
     ensureInPersonSignatureField();
-    requestAnimationFrame(()=>editorRef.current?.scrollTo({top:0,left:0,behavior:"smooth"}));
+    requestAnimationFrame(()=>window.scrollTo({top:0,left:0,behavior:"smooth"}));
     notify("In-person signing ready — review the full PDF, then tap the signature box");
   }
   // "Save & Prepare for Signing" -- remote branch. Builds the real PDF right
@@ -1233,7 +1172,7 @@ export default function SelfieSaveEditor({accountEmail,accountName,documentId,in
     {pendingField&&<div className="modal-backdrop" role="dialog" aria-modal="true"><div className="modal"><button className="modal-close" onClick={()=>setPendingField(null)}>×</button><p className="eyebrow">ASSIGN FIELD</p><h2>Add {pendingField.kind} line</h2><p>Choose which signer must complete this field.</p><label>Signer number<input type="number" min="1" inputMode="numeric" autoFocus value={pendingParty} onChange={e=>setPendingParty(e.target.value)}/></label><button className="capture" onClick={confirmAddField}>Add to document</button></div></div>}
     <header className="topbar"><a className="brand" href="#" onClick={e=>e.preventDefault()}><span className="brand-mark">P</span><span>{signatureOnlyMode?"Sign PDF":"PDF Editor"}<small>{signatureOnlyMode?"Review and sign":"eSign optional"}</small></span></a>{!signatureOnlyMode&&<nav aria-label="Document tools"><button type="button" className="tools-drawer-btn" disabled={contentLocked} onClick={()=>setToolsOpen(true)} aria-expanded={toolsOpen}><Icon>＋</Icon><span>Add Items</span></button><button onClick={resetDocument}><Icon>＋</Icon><span>New</span></button><button disabled={contentLocked||loadingPdf} onClick={openPdfPicker}><Icon>⇧</Icon><span>{loadingPdf?"Opening…":"Load PDF"}</span></button><input ref={pdfInputRef} className="pdf-file-input" type="file" accept="application/pdf,.pdf" onChange={e=>{const file=e.target.files?.[0];if(file)void loadPdf(file)}}/><button disabled={contentLocked} onClick={()=>textInputRef.current?.click()}><Icon>▤</Icon><span>Load text</span></button><button disabled={contentLocked} onClick={toggleTypeMode} className={`insert-text-btn ${typeMode?"type-mode-on":""}`} aria-pressed={typeMode}><Icon>T</Icon><span>Insert Text</span></button><input ref={textInputRef} className="pdf-file-input" type="file" accept="text/plain,text/markdown,text/csv,.txt,.text,.md,.csv" onChange={e=>{const file=e.target.files?.[0];if(file)void loadText(file)}}/><input ref={imageInputRef} className="pdf-file-input" type="file" accept="image/*" onChange={e=>{const file=e.target.files?.[0];e.target.value="";if(file)void handleImageFileSelected(file)}}/><button disabled={contentLocked} onClick={()=>notify("Select PDF text or tap a text box to edit it directly")}><Icon>✎</Icon><span>Edit</span></button><button disabled={contentLocked} onClick={openCollectSignatures} className="capture-signatures-btn"><Icon>🖊</Icon><span>Collect Signatures</span></button></nav>}{signatureOnlyMode&&<input ref={pdfInputRef} className="pdf-file-input" type="file" accept="application/pdf,.pdf" onChange={e=>{const file=e.target.files?.[0];if(file)void loadPdf(file)}}/>}<div className="header-actions"><span className="account-email">{displayName}</span><button type="button" className="sign-out" onClick={onClose}>Close</button><span className={`status ${finalLocked?"locked":""}`}>{finalLocked?"🔒 Signed":signatureOnlyMode?"● Ready to sign":contentLocked?"🔏 Signed version":"● Draft"}</span></div></header>
     <section className={`workspace ${signatureOnlyMode?"signature-only-workspace":""}`}>{!signatureOnlyMode&&!contentLocked&&!toolsOpen&&<button type="button" className="tools-fab" onClick={()=>setToolsOpen(true)} aria-label="Add signature, initials, text or image">＋ Add</button>}{!signatureOnlyMode&&toolsOpen&&<div className="tools-drawer-backdrop" onClick={()=>setToolsOpen(false)} aria-hidden="true"/>}{!signatureOnlyMode&&<aside className={`sidebar ${toolsOpen?"tools-drawer-open":""}`} onClickCapture={e=>{if((e.target as HTMLElement).closest("button"))setToolsOpen(false)}}><div className="side-head"><h2>Document setup</h2><button type="button" className="tools-drawer-close" onClick={()=>setToolsOpen(false)} aria-label="Close menu">×</button></div><label>File name<input value={filename} disabled={contentLocked} onChange={e=>setFilename(e.target.value)}/></label><p className="fixed-name">Final file: <strong>{filename||"Untitled"}.pdf</strong></p><hr/><h3>Insert anywhere</h3><button className={`insert ${typeMode?"type-mode-on":""}`} onClick={toggleTypeMode} disabled={contentLocked} aria-pressed={typeMode}><Icon>T</Icon><span><strong>Insert Text</strong><small>{typeMode?"On — tap the page and type":"Tap the page, then type"}</small></span><b>{typeMode?"✓":"＋"}</b></button><button className="insert" onClick={triggerImageUpload} disabled={contentLocked}><Icon>▧</Icon><span><strong>Upload image</strong><small>From your device</small></span><b>＋</b></button><button className="insert" onClick={openPriceBook} disabled={contentLocked}><Icon>💲</Icon><span><strong>Add Flat Rate Pricing Model</strong><small>Insert from the Price Book</small></span><b>＋</b></button><button className="insert" onClick={addClause} disabled={contentLocked}><Icon>§</Icon><span><strong>Contract clause</strong><small>Numbered text field</small></span><b>＋</b></button><button className="insert" onClick={()=>addField("signature")} disabled={contentLocked}><Icon>⌁</Icon><span><strong>Signature line</strong><small>Assign any signer</small></span><b>＋</b></button><button className="insert" onClick={()=>addField("initials")} disabled={contentLocked}><Icon>Ab</Icon><span><strong>Initials line</strong><small>Assign any signer</small></span><b>＋</b></button><button className="insert" onClick={()=>setSetup(true)} disabled={contentLocked}><Icon>⚙</Icon><span><strong>Evidence options</strong><small>Choose document requirements</small></span><b>›</b></button>{contentLocked&&<div className="security"><Icon>🔒</Icon><p><strong>Signed copy protected</strong><br/>Editing is disabled because a signer committed. Make a new unsigned version for any changes.</p></div>}</aside>}
-      <section ref={editorRef} className="editor-wrap" onScroll={growPages}><div className="editor-tools"><span>{signatureOnlyMode?"Review the PDF and tap the signature box":contentLocked?"Signed document viewer":"Free-form document editor"}</span><div><button type="button" onClick={zoomOut} disabled={zoom<=0.4} aria-label="Zoom out">−</button><button type="button" onClick={zoomReset} aria-label="Reset zoom">{Math.round(zoom*100)}%</button><button type="button" onClick={zoomIn} disabled={zoom>=2.5} aria-label="Zoom in">＋</button><select disabled={contentLocked}><option>Georgia</option><option>Arial</option></select><select aria-label="Font size" disabled={contentLocked||!selectedTextObject} value={selectedFontSize} onChange={e=>setSelectedFontSize(Number(e.target.value))}>{Array.from({length:30},(_,index)=>index+1).map(size=><option key={size} value={size}>{size} pt</option>)}</select><input aria-label="Font color" type="color" disabled={contentLocked||!selectedTextObject} value={selectedTextColor} onChange={e=>setSelectedTextColor(e.target.value)} style={{width:28,height:28,padding:0,border:"1px solid #d7e3ee",borderRadius:6,cursor:selectedTextObject?"pointer":"not-allowed"}}/><button disabled={contentLocked}><b>B</b></button><button disabled={contentLocked}><i>I</i></button></div><span>{selected&&!contentLocked?"Use the blue Grab to move tab":""}</span></div>
+      <section ref={editorRef} className="editor-wrap"><div className="editor-tools"><span>{signatureOnlyMode?"Review the PDF and tap the signature box":contentLocked?"Signed document viewer":"Free-form document editor"}</span><div><button type="button" onClick={zoomOut} disabled={zoom<=0.4} aria-label="Zoom out">−</button><button type="button" onClick={zoomReset} aria-label="Reset zoom">{Math.round(zoom*100)}%</button><button type="button" onClick={zoomIn} disabled={zoom>=2.5} aria-label="Zoom in">＋</button><select disabled={contentLocked}><option>Georgia</option><option>Arial</option></select><select aria-label="Font size" disabled={contentLocked||!selectedTextObject} value={selectedFontSize} onChange={e=>setSelectedFontSize(Number(e.target.value))}>{Array.from({length:30},(_,index)=>index+1).map(size=><option key={size} value={size}>{size} pt</option>)}</select><input aria-label="Font color" type="color" disabled={contentLocked||!selectedTextObject} value={selectedTextColor} onChange={e=>setSelectedTextColor(e.target.value)} style={{width:28,height:28,padding:0,border:"1px solid #d7e3ee",borderRadius:6,cursor:selectedTextObject?"pointer":"not-allowed"}}/><button disabled={contentLocked}><b>B</b></button><button disabled={contentLocked}><i>I</i></button></div><span>{selected&&!contentLocked?"Use the blue Grab to move tab":""}</span></div>
         {/* Document actions live immediately above the PDF and stick to the
             top of this scroll viewport. They stay visible while the document
             moves underneath them instead of living at the bottom of screen. */}
