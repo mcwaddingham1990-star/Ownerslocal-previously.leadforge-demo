@@ -290,3 +290,30 @@
   .selfiesave-editor-root .sidebar.tools-drawer-open .tools-drawer-close {display:block;border:0;background:#eef2f6;border-radius:8px;width:34px;height:34px;font-size:20px;line-height:1;color:#1d2b3a}
 }
 @media print{.selfiesave-editor-root .tools-fab,.selfiesave-editor-root .tools-drawer-backdrop{display:none!important}}
+
+/* PAGE SCROLLING (overrides the inner-scroll-box layout above).
+   The editor scrolls the ordinary browser page instead of an inner box: on
+   real phones the inner box kept refusing finger scrolling (and stranded
+   pinch-zoomed "Desktop site" users). While the editor is open the app
+   underneath is hidden, so the editor is the whole page. */
+@media screen{
+  html.selfiesave-open #root {display:none!important}
+  html.selfiesave-open, html.selfiesave-open body {overflow:visible!important;height:auto!important;overscroll-behavior-y:none}
+  html.selfiesave-open .selfiesave-editor-root {
+    position:relative!important;inset:auto!important;
+    width:100%!important;max-width:100%!important;height:auto!important;max-height:none!important;
+    min-height:100dvh;overflow:visible!important;
+  }
+  html.selfiesave-open .selfiesave-editor-root .app-shell {height:auto!important;max-height:none!important;min-height:100dvh;overflow:visible!important;padding-bottom:0!important}
+  html.selfiesave-open .selfiesave-editor-root .topbar {position:sticky!important;top:0!important;z-index:30}
+  html.selfiesave-open .selfiesave-editor-root .workspace {height:auto!important;min-height:calc(100dvh - 72px)!important;overflow:visible!important}
+  html.selfiesave-open .selfiesave-editor-root .editor-wrap {height:auto!important;min-height:0!important;overflow:visible!important;overscroll-behavior:auto!important}
+  html.selfiesave-open .selfiesave-editor-root .selfiesave-action-dock {top:72px}
+}
+@media screen and (min-width:801px){
+  /* The left menu stays in view while the page scrolls, and scrolls itself if long. */
+  html.selfiesave-open .selfiesave-editor-root .workspace>.sidebar {
+    position:sticky!important;top:72px;align-self:start;
+    height:calc(100dvh - 72px)!important;overflow-y:auto!important;overscroll-behavior:contain!important;
+  }
+}
