@@ -568,3 +568,195 @@ export async function appendSignatureCertificate(
   }
   return doc.save();
 }
+
+/** One editor page as it was laid out on screen (CSS px). */
+export interface StampPage { widthPx: number; heightPx: number; imported: boolean }
+/** A text/image box as drawn on screen; padding and line height let the PDF wrap exactly where the screen did. */
+export interface StampObject {
+  kind: "text" | "image" | "link" | "video";
+  page: number; x: number; y: number; w: number; h: number;
+  value: string;
+  fontPx: number; lineHeight: number; padX: number; padY: number;
+  color?: string; backgroundColor?: string; bold?: boolean;
+}
+export interface StampClause { page: number; x: number; y: number; w: number; h: number; number: number; text: string }
+export interface StampField {
+  page: number; x: number; y: number; w: number; h: number;
+  kind: string; label: string; signed: boolean;
+  name?: string; signatureDataUrl?: string; stamp?: string;
+}
+
+/** "#1f3557", "rgb(1 2 3)", "rgb(1, 2, 3)" -> pdf-lib color. */
+export function parseCssColor(value?: string): RGB | null {
+  if (!value) return null;
+  const hex = hexToRgb(value);
+  if (hex) return hex;
+  const match = /rgba?\(\s*(\d+)[\s,]+(\d+)[\s,]+(\d+)/i.exec(value);
+  if (!match) return null;
+  return rgb(Number(match[1]) / 255, Number(match[2]) / 255, Number(match[3]) / 255);
+}
+
+/**
+ * The PDF Editor's real save: everything on screen is stamped onto the real
+ * pages exactly where it sits -- typed text, edits over an opened PDF's text,
+ * images, clauses, and signature/initials lines with the actual signatures.
+ * An opened PDF keeps its original pages (edits drawn on top of them); a
+ * blank document gets one PDF page per editor page that has anything on it,
+ * shaped like the page on screen so nothing is squeezed or cut off.
+ */
+export async function buildStampedPdf(opts: {
+  base?: Uint8Array | null;
+  pages: StampPage[];
+  objects: StampObject[];
+  clauses: StampClause[];
+  fields: StampField[];
+  header?: string;
+  footer?: string;
+  draftDate?: string;
+}): Promise<Uint8Array> {
+  const doc = opts.base ? await PDFDocument.load(opts.base, { ignoreEncryption: true }) : await PDFDocument.create();
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  const bold = await doc.embedFont(StandardFonts.HelveticaBold);
+  const italic = await doc.embedFont(StandardFonts.HelveticaOblique);
+  const baseCount = doc.getPageCount();
+
+  const used = new Set<number>();
+  opts.objects.forEach(o => { if (o.value?.trim()) used.add(o.page); });
+  opts.clauses.forEach(c => used.add(c.page));
+  opts.fields.forEach(f => used.add(f.page));
+  const lastPage = Math.max(baseCount, 1, ...used);
+
+  // PDF page + scale (points per screen px) for each editor page.
+  const pdfPages: Array<{ page: PDFPage; scale: number; height: number } | null> = [];
+  for (let i = 1; i <= lastPage; i++) {
+    const info = opts.pages[i - 1] || opts.pages[opts.pages.length - 1] || { widthPx: 816, heightPx: 1056, imported: false };
+    if (i <= baseCount) {
+      const page = doc.getPage(i - 1);
+      const { width, height } = page.getSize();
+      pdfPages.push({ page, scale: width / Math.max(1, info.widthPx), height });
+      continue;
+    }
+    // Blank pages in between with nothing on them are dropped (an opened
+    // PDF's own pages are always kept above).
+    if (!used.has(i) && !(i === 1 && baseCount === 0)) { pdfPages.push(null); continue; }
+    const scale = PAGE_W / Math.max(1, info.widthPx);
+    const height = Math.round(info.heightPx * scale);
+    const page = doc.addPage([PAGE_W, height]);
+    pdfPages.push({ page, scale, height });
+    // The editor's own header/footer bands on blank pages.
+    const s = scale;
+    if (opts.header?.trim()) page.drawText(opts.header.trim().slice(0, 120), { x: 55 * s, y: height - 40 * s, size: 15 * s, font: italic, color: SLATE });
+    if (opts.draftDate) {
+      const label = `Date document was drafted: ${opts.draftDate}`;
+      page.drawText(label, { x: Math.max(8, PAGE_W - 55 * s - font.widthOfTextAtSize(label, 9 * s)), y: height - 38 * s, size: 9 * s, font, color: SLATE });
+    }
+    if (opts.footer?.trim()) page.drawText(opts.footer.trim().slice(0, 160), { x: 55 * s, y: 22 * s, size: 9 * s, font, color: SLATE });
+    page.drawText(`Page ${i}`, { x: PAGE_W - 55 * s - bold.widthOfTextAtSize(`Page ${i}`, 9 * s), y: 22 * s, size: 9 * s, font: bold, color: NAVY });
+  }
+  const at = (n: number) => pdfPages[n - 1] || null;
+  // Screen box -> PDF box (PDF y runs bottom-up).
+  const box = (p: { page: PDFPage; scale: number; height: number }, b: { x: number; y: number; w: number; h: number }) => ({
+    x: b.x * p.scale, w: b.w * p.scale, h: b.h * p.scale, top: p.height - b.y * p.scale
+  });
+  const wrap = (text: string, f: PDFFont, size: number, width: number) =>
+    String(text).split(/\r?\n/).flatMap(line => {
+      const words = line.split(/(\s+)/).filter(Boolean);
+      if (!words.length) return [""];
+      const lines: string[] = [];
+      let current = "";
+      for (const word of words) {
+        const candidate = current + word;
+        if (current.trim() && f.widthOfTextAtSize(candidate.trimEnd(), size) > width && word.trim()) {
+          lines.push(current.trimEnd());
+          current = word;
+        } else current = candidate;
+      }
+      lines.push(current.trimEnd());
+      return lines;
+    });
+  // Standard fonts can only draw WinAnsi characters; anything else is swapped for "?" rather than failing the save.
+  const safe = (f: PDFFont, text: string) => {
+    let out = "";
+    for (const ch of text) {
+      if (ch === "\n" || ch === "\r" || ch === "\t") { out += ch === "\t" ? "    " : ch; continue; }
+      try { f.encodeText(ch); out += ch; } catch { out += ch === "“" || ch === "”" ? '"' : ch === "‘" || ch === "’" ? "'" : "?"; }
+    }
+    return out;
+  };
+  const drawLines = (page: PDFPage, text: string, f: PDFFont, size: number, x: number, top: number, width: number, lineHeight: number, color: RGB) => {
+    const lineH = size * lineHeight;
+    wrap(safe(f, text), f, size, width).forEach((line, i) => {
+      if (!line) return;
+      const baseline = top - i * lineH - (lineH - size) / 2 - size * 0.8;
+      if (baseline < 0) return;
+      page.drawText(line, { x, y: baseline, size, font: f, color });
+    });
+  };
+  const embedImage = async (dataUrl: string) => {
+    const bytes = base64ToBytes(dataUrl.split(",")[1] || "");
+    return dataUrl.startsWith("data:image/png") ? doc.embedPng(bytes) : doc.embedJpg(bytes);
+  };
+
+  for (const o of opts.objects) {
+    const p = at(o.page);
+    if (!p || !o.value) continue;
+    const b = box(p, o);
+    if (o.kind === "text") {
+      const background = parseCssColor(o.backgroundColor);
+      if (background) p.page.drawRectangle({ x: b.x, y: b.top - b.h, width: b.w, height: b.h, color: background });
+      if (!o.value.trim()) continue;
+      const size = Math.max(2, o.fontPx * p.scale);
+      drawLines(p.page, o.value, o.bold ? bold : font, size, b.x + o.padX * p.scale, b.top - o.padY * p.scale,
+        Math.max(4, b.w - 2 * o.padX * p.scale), o.lineHeight, parseCssColor(o.color) || NAVY);
+    } else if (o.kind === "image" && /^data:image\/(png|jpe?g)/.test(o.value)) {
+      try {
+        const image = await embedImage(o.value);
+        // object-fit: contain, like the screen.
+        const fit = Math.min(b.w / image.width, b.h / image.height);
+        const w = image.width * fit, h = image.height * fit;
+        p.page.drawImage(image, { x: b.x + (b.w - w) / 2, y: b.top - b.h + (b.h - h) / 2, width: w, height: h });
+      } catch { /* unreadable image: skip it, keep the save */ }
+    } else if ((o.kind === "link" || o.kind === "video") && /^https?:/.test(o.value)) {
+      drawLines(p.page, o.value, font, 12 * p.scale, b.x, b.top, b.w, 1.3, rgb(0.09, 0.4, 0.85));
+    }
+  }
+
+  for (const c of opts.clauses) {
+    const p = at(c.page);
+    if (!p || !c.text.trim()) continue;
+    const b = box(p, c);
+    const size = 13 * p.scale;
+    p.page.drawText(`${c.number}.`, { x: b.x + 10 * p.scale, y: b.top - 10 * p.scale - size, size, font: bold, color: NAVY });
+    drawLines(p.page, c.text, font, size, b.x + 38 * p.scale, b.top - 10 * p.scale, Math.max(4, b.w - 48 * p.scale), 1.6, NAVY);
+  }
+
+  for (const f of opts.fields) {
+    const p = at(f.page);
+    if (!p) continue;
+    const b = box(p, f);
+    const s = p.scale;
+    p.page.drawText(safe(font, f.label), { x: b.x + 4 * s, y: b.top - 12 * s, size: 8 * s, font, color: SLATE });
+    const lineY = b.top - b.h + 20 * s;
+    p.page.drawLine({ start: { x: b.x + 4 * s, y: lineY }, end: { x: b.x + b.w - 4 * s, y: lineY }, thickness: 0.8, color: NAVY });
+    if (f.signed) {
+      let drewImage = false;
+      if (f.signatureDataUrl && /^data:image\/(png|jpe?g)/.test(f.signatureDataUrl)) {
+        try {
+          const image = await embedImage(f.signatureDataUrl);
+          const maxH = Math.max(10, b.h - 40 * s), maxW = b.w - 12 * s;
+          const fit = Math.min(maxW / image.width, maxH / image.height);
+          p.page.drawImage(image, { x: b.x + 6 * s, y: lineY + 2, width: image.width * fit, height: image.height * fit });
+          drewImage = true;
+        } catch { /* fall back to the typed name */ }
+      }
+      if (!drewImage && f.name) {
+        const size = Math.min(22 * s, Math.max(8, (b.h - 40 * s) * 0.8));
+        p.page.drawText(safe(italic, f.name), { x: b.x + 8 * s, y: lineY + 4 * s, size, font: italic, color: NAVY });
+      }
+      const caption = [f.name, f.stamp].filter(Boolean).join(" · ");
+      if (caption) p.page.drawText(safe(font, caption), { x: b.x + 4 * s, y: lineY - 11 * s, size: 7.5 * s, font, color: SLATE });
+    }
+  }
+
+  return doc.save();
+}

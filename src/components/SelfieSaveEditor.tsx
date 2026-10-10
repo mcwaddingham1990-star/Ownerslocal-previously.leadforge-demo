@@ -6,7 +6,7 @@ import "./selfiesave-editor.css";
 // a stale/mismatched worker file drifting out of sync with the library.
 import pdfWorkerUrl from "pdfjs-dist/legacy/build/pdf.worker.min.mjs?url";
 import type { GeneratedPdfDraft } from "../types/generatedPdf";
-import { base64ToBytes, bytesToBase64, buildFreeformDocumentPdf, appendSignatureCertificate, mergePdfs, type BusinessProfile } from "../lib/pdfExport";
+import { base64ToBytes, bytesToBase64, buildStampedPdf, appendSignatureCertificate, type BusinessProfile } from "../lib/pdfExport";
 import { downscaleImageToBase64 } from "../lib/imageCompression";
 import { PriceBookModal } from "./PriceBookModal";
 import { buildRemoteSigningLink, shareRemoteSigningPackage } from "../lib/remoteSigningClient";
@@ -338,6 +338,16 @@ export default function SelfieSaveEditor({accountEmail,accountName,documentId,in
   const [toolsOpen,setToolsOpen]=useState(false);
   const addClause=()=>{if(contentLocked)return;const index=clauses.length,page=targetPage();setClauses(v=>[...v,""]);setPlacements(v=>({...v,[`clause:${index}`]:{page,x:90,y:menu?.y||180,w:320,h:54}}));setMenu(null)};
   const newId=()=>++nextIdRef.current;
+  // Keeps a new signature/initials line on its page: phone-width pages are
+  // much smaller than the desktop sizes these defaults were made for, and a
+  // line off the page edge can't be seen, signed or saved.
+  const fitToPage=(rect:{page:number;x:number;y:number;w:number;h:number}):Placement=>{
+    const paper=window.document.querySelectorAll<HTMLElement>(".document-pages .paper")[rect.page-1];
+    if(!paper)return rect;
+    const W=paper.offsetWidth,H=paper.offsetHeight;
+    const w=Math.min(rect.w,Math.max(120,W-16)),h=Math.min(rect.h,Math.max(60,H-16));
+    return {page:rect.page,w,h,x:Math.max(8,Math.min(rect.x,W-w-8)),y:Math.max(8,Math.min(rect.y,H-h-8))};
+  };
   const addField=(kind:FieldKind)=>{
     if(contentLocked)return;
     setPendingParty("1");
@@ -359,7 +369,7 @@ export default function SelfieSaveEditor({accountEmail,accountName,documentId,in
       const line=Math.max(0,...v.filter(f=>f.kind===kind&&f.party===party).map(f=>f.line))+1;
       return [...v,{id,party,line,kind,signed:false,committed:false}];
     });
-    setPlacements(v=>({...v,[key]:{page,x,y:Math.max(y,existingBottom+24),w:360,h:68}}));
+    setPlacements(v=>({...v,[key]:fitToPage({page,x,y:Math.max(y,existingBottom+24),w:360,h:68})}));
     setSelected(key);
     setPendingField(null);
     notify(`${kind==="signature"?"Signature":"Initials"} line added for Signer ${party}`);
@@ -375,7 +385,7 @@ export default function SelfieSaveEditor({accountEmail,accountName,documentId,in
     const label=signerHint?.customerName?`Signer — ${signerHint.customerName}`:"Signer";
     setFields([{id,party:1,line:1,kind:"signature",role:label,signed:false,committed:false}]);
     nextIdRef.current=id+1;
-    setPlacements(v=>({...v,[`field:${id}`]:{page,x:70,y:575,w:680,h:120}}));
+    setPlacements(v=>({...v,[`field:${id}`]:fitToPage({page,x:70,y:575,w:680,h:120})}));
   };
   const openCollectSignatures=()=>{
     if(contentLocked)return;
@@ -599,12 +609,16 @@ export default function SelfieSaveEditor({accountEmail,accountName,documentId,in
   const startFlowAt=(page:number,pageX:number,pageY:number)=>{
     if(contentLocked)return;
     const m=flowPageBox(page);
-    const lineHeight=Math.ceil(FLOW_DEFAULT_SIZE*FLOW_LINE_HEIGHT);
+    // Text starts at the same size relative to the page on every screen
+    // (16px on a desktop-width page, about 12pt in the saved PDF), so text
+    // typed on a phone doesn't come out giant in the PDF.
+    const fontSize=Math.max(9,Math.round(FLOW_DEFAULT_SIZE*Math.min(1,m.W/816)*10)/10);
+    const lineHeight=Math.ceil(fontSize*FLOW_LINE_HEIGHT);
     const x=Math.round(Math.max(m.side,Math.min(pageX,m.W-m.side-120)));
     const y=Math.round(Math.max(m.imported?4:70,Math.min(pageY-lineHeight/2,m.H-m.bottom-lineHeight)));
     const id=newId();
     flushSync(()=>{
-      setObjects(current=>[...current,{id,kind:"text",page,x,y,w:Math.max(120,m.W-m.side-x),h:lineHeight,value:"",scale:1,fontSize:FLOW_DEFAULT_SIZE,fontFamily:FLOW_FONT,color:"#1F3557",flowId:id,flowIndex:0}]);
+      setObjects(current=>[...current,{id,kind:"text",page,x,y,w:Math.max(120,m.W-m.side-x),h:lineHeight,value:"",scale:1,fontSize,fontFamily:FLOW_FONT,color:"#1F3557",flowId:id,flowIndex:0}]);
       setSelected(`object:${id}`);
       setMenu(null);
     });
@@ -722,7 +736,10 @@ export default function SelfieSaveEditor({accountEmail,accountName,documentId,in
       pdfjs.GlobalWorkerOptions.workerSrc=pdfWorkerUrl;
       const data=new Uint8Array(await file.arrayBuffer());
       if(!fromInitial)setSourcePdfBytes(data);
-      const doc=await pdfjs.getDocument({data}).promise;
+      // pdf.js takes ownership of (and empties) the bytes it's given, so it
+      // gets its own copy -- otherwise the original kept for saving is
+      // wiped, and every save silently lost the original document.
+      const doc=await pdfjs.getDocument({data:data.slice()}).promise;
       const pages:ImportedPdfPage[]=[];
       setSetup(false);
       notify(`Opening ${doc.numPages}-page PDF…`);
@@ -811,7 +828,10 @@ export default function SelfieSaveEditor({accountEmail,accountName,documentId,in
     const y=paper.offsetHeight*box.boxTop/100;
     const w=Math.max(12,paper.offsetWidth*box.boxWidth/100+4);
     const h=Math.max(12,paper.offsetHeight*box.boxHeight/100+4);
-    const fontSize=Math.max(1,Math.min(30,item.fontSize));
+    // The size the original text actually appears at on this page (the
+    // PDF's own point size is smaller than it renders here), so an edit
+    // matches the words around it on screen and in the saved PDF.
+    const fontSize=Math.max(1,Math.min(72,Math.round((paper.offsetHeight*item.height/100||item.fontSize)*10)/10));
     setObjects(current=>[...current,{id,kind:"text",page,x,y,w,h,value,scale:1,source:"pdf",fontSize,fontFamily:item.fontFamily,backgroundColor:item.backgroundColor||"rgb(255 255 255)",color:"#000000"}]);
     setSelected(`object:${id}`);
     window.getSelection()?.removeAllRanges();
@@ -984,27 +1004,48 @@ export default function SelfieSaveEditor({accountEmail,accountName,documentId,in
       ...extra
     });
   };
-  // Real PDF bytes for whatever's currently on screen. If a real source PDF
-  // is loaded (freshly generated by the app, or opened from a file), that
-  // real document is what gets exported -- any free-text boxes/clauses added
-  // on top are appended as a real trailing addendum page rather than
-  // guessed back onto the original's exact pixel coordinates, which is both
-  // more robust and just as real a PDF. With no source PDF (a blank
-  // from-scratch document) the whole thing is flowed straight to PDF.
-  async function currentPdfBytes():Promise<Uint8Array>{
-    const hasFreeformContent=header.trim()||footer.trim()||clauses.length>0||objects.some(o=>o.value?.trim()&&o.value!=="Paste image URL"&&o.value!=="Paste link URL"&&o.value!=="Paste video URL");
-    const freeformObjects=objects.map(o=>({kind:o.kind,page:o.page||1,x:o.x,y:o.y,w:o.w,h:o.h,value:o.value,fontSize:o.fontSize,fontFamily:o.fontFamily,color:o.color}));
-    if(sourcePdfBytes){
-      if(!hasFreeformContent)return sourcePdfBytes;
-      const addendum=await buildFreeformDocumentPdf({filename,header,footer,clauses,objects:freeformObjects},business);
-      return mergePdfs([sourcePdfBytes,addendum]);
-    }
-    return buildFreeformDocumentPdf({filename,header,footer,clauses,objects:freeformObjects},business);
+  // Real PDF bytes for exactly what's on screen: an opened PDF keeps its
+  // original pages with every edit, text box, clause and signature stamped
+  // on top where it sits; a blank document becomes one page per editor page
+  // that has content. (These used to be appended as separate "addendum"
+  // pages, which scattered edits one per page and left signatures off.)
+  async function currentPdfBytes(fieldList:SignField[]=fields):Promise<Uint8Array>{
+    const placeholders=new Set(["Paste image URL","Paste link URL","Paste video URL"]);
+    const stampObjects=objects.filter(o=>o.value&&!placeholders.has(o.value)&&(o.value.trim()||o.source==="pdf")).map(o=>{
+      // Same font size, padding and line height the box uses on screen
+      // (see selfiesave-editor.css), so lines break where they do on screen.
+      const kind=isFlow(o)?"flow":o.source==="pdf"?"pdf":"box";
+      return {
+        kind:o.kind,page:o.page||1,x:o.x,y:o.y,w:o.w,h:o.h,value:o.value,
+        fontPx:kind==="box"?16:(o.fontSize||16),
+        lineHeight:kind==="pdf"?1.05:FLOW_LINE_HEIGHT,
+        padX:kind==="flow"?0:kind==="pdf"?3:8,
+        padY:kind==="flow"?0:kind==="pdf"?3:7,
+        color:o.color||(kind==="pdf"?"#000000":"#17243b"),
+        backgroundColor:kind==="pdf"?o.backgroundColor:undefined,
+        bold:/bold/i.test(o.fontFamily||"")
+      };
+    });
+    const stampClauses=clauses.map((text,i)=>{const pos=placements[`clause:${i}`]||{page:1,x:90,y:180+i*90,w:560,h:70};return {page:pos.page||1,x:pos.x,y:pos.y,w:pos.w||560,h:pos.h||70,number:i+1,text}});
+    const stampFields=fieldList.map(f=>{const pos=placements[`field:${f.id}`]||{page:1,x:90,y:320,w:560,h:110};return {page:pos.page||1,x:pos.x,y:pos.y,w:pos.w||560,h:pos.h||110,kind:f.kind,label:`${f.kind==="initials"?"Initials":"Signature"} · ${f.role||`Signer ${f.party}`}`,signed:f.signed,name:f.name,signatureDataUrl:f.signatureImage,stamp:f.stamp}});
+    if(sourcePdfBytes&&!stampObjects.length&&!stampClauses.length&&!stampFields.length)return sourcePdfBytes;
+    // Each page's real on-screen size: everything was placed in those pixels.
+    const pages=Array.from(window.document.querySelectorAll<HTMLElement>(".document-pages .paper")).map(paper=>({widthPx:paper.offsetWidth||816,heightPx:paper.offsetHeight||1056,imported:paper.classList.contains("imported-pdf-page")}));
+    return buildStampedPdf({
+      base:sourcePdfBytes,
+      pages,
+      objects:stampObjects,
+      clauses:stampClauses,
+      fields:stampFields,
+      header:sourcePdfBytes?undefined:header,
+      footer:sourcePdfBytes?undefined:footer,
+      draftDate:!sourcePdfBytes&&features.draftingDate?draftDate:undefined
+    });
   }
   async function saveFocusedSignature(nextFields:SignField[]){
     setExporting(true);
     try{
-      let bytes=await currentPdfBytes();
+      let bytes=await currentPdfBytes(nextFields);
       bytes=await appendSignatureCertificate(bytes,nextFields.map(f=>({name:f.name||"",role:f.role||`Signer ${f.party}`,kind:f.kind,timestamp:f.stamp||"",centralTimestamp:f.centralStamp,signatureDataUrl:f.signatureImage,selfieDataUrl:f.image,coords:f.coords})),business);
       const pdfBase64=bytesToBase64(bytes);
       const docId=sessionDocumentId;
@@ -1027,7 +1068,7 @@ export default function SelfieSaveEditor({accountEmail,accountName,documentId,in
       let bytes=await currentPdfBytes();
       const signedFields=fields.filter(f=>f.signed);
       if(finalCertificate&&signedFields.length){
-        bytes=await appendSignatureCertificate(bytes,signedFields.map(f=>({name:f.name||"",role:f.role||`Signer ${f.party}`,kind:f.kind,timestamp:f.stamp||"",centralTimestamp:f.centralStamp,selfieDataUrl:f.image,coords:f.coords})),business);
+        bytes=await appendSignatureCertificate(bytes,signedFields.map(f=>({name:f.name||"",role:f.role||`Signer ${f.party}`,kind:f.kind,timestamp:f.stamp||"",centralTimestamp:f.centralStamp,signatureDataUrl:f.signatureImage,selfieDataUrl:f.image,coords:f.coords})),business);
       }
       const pdfBase64=bytesToBase64(bytes);
       const pdfName=(filename.trim()||"Untitled document").replace(/[\\/:*?\"<>|]+/g,"-");
